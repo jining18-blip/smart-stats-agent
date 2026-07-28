@@ -1182,8 +1182,8 @@ def dl_table(df, title, key, fname="table", image=None):
             hwpx_bytes = _make_docs(csv_text, title, "hwpx", opts_sig)
         c1.download_button("📄 한글(hwpx)" + (" (그래프 포함)" if image else ""), hwpx_bytes,
                            f"{fname}.hwpx", key=f"hwx_{key}", width="stretch")
-    except Exception:
-        c1.caption("한글 파일 생성 실패")
+    except Exception as _e:
+        c1.caption(f"한글 파일 생성 실패 ({type(_e).__name__})")
     if _HAS_DOCX:
         try:
             if image:
@@ -1193,8 +1193,8 @@ def dl_table(df, title, key, fname="table", image=None):
                 docx_bytes = _make_docs(csv_text, title, "docx", opts_sig)
             c2.download_button("📝 워드(docx)" + (" (그래프 포함)" if image else ""), docx_bytes,
                                f"{fname}.docx", key=f"dcx_{key}", width="stretch")
-        except Exception:
-            c2.caption("워드 파일 생성 실패")
+        except Exception as _e:
+            c2.caption(f"워드 파일 생성 실패 ({type(_e).__name__})")
     else:
         c2.caption("워드 저장: pip install python-docx 필요")
     c1.download_button("📊 엑셀(csv)", csv_text.encode("utf-8-sig"),
@@ -2605,7 +2605,8 @@ _PIN_BUTTON_EXACT = {
 # (price_*, ai_*, kamis_*, kosis_*, dl_* 는 이미 전역 목록에서 걸러진다)
 _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
                       "list_models_", "rm_", "p_", "rank_",
-                      "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl")
+                      "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl",
+                      "hwx_", "dcx_", "csv_")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
