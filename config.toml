@@ -1,0 +1,13 @@
+[server]
+maxUploadSize = 50          # 업로드 파일 크기 상한(MB)
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#4b7d3a"            # 농업 느낌의 초록
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f2"
+textColor = "#262730"
