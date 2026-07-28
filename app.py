@@ -442,7 +442,7 @@ def _install_error_helper():
         try:
             if type(ex).__name__ == "StreamlitValueAssignmentNotAllowedError":
                 import re as _re_k
-                _m = _re_k.search(r"`key` '([^']+)'", str(ex))
+                _m = _re_k.search(r"key[`'\s]{0,3}'?([^'`]+)'", str(ex))
                 if _m:
                     _deny = set(st.session_state.get("_pin_deny", set()))
                     _deny.add(_m.group(1))
@@ -2595,8 +2595,9 @@ _PIN_BUTTON_EXACT = {
     "econ_selftest", "econ_test_run", "ml_predict1", "ml_predict2", "ml_dlpred",
     "pbd_fill", "pbd_clear", "fixnum", "sc", "price_up",
 }
+# 버튼뿐 아니라 st.data_editor 도 session_state 로 값을 써 넣을 수 없다(rank_*).
 _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
-                      "list_models_", "rm_", "p_")
+                      "list_models_", "rm_", "p_", "rank_")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
