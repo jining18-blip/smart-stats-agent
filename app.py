@@ -2595,9 +2595,17 @@ _PIN_BUTTON_EXACT = {
     "econ_selftest", "econ_test_run", "ml_predict1", "ml_predict2", "ml_dlpred",
     "pbd_fill", "pbd_clear", "fixnum", "sc", "price_up",
 }
-# 버튼뿐 아니라 st.data_editor 도 session_state 로 값을 써 넣을 수 없다(rank_*).
+# 버튼뿐 아니라 st.data_editor 도 session_state 로 값을 써 넣을 수 없다.
+# 이 앱의 해당 위젯 전부:
+#   data_editor  → rank_*, pb_gain_*, pb_loss_*, price_editor
+#   button       → __btn_*, btn_*, aib_*, aiadd_*, aidel_*, errai_*, list_models_*,
+#                  p_*, pbd_*, ml_predict*, econ_selftest, econ_test_run,
+#                  ai_conn_test, kamis_apply, kosis_*
+#   download     → dl_*, ml_dlpred
+# (price_*, ai_*, kamis_*, kosis_*, dl_* 는 이미 전역 목록에서 걸러진다)
 _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
-                      "list_models_", "rm_", "p_", "rank_")
+                      "list_models_", "rm_", "p_", "rank_",
+                      "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
