@@ -28,6 +28,7 @@ from sklearn.svm import SVC, SVR
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score, r2_score
 try:
     import anthropic
@@ -523,6 +524,117 @@ def validate_repeated_measure_balance(data, subject_col, time_col):
     }
 
 
+def validate_factorial_balance(data, factor_a, factor_b, block_col=None):
+    """이원배치/요인배치 자료의 조합 누락과 중복을 점검한다.
+
+    block_col이 있으면 각 블록에 A×B의 모든 조합이 존재하는지 확인한다.
+    같은 블록·같은 A×B 조합이 2행 이상이면 독립 반복인지 단순 하위표본인지
+    구분할 수 없으므로 경고를 반환한다.
+    """
+    d = data[[c for c in (block_col, factor_a, factor_b) if c]].dropna().copy()
+    a_levels = list(pd.unique(d[factor_a]))
+    b_levels = list(pd.unique(d[factor_b]))
+    expected = {(a, b) for a in a_levels for b in b_levels}
+    missing = {}
+    duplicates = []
+    if block_col:
+        for blk, g in d.groupby(block_col, dropna=False):
+            got = set(zip(g[factor_a], g[factor_b]))
+            miss = expected - got
+            if miss:
+                missing[blk] = sorted(miss, key=lambda x: (str(x[0]), str(x[1])))
+            cnt = g.groupby([factor_a, factor_b], dropna=False).size()
+            for (a, b), n in cnt[cnt > 1].items():
+                duplicates.append((blk, a, b, int(n)))
+    else:
+        got = set(zip(d[factor_a], d[factor_b]))
+        miss = expected - got
+        if miss:
+            missing["전체"] = sorted(miss, key=lambda x: (str(x[0]), str(x[1])))
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "duplicates": duplicates,
+        "expected_cells": len(expected),
+        "a_levels": a_levels,
+        "b_levels": b_levels,
+    }
+
+
+def validate_split_plot_balance(data, rep_col, main_col, sub_col):
+    """고전적 균형 분할구법에 필요한 반복×주구×세구 구조를 엄격히 확인한다.
+
+    현재 앱의 F 검정은 균형 split-plot 오차항을 전제로 하므로, 조합 누락이나
+    한 subplot 조합의 중복 관측(하위표본)이 있으면 계산을 중단하는 것이 안전하다.
+    """
+    d = data[[rep_col, main_col, sub_col]].dropna().copy()
+    reps = list(pd.unique(d[rep_col]))
+    mains = list(pd.unique(d[main_col]))
+    subs = list(pd.unique(d[sub_col]))
+    expected_main = set(mains)
+    expected_sub = set(subs)
+    missing_main = {}
+    missing_sub = {}
+    duplicate_cells = []
+    for rep, g in d.groupby(rep_col, dropna=False):
+        got_main = set(g[main_col].unique())
+        if got_main != expected_main:
+            missing_main[rep] = sorted(expected_main - got_main, key=str)
+        for main in mains:
+            gm = g[g[main_col] == main]
+            got_sub = set(gm[sub_col].unique())
+            if got_sub != expected_sub:
+                missing_sub[(rep, main)] = sorted(expected_sub - got_sub, key=str)
+    cnt = d.groupby([rep_col, main_col, sub_col], dropna=False).size()
+    for (rep, main, sub), n in cnt[cnt > 1].items():
+        duplicate_cells.append((rep, main, sub, int(n)))
+    return {
+        "ok": (len(reps) >= 2 and len(mains) >= 2 and len(subs) >= 2
+               and not missing_main and not missing_sub and not duplicate_cells),
+        "missing_main": missing_main,
+        "missing_sub": missing_sub,
+        "duplicate_cells": duplicate_cells,
+        "n_rep": len(reps),
+        "n_main": len(mains),
+        "n_sub": len(subs),
+        "expected_n": len(reps) * len(mains) * len(subs),
+        "observed_n": len(d),
+    }
+
+
+def likert_scale_rules(scale_min, scale_max):
+    """리커트 척도 범위에 맞춘 기본 긍정/부정 기준을 반환한다.
+
+    5점 이상 척도는 상위 2개 범주를 긍정, 하위 2개 범주를 부정으로 두고
+    2~4점 척도는 최상/최하 범주만 사용한다. 화면에서 사용자가 기준을 바꿀 수 있다.
+    """
+    lo, hi = int(scale_min), int(scale_max)
+    if hi <= lo:
+        raise ValueError("척도 최대값은 최소값보다 커야 합니다.")
+    n_levels = hi - lo + 1
+    edge = 2 if n_levels >= 5 else 1
+    return {"negative_max": lo + edge - 1, "positive_min": hi - edge + 1}
+
+
+def validate_likert_frame(frame, columns, scale_min, scale_max):
+    """리커트 문항의 숫자·정수·척도 범위를 검증한다."""
+    problems = []
+    for c in columns:
+        raw = frame[c].dropna()
+        num = pd.to_numeric(raw, errors="coerce")
+        bad_num = int(num.isna().sum())
+        if bad_num:
+            problems.append(f"{c}: 숫자로 읽을 수 없는 응답 {bad_num}개")
+            continue
+        non_int = int((~np.isclose(num % 1, 0)).sum())
+        out = int(((num < scale_min) | (num > scale_max)).sum())
+        if non_int:
+            problems.append(f"{c}: 정수가 아닌 응답 {non_int}개")
+        if out:
+            problems.append(f"{c}: {scale_min}~{scale_max} 범위를 벗어난 응답 {out}개")
+    return problems
+
+
 def scale_observed_value_to_10a(value, source_area_a):
     """원자료가 source_area_a 기준일 때 10a 기준으로 환산."""
     area = float(source_area_a)
@@ -609,12 +721,15 @@ def calc_cv_lsd(model, data, group_col, value_col, alpha=0.05):
         grand = data[value_col].mean()
         cv = np.sqrt(mse) / grand * 100 if grand else np.nan
         counts = data.groupby(group_col)[value_col].count()
-        # 반복수가 다르면 조화평균 사용
+        balanced = bool(len(counts) and counts.nunique() == 1)
+        # 반복수가 다르면 단일 LSD는 정확히 동일하지 않으므로 조화평균 기반 근사값으로 표시한다.
         r = len(counts) / np.sum(1.0 / counts) if len(counts) else np.nan
         lsd = stats.t.ppf(1 - alpha/2, dfe) * np.sqrt(2 * mse / r) if r and r > 0 else np.nan
-        return {"CV": cv, "LSD": lsd, "MSE": mse, "dfe": dfe, "r": r}
+        return {"CV": cv, "LSD": lsd, "MSE": mse, "dfe": dfe, "r": r,
+                "LSD_is_approx": not balanced}
     except Exception:
-        return {"CV": np.nan, "LSD": np.nan, "MSE": np.nan, "dfe": np.nan, "r": np.nan}
+        return {"CV": np.nan, "LSD": np.nan, "MSE": np.nan, "dfe": np.nan, "r": np.nan,
+                "LSD_is_approx": False}
 
 def cv_grade(cv):
     """포장시험 CV% 판정"""
@@ -660,12 +775,29 @@ def fig_to_png(fig, show=True):
     return data
 
 def cronbach_alpha(df_items):
-    k = df_items.shape[1]
-    if k < 2: return np.nan
-    item_var = df_items.var(axis=0, ddof=1).sum()
-    total_var = df_items.sum(axis=1).var(ddof=1)
-    if total_var == 0: return np.nan
-    return (k / (k - 1)) * (1 - item_var / total_var)
+    """Cronbach α. 문항 2개 미만·완전응답자 2명 미만·총점 분산 0이면 계산 불가."""
+    try:
+        x = df_items.apply(pd.to_numeric, errors="coerce").dropna()
+    except Exception:
+        return np.nan
+    k = x.shape[1]
+    if k < 2 or len(x) < 2:
+        return np.nan
+    item_var = x.var(axis=0, ddof=1).sum()
+    total_var = x.sum(axis=1).var(ddof=1)
+    if not np.isfinite(item_var) or not np.isfinite(total_var) or total_var <= 0:
+        return np.nan
+    return float((k / (k - 1)) * (1 - item_var / total_var))
+
+
+def cronbach_level(alpha):
+    """Cronbach α 표시용 등급. 계산 불가를 '낮음'으로 오표시하지 않는다."""
+    if alpha is None or not np.isfinite(alpha):
+        return "계산 불가"
+    if alpha >= .9: return "매우 높음"
+    if alpha >= .8: return "높음"
+    if alpha >= .7: return "양호"
+    return "낮음"
 
 # ---------------------------------------------------------------- hwpx 스타일
 _HH = "http://www.hancom.co.kr/hwpml/2011/head"
@@ -789,7 +921,10 @@ def _cells_of(s):
 
 def _col_widths(tdf, total, min_cells=5, max_cells=46):
     """열마다 들어가는 글자 길이에 비례해 폭을 나눈다.
-    (모든 열을 똑같이 나누면 긴 글이 든 열만 여러 줄로 접혀 표가 지저분해진다)"""
+
+    열 수가 많을 때도 최소폭의 합이 본문폭을 넘지 않도록 바닥폭을 동적으로 줄인다.
+    이전 방식은 17열 이상에서 각 열에 6%를 강제로 배정해 마지막 열 폭이 음수가 될 수 있었다.
+    """
     n = tdf.shape[1]
     if n <= 0:
         return []
@@ -798,9 +933,24 @@ def _col_widths(tdf, total, min_cells=5, max_cells=46):
         vals = [tdf.columns[c]] + list(tdf.iloc[:, c])
         longest = max((_cells_of(v) for v in vals), default=min_cells)
         need.append(min(max(longest, min_cells), max_cells))
-    s = float(sum(need)) or 1.0
-    out = [max(int(total * w / s), int(total * 0.06)) for w in need]
-    out[-1] = total - sum(out[:-1])          # 반올림 오차는 마지막 열이 흡수
+    weight_sum = float(sum(need)) or 1.0
+    # 적은 열에서는 기존 6% 수준을 유지하되, 많은 열에서는 전체폭의 절반까지만
+    # 최소폭으로 선점하도록 제한한다. 따라서 마지막 열이 0/음수가 되지 않는다.
+    floor_w = min(int(total * 0.06), max(int(total / max(2 * n, 1)), 1))
+    remaining = max(int(total) - floor_w * n, 0)
+    out = [floor_w + int(remaining * w / weight_sum) for w in need]
+    # 정수 나눗셈 잔여폭을 뒤에서부터 1씩 분배한다.
+    diff = int(total) - sum(out)
+    i = n - 1
+    while diff > 0:
+        out[i] += 1
+        diff -= 1
+        i = (i - 1) % n
+    # 방어적 안전장치: 폭이 1 미만인 열은 만들지 않는다.
+    if any(w <= 0 for w in out):
+        base = max(int(total // n), 1)
+        out = [base] * n
+        out[-1] = max(int(total) - sum(out[:-1]), 1)
     return out
 
 
@@ -1164,6 +1314,253 @@ def _make_docs(csv_text, title, fmt, opts_sig):
     _df = pd.read_csv(io.StringIO(csv_text), dtype=str).fillna("")
     return dataframe_to_hwpx(_df, title) if fmt == "hwpx" else dataframe_to_docx(_df, title)
 
+_XL_NOT_VALUE = ("표준편차", "표준오차", "표준 편차", "표준 오차", "sd", "se", "std",
+                 "p-value", "p값", "pvalue", "유의", "cv", "lsd", "df", "자유도",
+                 "f값", "t값", "n수", "반복수", "순위", "rank", "개수")
+
+
+def _xl_is_value_col(name):
+    """차트에 그릴 '값' 열인지 판단. 표준편차·p값·n 같은 보조 열은 제외한다."""
+    t = str(name).strip().lower()
+    if t in ("n", "N".lower()):
+        return False
+    return not any(k in t for k in _XL_NOT_VALUE)
+
+
+def _xl_split(v):
+    """'345.500^a' 또는 '345.500ᵃ' → (345.5, 'a'). 숫자로 볼 수 없으면 (None, None).
+
+    엑셀 차트는 **숫자 셀**만 그릴 수 있다. 이 앱의 표는 유의성 문자를 값에 붙여
+    문자열로 만들어 두기 때문에, 그대로 내보내면 그래프가 그려지지 않는다.
+    """
+    import re as _re
+    if isinstance(v, bool):
+        return (None, None)
+    if isinstance(v, (int, float)):
+        return (float(v), "") if pd.notna(v) else (None, None)
+    t = str(v).strip()
+    if not t or t.lower() in ("nan", "none", "-", "―"):
+        return (None, None)
+    _SC = "ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿ"
+    letters = ""
+    while t and t[-1] in _SC:                     # 유니코드 위첨자를 보통 글자로
+        letters = "abcdefghijklmn"[_SC.index(t[-1])] + letters
+        t = t[:-1]
+    m = _re.match(r"^\s*(-?[\d,]+(?:\.\d+)?)\s*\^?\s*([a-zA-Z]{1,3}\**|\*+)?\s*$", t)
+    if not m:
+        return (None, None)
+    return float(m.group(1).replace(",", "")), (m.group(2) or "") + letters
+
+
+def make_xlsx(df, title, chart=True):
+    """표 + **엑셀에서 직접 편집할 수 있는 진짜 그래프**가 든 xlsx 를 만든다.
+
+    화면의 그래프는 그림(PNG)이라 색·글꼴을 바꿀 수 없다. 여기서 만드는 것은
+    엑셀 기본 차트 개체라서, 받는 사람이 막대 색·글꼴·축 범위·차트 종류까지
+    평소 쓰던 대로 자유롭게 고칠 수 있다.
+    """
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart.error_bar import ErrorBars
+    from openpyxl.chart.data_source import NumDataSource, NumRef
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    # ① 값과 유의성 문자를 분리해 숫자 셀로 만든다.
+    # 문자열 열은 '비어 있지 않은 값이 전부 숫자로 해석될 때'만 숫자열로 바꾼다.
+    # 일부만 숫자인 열을 억지로 변환하면 나머지 문자값이 빈칸으로 사라지는 자료손실이 생긴다.
+    cols, sig = [], {}
+    for c in df.columns:
+        raw_vals = list(df[c])
+        pairs = [_xl_split(v) for v in raw_vals]
+        nonempty = [i for i, v in enumerate(raw_vals)
+                    if not pd.isna(v) and str(v).strip().lower() not in ("", "nan", "none", "-", "―")]
+        all_parseable = bool(nonempty) and all(pairs[i][0] is not None for i in nonempty)
+        is_native_num = pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
+        is_num_col = is_native_num or all_parseable
+        if is_num_col:
+            vals = [p[0] if p[0] is not None else None for p in pairs]
+            cols.append((c, vals, True))
+            if any(p[1] for p in pairs):
+                sig[c] = [p[1] or "" for p in pairs]
+        else:
+            cols.append((c, [("" if pd.isna(v) else str(v)) for v in raw_vals], False))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "데이터"
+    FONT = "맑은 고딕"
+    head_fill = PatternFill("solid", fgColor="D9E2D4")
+
+    ws["A1"] = title
+    ws["A1"].font = Font(name=FONT, size=13, bold=True)
+    ws["A2"] = "숫자를 고치면 그래프가 바로 따라 바뀝니다. 그래프를 눌러 색·글꼴·축을 자유롭게 바꾸세요."
+    ws["A2"].font = Font(name=FONT, size=9, italic=True, color="666666")
+
+    HDR = 4                                        # 머리행 위치
+    out_cols = []
+    for name, vals, is_num in cols:
+        out_cols.append((name, vals, is_num))
+        if name in sig:                            # 유의성 문자는 별도 열로 뺀다
+            out_cols.append((f"{name} 유의성", sig[name], False))
+
+    for j, (name, vals, is_num) in enumerate(out_cols, start=1):
+        h = ws.cell(row=HDR, column=j, value=str(name))
+        h.font = Font(name=FONT, bold=True)
+        h.fill = head_fill
+        h.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for i, v in enumerate(vals, start=HDR + 1):
+            cell = ws.cell(row=i, column=j, value=v)
+            cell.font = Font(name=FONT)
+            cell.alignment = Alignment(horizontal="center" if not is_num else "right")
+            if is_num and v is not None and abs(v) < 1000:
+                cell.number_format = "0.00"
+        w = max([len(str(name))] + [len(str(v)) for v in vals]) * 1.9 + 4
+        ws.column_dimensions[get_column_letter(j)].width = min(max(w, 10), 34)
+
+    nrow = len(df)
+    if not chart or nrow == 0:
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    # ② 범주축은 원본 표의 첫 번째 열을 우선 사용한다.
+    # 처리구가 1·2·3처럼 숫자 코드여도 유의성 문자 열을 X축으로 잘못 잡지 않게 한다.
+    lab_idx = 1 if out_cols else None
+    val_idx = [j for j, (nm, _, isn) in enumerate(out_cols, 1)
+               if j != lab_idx and isn and _xl_is_value_col(nm)]
+    err_idx = next((j for j, (nm, _, isn) in enumerate(out_cols, 1)
+                    if isn and any(k in str(nm) for k in ("표준편차", "표준오차", "SD", "SE"))), None)
+    if lab_idx is None or not val_idx:
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+    val_idx = val_idx[:3]                          # 너무 많으면 앞의 3개만
+
+    ch = BarChart()
+    ch.type = "col"
+    ch.style = 2
+    ch.title = title
+    ch.y_axis.title = str(out_cols[val_idx[0] - 1][0])
+    ch.x_axis.title = str(out_cols[lab_idx - 1][0])
+    ch.gapWidth = 60
+    ch.height, ch.width = 9.5, 17
+
+    cats = Reference(ws, min_col=lab_idx, min_row=HDR + 1, max_row=HDR + nrow)
+    for j in val_idx:
+        data = Reference(ws, min_col=j, min_row=HDR, max_row=HDR + nrow)
+        ch.add_data(data, titles_from_data=True)
+    ch.set_categories(cats)
+
+    # ③ 값 열이 하나뿐일 때만 오차막대를 붙인다(여러 개면 어느 오차인지 모호해진다)
+    if err_idx and len(val_idx) == 1:
+        try:
+            ref = NumRef(f="'데이터'!${}${}:${}${}".format(
+                get_column_letter(err_idx), HDR + 1, get_column_letter(err_idx), HDR + nrow))
+            ch.series[0].errBars = ErrorBars(
+                errDir="y", errBarType="both", errValType="cust",
+                plus=NumDataSource(numRef=ref), minus=NumDataSource(numRef=ref))
+        except Exception:
+            pass                                   # 오차막대는 있으면 좋은 것 — 실패해도 표·차트는 남긴다
+
+    ws.add_chart(ch, f"{get_column_letter(len(out_cols) + 2)}{HDR}")
+
+    note = HDR + nrow + 2
+    ws.cell(row=note, column=1, value="※ 유의성 문자(a, b, c)는 옆 열에 따로 담았습니다. "
+                                      "그래프에 넣으려면 막대를 누르고 [데이터 레이블 추가] 후 "
+                                      "[셀 값]으로 해당 열을 지정하세요.").font = \
+        Font(name=FONT, size=9, color="666666")
+    if err_idx and len(val_idx) == 1:
+        ws.cell(row=note + 1, column=1,
+                value=f"※ 오차막대는 '{out_cols[err_idx - 1][0]}' 열을 사용했습니다.").font = \
+            Font(name=FONT, size=9, color="666666")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _rewrite_chart_sheet_refs(chart, new_sheet, old_sheet="데이터"):
+    """openpyxl 차트의 셀 참조 시트명을 안전하게 바꾼다."""
+    old_tokens = (f"'{old_sheet}'", old_sheet)
+    new_token = f"'{new_sheet}'"
+    for ser in getattr(chart, "series", []):
+        refs = [getattr(ser, "val", None), getattr(ser, "cat", None),
+                getattr(ser, "tx", None), getattr(ser, "errBars", None)]
+        for ref in refs:
+            if ref is None:
+                continue
+            for sub in ("numRef", "strRef"):
+                r = getattr(ref, sub, None)
+                if r is not None and getattr(r, "f", None):
+                    f = r.f
+                    for old in old_tokens:
+                        f = f.replace(old + "!", new_token + "!")
+                    r.f = f
+            for side in ("plus", "minus"):
+                nd = getattr(ref, side, None)
+                r = getattr(nd, "numRef", None) if nd is not None else None
+                if r is not None and getattr(r, "f", None):
+                    f = r.f
+                    for old in old_tokens:
+                        f = f.replace(old + "!", new_token + "!")
+                    r.f = f
+    return chart
+
+
+def make_xlsx_multi(blocks, doc_title="분석 결과"):
+    """여러 분석 결과를 **항목마다 시트 하나씩** 담은 엑셀 통합문서로 만든다.
+
+    원클릭 보고서는 조사항목이 8개씩 나오므로, 한 시트에 몰아넣는 대신
+    항목별로 시트를 나누고 각 시트에 편집 가능한 차트를 하나씩 넣는다.
+    """
+    from openpyxl import load_workbook
+    used, sheets = set(), []
+    for b in blocks:
+        tb = b.get("table")
+        if tb is None or not len(tb):
+            continue
+        # 시트 이름은 31자 제한 + : \ / ? * [ ] 사용 불가
+        nm = str(b.get("caption") or "결과")
+        for ch in ':\\/?*[]':
+            nm = nm.replace(ch, " ")
+        nm = (nm.strip() or "결과")[:28]
+        base, i = nm, 2
+        while nm in used:
+            nm = f"{base[:26]}_{i}"; i += 1
+        used.add(nm)
+        sheets.append((nm, tb, str(b.get("caption") or doc_title)))
+    if not sheets:
+        return None
+    # 시트별로 만든 뒤 하나로 합친다(make_xlsx 한 벌만 유지해 동작이 어긋나지 않게)
+    first = io.BytesIO(make_xlsx(sheets[0][1], sheets[0][2]))
+    wb = load_workbook(first)
+    _first_ws = wb.active
+    _first_name = sheets[0][0]
+    _first_ws.title = _first_name
+    # 첫 번째 시트도 이름을 바꾼 뒤 차트 수식의 '데이터' 참조를 함께 바꿔야 한다.
+    for _ch in getattr(_first_ws, "_charts", []):
+        _rewrite_chart_sheet_refs(_ch, _first_name)
+    for nm, tb, cap in sheets[1:]:
+        src = load_workbook(io.BytesIO(make_xlsx(tb, cap)))
+        ws_src = src.active
+        ws = wb.create_sheet(nm)
+        for row in ws_src.iter_rows():
+            for c in row:
+                if c.value is None:
+                    continue
+                nc = ws.cell(row=c.row, column=c.column, value=c.value)
+                nc.font = c.font.copy(); nc.fill = c.fill.copy()
+                nc.alignment = c.alignment.copy()
+                nc.number_format = c.number_format
+        for k, v in ws_src.column_dimensions.items():
+            ws.column_dimensions[k].width = v.width
+        for ch in getattr(ws_src, "_charts", []):
+            # 차트가 새 시트를 가리키도록 값·범주·오차막대 참조를 모두 치환한다.
+            try:
+                _rewrite_chart_sheet_refs(ch, nm)
+                ws.add_chart(ch, ch.anchor)
+            except Exception:
+                pass                      # 차트는 있으면 좋은 것 — 실패해도 표는 남는다
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
 def dl_table(df, title, key, fname="table", image=None):
     """표(+선택적으로 그래프) 내려받기 — 체크했을 때만 파일을 만들어 화면이 빨라집니다.
     image(PNG bytes)를 넘기면 한글/워드 파일에 표 아래 그래프도 함께 들어갑니다."""
@@ -1197,7 +1594,14 @@ def dl_table(df, title, key, fname="table", image=None):
             c2.caption(f"워드 파일 생성 실패 ({type(_e).__name__})")
     else:
         c2.caption("워드 저장: pip install python-docx 필요")
-    c1.download_button("📊 엑셀(csv)", csv_text.encode("utf-8-sig"),
+    try:
+        c2.download_button("📈 엑셀(xlsx) — 그래프 편집 가능", make_xlsx(df, title),
+                           f"{fname}.xlsx", key=f"xls_{key}", width="stretch",
+                           help="엑셀 기본 차트가 함께 들어갑니다. 막대 색·글꼴·축 범위·차트 종류를 "
+                                "엑셀에서 평소 쓰던 대로 바꿀 수 있습니다.")
+    except Exception as _e:
+        c2.caption(f"엑셀 파일 생성 실패 ({type(_e).__name__})")
+    c1.download_button("📊 CSV (표만)", csv_text.encode("utf-8-sig"),
                        f"{fname}.csv", key=f"csv_{key}", width="stretch")
 
 def report_capture(slot, heading, text=None, table=None, image=None, blocks=None):
@@ -2591,9 +2995,10 @@ _PIN_GLOBAL_PREFIX = ("hwp_", "sup_", "fig_", "kamis_", "kosis_", "price_",
 #   여기 빠뜨리면 "Values for the widget with key '...' cannot be set using
 #   st.session_state" 오류로 화면 전체가 멈추므로, 아래 목록 + 자동 학습(_pin_deny)으로
 #   이중으로 막는다.
+# st.file_uploader 도 session_state 로 값을 되돌릴 수 없다(ml_pf).
 _PIN_BUTTON_EXACT = {
     "econ_selftest", "econ_test_run", "ml_predict1", "ml_predict2", "ml_dlpred",
-    "pbd_fill", "pbd_clear", "fixnum", "sc", "price_up",
+    "pbd_fill", "pbd_clear", "fixnum", "sc", "price_up", "ml_pf",
 }
 # 버튼뿐 아니라 st.data_editor 도 session_state 로 값을 써 넣을 수 없다.
 # 이 앱의 해당 위젯 전부:
@@ -2606,7 +3011,7 @@ _PIN_BUTTON_EXACT = {
 _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
                       "list_models_", "rm_", "p_", "rank_",
                       "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl",
-                      "hwx_", "dcx_", "csv_")
+                      "hwx_", "dcx_", "csv_", "xls_", "gai_")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
@@ -2868,16 +3273,108 @@ with st.sidebar.expander("📈 분석·그래프 설정"):
     c1, c2 = st.columns(2)
     c1.number_input("그래프 가로", 3.0, 16.0, 6.0, 0.5, key="fig_w")
     c2.number_input("그래프 세로", 2.0, 12.0, 4.0, 0.5, key="fig_h")
-    st.checkbox("격자선 표시", value=False, key="fig_grid")
+    st.checkbox("✨ 깔끔한 스타일 (그라데이션·값 표시)", value=True, key="fig_style",
+                help="막대에 옅은→진한 색을 입히고 값을 위에 적습니다. "
+                     "옅은 가로 격자선만 남기고 위·오른쪽 테두리를 없앱니다.")
+    st.checkbox("막대 위에 값 표시", value=True, key="fig_vlabel")
+    st.checkbox("격자선 표시", value=False, key="fig_grid",
+                help="'깔끔한 스타일'을 켜면 가로 격자선은 자동으로 들어갑니다.")
     st.checkbox("그래프 제목 표시", value=True, key="fig_title")
 
 _PALETTE = {"파랑": "#6c8ebf", "초록": "#82b366", "주황": "#d79b00", "보라": "#9673a6", "회색": "#808080"}
+
+# 옅은 색 → 진한 색 그라데이션. 값이 큰 막대일수록 진하게 칠해 한눈에 들어오게 한다.
+_RAMP = {
+    "파랑": ["#dce9f5", "#c2d9ee", "#a3c4e2", "#82acd3", "#6291c2", "#4576ab", "#2d5a8e", "#1f4569"],
+    "초록": ["#e2eedd", "#cbe2c2", "#b0d2a3", "#93c083", "#76ad65", "#5c934c", "#457539", "#33582b"],
+    "주황": ["#fdeadb", "#fbd7b9", "#f7bd8d", "#f2a061", "#e5833c", "#cd6a25", "#a95318", "#833f11"],
+    "보라": ["#eae3f1", "#d9cce6", "#c3b0d7", "#ac93c7", "#9478b3", "#7a5e9a", "#5f487a", "#46345a"],
+    "회색": ["#ececec", "#dadada", "#c2c2c2", "#a8a8a8", "#8d8d8d", "#727272", "#585858", "#3f3f3f"],
+}
+
+
+def pretty_on():
+    return bool(st.session_state.get("fig_style", True))
+
+
+def bar_colors(values=None, n=None):
+    """막대 색을 옅은→진한 순으로 만든다.
+
+    values 를 주면 **값이 큰 막대일수록 진하게** 칠한다(가장 좋은 처리가 눈에 띈다).
+    '깔끔한 스타일'을 끄면 예전처럼 한 가지 색으로 돌아간다.
+    """
+    ramp = _RAMP.get(st.session_state.get("plot_color", "파랑"), _RAMP["파랑"])
+    k = int(n if n is not None else (len(values) if values is not None else 1))
+    if not pretty_on() or k <= 0:
+        return [pcolor()] * max(k, 1)
+    if k == 1:
+        return [ramp[len(ramp) // 2 + 1]]
+    lo, hi = 1, len(ramp) - 1                      # 너무 옅은 색은 빼서 인쇄해도 보이게
+    picked = [ramp[round(lo + (hi - lo) * i / (k - 1))] for i in range(k)]
+    if values is not None:
+        try:
+            import numpy as _np
+            order = _np.argsort(_np.argsort(_np.asarray(values, dtype=float)))
+            return [picked[int(r)] for r in order]   # 값이 클수록 진한 색
+        except Exception:
+            pass
+    return picked
+
+
+def bar_value_labels(ax, xs, values, errs=None, dec=None, offset=0.03):
+    """막대 위에 값을 적는다(오차막대가 있으면 그 위로 올린다)."""
+    if not (pretty_on() and st.session_state.get("fig_vlabel", True)):
+        return 0.0
+    import numpy as _np
+    vals = _np.asarray(values, dtype=float)
+    e = _np.zeros_like(vals) if errs is None else _np.nan_to_num(_np.asarray(errs, dtype=float))
+    span = float(_np.nanmax(_np.abs(vals))) or 1.0
+    d = rnd() if dec is None else dec
+    finite = vals[_np.isfinite(vals)]
+    if len(finite) and _np.allclose(finite, _np.round(finite)):
+        d = 0                       # 도수(개수)처럼 정수뿐이면 '5.0' 대신 '5'
+    elif span >= 100:
+        d = min(d, 1)               # 큰 값은 소수점을 줄여야 글자가 겹치지 않는다
+    for xi, v, ei in zip(xs, vals, e):
+        if not _np.isfinite(v):
+            continue
+        ax.text(xi, v + ei + span * offset, f"{v:,.{d}f}", ha="center", va="bottom",
+                fontsize=9, fontweight="bold", color="#33383d")
+    return span * offset * 2.2                      # 글자가 차지한 높이(윗여백 확보용)
+
+
 def pcolor(): return _PALETTE.get(st.session_state.get("plot_color", "파랑"), "#6c8ebf")
 def rnd(): return int(st.session_state.get("round_n", 3))
 def figsize(w=None, h=None):
     return (w or float(st.session_state.get("fig_w", 6.0)),
             h or float(st.session_state.get("fig_h", 4.0)))
-def deco(ax, title=""):
+def deco(ax, title="", ylabel_top=True):
+    """그래프 공통 꾸미기. '깔끔한 스타일'을 켜면 참고 이미지처럼 정돈한다.
+
+    - 옅은 **가로** 격자선만 남기고 막대 뒤로 보낸다
+    - 위·오른쪽 테두리를 없애고 남은 선은 옅게
+    - y축 이름을 왼쪽 위에 가로로 눕혀 읽기 쉽게
+    """
+    if pretty_on():
+        ax.set_axisbelow(True)
+        ax.grid(axis="y", color="#d9dde1", linewidth=.8, alpha=.9)
+        ax.grid(axis="x", visible=False)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color("#b9bfc5")
+            ax.spines[side].set_linewidth(.9)
+        ax.tick_params(colors="#4a5158", length=0, labelsize=9.5)
+        _has_ylab = bool(ylabel_top and ax.get_ylabel())
+        if _has_ylab:
+            ax.set_ylabel(ax.get_ylabel(), rotation=0, ha="left", va="bottom",
+                          fontsize=9.5, color="#4a5158")
+            ax.yaxis.set_label_coords(-0.02, 1.02)
+        if title and st.session_state.get("fig_title", True):
+            # y축 이름을 왼쪽 위에 눕혀 두면 제목과 겹칠 수 있다 → 제목을 한 줄 더 올린다.
+            ax.set_title(title, fontsize=11.5, fontweight="bold",
+                         color="#23282d", pad=26 if _has_ylab else 12)
+        return ax
     if st.session_state.get("fig_grid", False): ax.grid(alpha=.3, linestyle="--")
     if title and st.session_state.get("fig_title", True): ax.set_title(title)
     return ax
@@ -3661,14 +4158,21 @@ def run_autopilot_engine(df, ph="Tukey HSD", err_type=None, max_items=8,
                 err = (means["std"] / np.sqrt(means["count"])) if use_se else means["std"]
                 fig, ax = plt.subplots(figsize=figsize())
                 mm, ee = means.loc[order], err.loc[order]
-                ax.bar([str(o) for o in order], mm["mean"], yerr=ee,
-                       capsize=5, color=pcolor())
+                _xs = [str(o) for o in order]
+                ax.bar(_xs, mm["mean"], yerr=ee, capsize=4,
+                       color=bar_colors(values=mm["mean"].tolist()),
+                       edgecolor="none", width=.62 if pretty_on() else .8,
+                       error_kw={"ecolor": "#5a6067", "elinewidth": 1.1})
                 top = float(mm["mean"].max())
+                _pad = bar_value_labels(ax, range(len(_xs)), mm["mean"].tolist(),
+                                        ee.tolist(), dec=rnd())
                 for bi, g in enumerate(order):
                     if letters.get(g):
-                        ax.text(bi, mm.loc[g, "mean"] + ee.loc[g] + top * 0.02,
-                                letters[g], ha="center", fontweight="bold")
+                        ax.text(bi, mm.loc[g, "mean"] + ee.loc[g] + _pad + top * 0.02,
+                                letters[g], ha="center", fontweight="bold",
+                                color="#23282d")
                 ax.set_ylabel(yv)
+                ax.margins(y=.16 if pretty_on() else .05)
                 deco(ax, f"{trt}별 {yv} (평균±{'표준오차' if use_se else '표준편차'})")
                 plt.tight_layout()
                 png = fig_to_png(fig, show=False)
@@ -3986,12 +4490,228 @@ if not _HAS_DOCX:
 st.sidebar.markdown("---")
 st.sidebar.caption("스마트 통계 에이전트 얏호(*/ω＼*)")
 
+# ================================================================ 떠 있는 AI 도우미
+_ATT_LIMIT = 12000          # 첨부 전체에서 AI 에게 넘길 글자 수 상한
+
+
+def _read_attachment(f, budget=6000):
+    """올린 파일을 AI 가 읽을 수 있는 **글자**로 바꾼다.
+
+    ai_call() 은 글자만 주고받으므로(제공사가 여러 곳이라 그림 전송 방식이 제각각),
+    표·문서는 내용을 뽑아 넘기고 그림은 넘길 수 없음을 분명히 알린다.
+    """
+    name = getattr(f, "name", "첨부파일")
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    try:
+        raw = f.getvalue()
+    except Exception:
+        raw = f.read()
+    head = f"\n\n===== 첨부: {name} ({len(raw):,} bytes) =====\n"
+
+    try:
+        if ext in (".csv", ".tsv", ".txt", ".md", ".json"):
+            if ext in (".csv", ".tsv"):
+                d = pd.read_csv(io.BytesIO(raw), sep=None, engine="python")
+                return head + _df_digest(d, budget)
+            for enc in ("utf-8", "cp949", "utf-8-sig"):
+                try:
+                    return head + raw.decode(enc)[:budget]
+                except UnicodeDecodeError:
+                    continue
+            return head + raw.decode("utf-8", "replace")[:budget]
+
+        if ext in (".xlsx", ".xls", ".xlsm"):
+            xls = pd.ExcelFile(io.BytesIO(raw))
+            per = max(600, budget // max(1, len(xls.sheet_names)))
+            out = [head + f"(시트 {len(xls.sheet_names)}개: {', '.join(xls.sheet_names)})"]
+            for sh in xls.sheet_names:
+                out.append(f"\n--- 시트: {sh} ---\n"
+                           + _df_digest(pd.read_excel(xls, sh), per))
+            return "".join(out)
+
+        if ext == ".pdf":
+            from pypdf import PdfReader
+            rd = PdfReader(io.BytesIO(raw))
+            txt = []
+            for pg in rd.pages[:30]:
+                txt.append(pg.extract_text() or "")
+                if sum(map(len, txt)) > budget:
+                    break
+            body = "\n".join(txt).strip()
+            return head + (f"(총 {len(rd.pages)}쪽)\n" + body[:budget] if body
+                           else "⚠️ 글자를 뽑을 수 없는 PDF입니다(스캔본일 수 있음).")
+
+        if ext == ".docx":
+            import docx as _dx
+            d = _dx.Document(io.BytesIO(raw))
+            parts = [p.text for p in d.paragraphs if p.text.strip()]
+            for t in d.tables:
+                for r in t.rows:
+                    parts.append(" | ".join(c.text.strip() for c in r.cells))
+            return head + "\n".join(parts)[:budget]
+
+        if ext == ".hwpx":
+            import zipfile
+            from lxml import etree as _et
+            parts = []
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                for n in sorted(x for x in z.namelist()
+                                if x.startswith("Contents/section") and x.endswith(".xml")):
+                    root = _et.fromstring(z.read(n))
+                    parts += [t.text for t in root.iter() if t.tag.endswith("}t") and t.text]
+            return head + ("\n".join(parts)[:budget] or "⚠️ 내용을 읽지 못했습니다.")
+
+        if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+            return head + ("⚠️ 그림 파일은 아직 AI에게 전달할 수 없습니다. "
+                           "그림 속 표는 엑셀·CSV로, 문서는 PDF로 올려 주세요.")
+
+        if ext == ".hwp":
+            return head + ("⚠️ 옛 한글(.hwp)은 읽을 수 없습니다. "
+                           "한글에서 **다른 이름으로 저장 → hwpx 또는 PDF**로 바꿔 올려 주세요.")
+
+        return head + f"⚠️ 지원하지 않는 형식입니다({ext or '확장자 없음'})."
+    except Exception as e:
+        return head + f"⚠️ 읽기 실패: {type(e).__name__}: {e}"
+
+
+def _df_digest(d, budget):
+    """표를 '크기 + 열 목록 + 앞부분 + 기술통계'로 요약한다(통째로 넘기면 너무 길다)."""
+    lines = [f"크기: {len(d):,}행 × {len(d.columns)}열",
+             f"열: {', '.join(map(str, d.columns))}", "", "[앞부분]",
+             d.head(20).to_string(index=False)]
+    try:
+        num = d.select_dtypes(include=np.number)
+        if len(num.columns):
+            lines += ["", "[기술통계]", num.describe().round(2).to_string()]
+    except Exception:
+        pass
+    return "\n".join(lines)[:budget]
+
+
+def _ai_panel(df, menu_name):
+    """AI 질문 상자 본체. 떠 있는 창과 사이드바가 같은 내용을 공유한다."""
+    if not st.session_state.get("api_key"):
+        st.caption("사이드바 **🤖 AI 기능 켜기**에서 API 키를 넣으면 사용할 수 있어요.")
+        return
+    st.caption(f"지금 화면: **{menu_name}**"
+               + (f" · 데이터: **{st.session_state.get('cur_key')}**"
+                  if df is not None else " · (데이터 없음)"))
+    for role, txt in st.session_state.get("gai_hist", [])[-6:]:
+        with st.chat_message("user" if role == "q" else "assistant"):
+            st.markdown(txt)
+    q = st.text_area("궁금한 점", key="gai_q", height=80, label_visibility="collapsed",
+                     placeholder="예) 지금 이 표에서 어떤 처리가 가장 좋아? / 이 화면 어떻게 쓰는 거야?")
+    ups = st.file_uploader(
+        "📎 파일 첨부 (선택)", key="gai_files", accept_multiple_files=True,
+        type=["csv", "tsv", "txt", "md", "json", "xlsx", "xls", "xlsm",
+              "pdf", "docx", "hwpx"],
+        help="엑셀·CSV·PDF·워드·한글(hwpx)의 내용을 읽어 함께 물어봅니다. "
+             "그림 파일과 옛 한글(.hwp)은 아직 읽을 수 없어요.")
+    if ups:
+        st.caption("첨부: " + ", ".join(getattr(f, "name", "?") for f in ups))
+    b1, b2 = st.columns([3, 1])
+    if b1.button("물어보기", key="gai_send", type="primary", width="stretch") and q.strip():
+        try:
+            ctx = ""
+            if df is not None:
+                # build_group_profiles() 는 문자열이 아니라 dict 를 돌려준다.
+                # 그대로 + 로 이으면 TypeError 가 나므로 f-string 으로 문자열화한다.
+                _prof = build_group_profiles(df, question=q)
+                ctx = (f"{build_data_overview(df)}\n\n[처리·품종별 요약]\n{_prof}")
+            att = ""
+            if ups:
+                per = max(1500, _ATT_LIMIT // len(ups))
+                att = "".join(_read_attachment(f, per) for f in ups)[:_ATT_LIMIT]
+            with st.spinner("AI가 생각하는 중..."):
+                ans = ai_call(
+                    "당신은 농업연구사를 돕는 통계 전문가이자 이 앱의 사용 안내자입니다. "
+                    f"사용자는 지금 '{menu_name}' 화면을 보고 있습니다. "
+                    "아래 실제 데이터 요약만 근거로 한국어로 쉽고 정확하게 답하세요. "
+                    "입력에 없는 수치나 유의성은 추측하지 마세요. "
+                    "앱 사용법을 묻는다면 화면 이름을 들어 안내하세요.\n\n"
+                    + (ctx or "(현재 선택된 데이터가 없습니다.)")
+                    + (f"\n\n[사용자가 올린 파일]{att}" if att else "")
+                    + f"\n\n질문: {q}", max_tokens=900)
+        except Exception as _ex:
+            ans = f"⚠️ AI 호출 실패: {type(_ex).__name__}: {_ex}"
+        _qlog = q + (("\n\n📎 " + ", ".join(getattr(f, "name", "?") for f in ups))
+                     if ups else "")
+        st.session_state["gai_hist"] = (st.session_state.get("gai_hist", [])
+                                        + [("q", _qlog), ("a", ans)])[-12:]
+        st.rerun()
+    if b2.button("지우기", key="gai_clear", width="stretch"):
+        st.session_state["gai_hist"] = []
+        st.rerun()
+    st.caption("⚠️ AI 답변은 초안입니다. 수치와 해석은 연구자가 확인해 주세요.")
+
+
+def _dock_supported():
+    """오른쪽 아래에 띄우려면 st.container(key=...) 가 필요하다(스트림릿 1.48 이상).
+
+    옛 버전에서는 TypeError 가 나므로 미리 확인해서 사이드바로 대신 내보낸다.
+    (예전에는 이 실패를 그냥 삼켜서 버튼이 아무 데도 안 보였다.)
+    """
+    try:
+        import inspect as _isp
+        return ("key" in _isp.signature(st.container).parameters
+                and hasattr(st, "popover") and hasattr(st, "chat_message"))
+    except Exception:
+        return False
+
+
+def floating_ai(df, menu_name):
+    """어느 화면에서든 쓸 수 있는 AI 질문 상자.
+
+    기본은 오른쪽 아래에 떠 있는 버튼이고, 스트림릿 버전이 낮아 그렇게 만들 수
+    없으면 **사이드바 맨 위**에 같은 상자를 대신 넣는다. 어느 쪽이든 사라지지 않는다.
+    """
+    if not _dock_supported():
+        with st.sidebar:
+            with st.expander("💬 AI에게 물어보기", expanded=False):
+                _ai_panel(df, menu_name)
+                st.caption("ℹ️ 스트림릿 1.48 이상이면 화면 오른쪽 아래에 떠 있는 창으로 "
+                           "쓸 수 있어요. (`pip install -U streamlit`)")
+        return
+
+    st.markdown("""<style>
+      div.st-key-gai_dock { position: fixed !important; right: 1.5rem; bottom: 1.5rem;
+          z-index: 9999; width: auto !important; }
+      div.st-key-gai_dock button { border-radius: 2.2rem !important;
+          padding: .95rem 1.9rem !important; font-weight: 700 !important;
+          font-size: 1.12rem !important; line-height: 1.25 !important;
+          box-shadow: 0 6px 22px rgba(0,0,0,.30) !important; }
+      div.st-key-gai_dock button:hover { transform: translateY(-2px); }
+      div.st-key-gai_dock button p { font-size: 1.12rem !important;
+          font-weight: 700 !important; margin: 0 !important; }
+      @media (max-width: 640px) { div.st-key-gai_dock { right: .6rem; bottom: .6rem; }
+          div.st-key-gai_dock button { padding: .8rem 1.4rem !important;
+              font-size: 1rem !important; } }
+    </style>""", unsafe_allow_html=True)
+    with st.container(key="gai_dock"):
+        with st.popover("💬 AI에게 물어보기"):
+            st.markdown("###### 💬 AI 도우미")
+            _ai_panel(df, menu_name)
+
+
 df = st.session_state.df
 if df is not None and len(df.columns) != len(set(map(str, df.columns))):
     df = clean_columns(df)
     st.session_state.df = df
     st.info("ℹ️ 열 이름이 중복되어 자동으로 구분했습니다(예: 값, 값_2). "
             "원본 엑셀의 머리글을 확인해 보세요.")
+
+try:
+    floating_ai(df, menu)
+except Exception as _gex:
+    # 조용히 사라지면 원인을 알 수 없다 — 사이드바에 최소한의 대체 창을 남긴다.
+    try:
+        with st.sidebar.expander("💬 AI에게 물어보기", expanded=False):
+            st.caption(f"떠 있는 창을 만들지 못했습니다 ({type(_gex).__name__}). "
+                       "여기서 이용해 주세요.")
+            _ai_panel(df, menu)
+    except Exception:
+        pass
+
 
 # ================================================================ 공통 가드
 if df is None and menu not in ("📑 보고서", "📖 사용설명서"):
@@ -4132,6 +4852,20 @@ if menu == "⚡ 원클릭 보고서":
                                    "통계분석_초안.docx", type="primary", width="stretch")
             elif not _HAS_DOCX:
                 d2.caption("워드 저장: pip install python-docx 후 사용 가능")
+            try:
+                _xl = make_xlsx_multi(
+                    [{"caption": "분석 종합", "table": ap["summary"]}]
+                    + [b for b in ap["blocks"] if b.get("table") is not None],
+                    "원클릭 분석 결과")
+                if _xl:
+                    st.download_button("📈 엑셀(xlsx) — 항목별 시트 + 편집 가능한 그래프",
+                                       _xl, "통계분석_초안.xlsx", width="stretch",
+                                       key="xls_autopilot",
+                                       help="조사항목마다 시트가 하나씩 만들어지고, 각 시트에 "
+                                            "엑셀 기본 차트가 들어갑니다. 막대 색·글꼴·축 범위·"
+                                            "차트 종류를 원하는 대로 바꿀 수 있습니다.")
+            except Exception as _e:
+                st.caption(f"엑셀 파일 생성 실패 ({type(_e).__name__})")
             if st.button("➕ 이 결과를 '📑 보고서'에도 담기", width="stretch"):
                 st.session_state.report_items.extend(ap["report_items"])
                 st.success("보고서 메뉴에 담았습니다! 다른 분석과 합쳐서 편집할 수 있어요.")
@@ -4619,57 +5353,66 @@ elif menu == "📊 통계분석":
                     if not ok_to_run:
                         st.stop()
                     st.markdown("#### 1) 가정 검정")
-                    nrows, nok = [], True
-                    for g in data[gc].unique():
-                        v = data[data[gc] == g][vc]
-                        if len(v) >= 3:
-                            w, p = stats.shapiro(v)
-                            nrows.append({"그룹": g, "W": round(w, 3), "p": round(p, 3),
-                                          "정규성": "만족" if p >= .05 else "위배"})
-                            if p < .05: nok = False
-                    lp = np.nan
-                    try:
-                        samples = [data[data[gc] == g][vc] for g in data[gc].unique()]
-                        samples = [s for s in samples if len(s) >= 2]
-                        if len(samples) >= 2:
-                            ls, lp = stats.levene(*samples)
-                    except Exception:
+                    # CRD는 처리별 원자료를, RCBD는 블록을 보정한 모형의 잔차를 확인하는 것이 타당하다.
+                    if use_blk:
+                        st.caption("난괴법(RCBD)은 처리별 원자료보다 **처리+블록 모형의 잔차**를 대상으로 "
+                                   "정규성·등분산을 확인합니다. 잔차 진단은 모형 적합 직후 표시됩니다.")
+                    else:
+                        nrows, nok = [], True
+                        for g in data[gc].unique():
+                            vv = data[data[gc] == g][vc]
+                            if 3 <= len(vv) <= 5000:
+                                try:
+                                    w, p = stats.shapiro(vv)
+                                    nrows.append({"그룹": g, "W": round(w, 3), "p": round(p, 3),
+                                                  "정규성": "만족" if p >= .05 else "위배"})
+                                    if p < .05: nok = False
+                                except Exception:
+                                    pass
                         lp = np.nan
-                    if nrows:
-                        st.dataframe(pd.DataFrame(nrows), width="stretch")
-                    else:
-                        st.caption("각 처리구의 반복이 3개 미만이라 정규성 검정을 생략했습니다.")
-                    if not np.isnan(lp):
-                        st.write(f"등분산(Levene): 통계량={ls:.3f}, p={lp:.3f} → {'만족' if lp >= .05 else '위배'}")
-                    else:
-                        st.caption("반복이 부족해 등분산 검정을 생략했습니다.")
-                    if nok and (np.isnan(lp) or lp >= .05):
-                        st.success("가정을 모두 만족합니다. ANOVA 결과를 신뢰할 수 있어요.")
-                    else:
-                        st.warning("가정이 일부 위배되었습니다. 아래 **비모수 검정 결과**를 함께 확인하세요.")
-                        # ---- 비모수 자동 전환 (원클릭) ----
                         try:
-                            _grps = [g[vc].values for _, g in data.groupby(gc)]
-                            if len(_grps) == 2:
-                                _st, _p = stats.mannwhitneyu(*_grps)
-                                _nm = "Mann-Whitney U 검정"
-                            else:
-                                _st, _p = stats.kruskal(*_grps)
-                                _nm = "Kruskal-Wallis 검정"
-                            _med = data.groupby(gc)[vc].median().round(rnd())
-                            with st.expander(f"🧪 비모수 대안: {_nm} 결과 보기", expanded=True):
-                                k1, k2 = st.columns(2)
-                                k1.metric("검정 통계량", f"{_st:.3f}")
-                                k2.metric("p-value", f"{_p:.4f}",
-                                          "유의함" if _p < .05 else "유의하지 않음")
-                                st.dataframe(pd.DataFrame({gc: _med.index.astype(str),
-                                                           f"{vc} 중앙값": _med.values}),
-                                             width="stretch")
-                                st.caption("정규성·등분산 가정을 쓰지 않는 방법입니다. "
-                                           "평균 대신 **중앙값**으로 비교합니다. "
-                                           "아래 ANOVA 결과와 결론이 다르면 비모수 결과를 우선하세요.")
+                            samples = [data[data[gc] == g][vc] for g in data[gc].unique()]
+                            samples = [ss for ss in samples if len(ss) >= 2]
+                            if len(samples) >= 2:
+                                ls, lp = stats.levene(*samples)
                         except Exception:
-                            st.caption("비모수 검정을 자동 수행하지 못했습니다. '비모수검정' 탭을 이용하세요.")
+                            lp = np.nan
+                        if nrows:
+                            st.dataframe(pd.DataFrame(nrows), width="stretch")
+                        else:
+                            st.caption("각 처리구의 반복이 3개 미만이라 정규성 검정을 생략했습니다.")
+                        if not np.isnan(lp):
+                            st.write(f"등분산(Levene): 통계량={ls:.3f}, p={lp:.3f} → {'만족' if lp >= .05 else '위배'}")
+                        else:
+                            st.caption("반복이 부족해 등분산 검정을 생략했습니다.")
+                        if nok and (np.isnan(lp) or lp >= .05):
+                            st.success("가정을 모두 만족합니다. ANOVA 결과를 신뢰할 수 있어요.")
+                        else:
+                            st.warning("가정이 일부 위배되었습니다. 아래 **비모수 검정 결과**를 함께 확인하세요.")
+                            try:
+                                _grps = [gg[vc].values for _, gg in data.groupby(gc)]
+                                if data[vc].nunique() <= 1:
+                                    raise ValueError("모든 측정값이 동일함")
+                                if len(_grps) == 2:
+                                    _st, _p = stats.mannwhitneyu(*_grps, alternative="two-sided")
+                                    _nm = "Mann-Whitney U 검정"
+                                else:
+                                    _st, _p = stats.kruskal(*_grps)
+                                    _nm = "Kruskal-Wallis 검정"
+                                _med = data.groupby(gc)[vc].median().round(rnd())
+                                with st.expander(f"🧪 비모수 대안: {_nm} 결과 보기", expanded=True):
+                                    k1, k2 = st.columns(2)
+                                    k1.metric("검정 통계량", f"{_st:.3f}")
+                                    k2.metric("p-value", f"{_p:.4f}" if np.isfinite(_p) else "계산 불가",
+                                              "유의함" if np.isfinite(_p) and _p < .05 else "유의하지 않음")
+                                    st.dataframe(pd.DataFrame({gc: _med.index.astype(str),
+                                                               f"{vc} 중앙값": _med.values}),
+                                                 width="stretch")
+                                    st.caption("정규성·등분산 가정을 쓰지 않는 방법입니다. "
+                                               "평균 대신 **중앙값**으로 비교합니다. "
+                                               "아래 ANOVA 결과와 결론이 다르면 비모수 결과를 함께 보고하세요.")
+                            except Exception:
+                                st.caption("비모수 검정을 자동 수행하지 못했습니다. '비모수검정' 탭을 이용하세요.")
                     st.markdown("#### 2) 분산분석 결과")
                     formula = safe_formula(vc, [gc] + ([blk] if use_blk else []))
                     model = ols(formula, data=data).fit()
@@ -4677,6 +5420,29 @@ elif menu == "📊 통계분석":
                     st.dataframe(aov.round(4), width="stretch")
                     st.caption("설계: " + ("**난괴법(RCBD)** — 반복(블록) 효과를 모형에 포함했습니다."
                                           if use_blk else "**완전임의배치(CRD)** — 블록 없음"))
+                    if use_blk:
+                        try:
+                            _resid = pd.Series(model.resid, index=data.index).dropna()
+                            _rp = np.nan
+                            if 3 <= len(_resid) <= 5000 and _resid.nunique() > 1:
+                                _rw, _rp = stats.shapiro(_resid)
+                                st.caption(f"잔차 정규성(Shapiro-Wilk) p = {_rp:.4f} → "
+                                           + ("만족" if _rp >= .05 else "위배 가능"))
+                            _rdat = data.loc[_resid.index, [gc]].copy()
+                            _rdat["__resid"] = _resid
+                            _rs = [_g["__resid"].values for _, _g in _rdat.groupby(gc)
+                                   if len(_g) >= 2]
+                            _lp = np.nan
+                            if len(_rs) >= 2:
+                                _ls, _lp = stats.levene(*_rs)
+                                st.caption(f"잔차 등분산(Levene) p = {_lp:.4f} → "
+                                           + ("만족" if _lp >= .05 else "위배 가능"))
+                            if (np.isfinite(_rp) and _rp < .05) or (np.isfinite(_lp) and _lp < .05):
+                                st.warning("⚠️ RCBD 모형 잔차 가정이 일부 위배될 수 있습니다. "
+                                           "변환·이상값·혼합모형 등 대안을 검토하세요. 단순 Kruskal-Wallis는 블록을 무시하므로 "
+                                           "RCBD의 직접 대체법으로 자동 적용하지 않습니다.")
+                        except Exception:
+                            st.caption("RCBD 잔차 진단을 계산하지 못했습니다.")
                     tkey = f"C({q_ref(gc)})"
                     pval = aov.loc[tkey, "PR(>F)"] if tkey in aov.index else aov["PR(>F)"].iloc[0]
                     if use_blk:
@@ -4697,10 +5463,16 @@ elif menu == "📊 통계분석":
                     ci = calc_cv_lsd(model, data, gc, vc)
                     m1, m2, m3 = st.columns(3)
                     m1.metric("CV (변이계수)", f"{ci['CV']:.1f} %", cv_grade(ci["CV"]))
-                    m2.metric("LSD (p<0.05)", f"{ci['LSD']:.2f}")
+                    m2.metric("LSD 근사 (p<0.05)" if ci.get("LSD_is_approx") else "LSD (p<0.05)",
+                              f"{ci['LSD']:.2f}")
                     m3.metric("오차평균제곱(MSE)", f"{ci['MSE']:.2f}")
-                    st.caption("CV%는 시험의 정밀도를 나타냅니다(포장시험 10~20% 양호, 20% 초과 시 재검토). "
-                               f"두 처리 평균의 차이가 LSD({ci['LSD']:.2f})보다 크면 유의한 차이로 봅니다.")
+                    if ci.get("LSD_is_approx"):
+                        st.caption("CV%는 시험의 정밀도를 나타냅니다. 반복수가 불균형하여 표시된 LSD는 "
+                                   "조화평균 반복수에 기반한 **참고용 근사값**입니다. 처리쌍의 유의성은 위 사후검정의 "
+                                   "모형 기반 p값/신뢰구간을 우선하세요.")
+                    else:
+                        st.caption("CV%는 시험의 정밀도를 나타냅니다(포장시험 10~20% 양호, 20% 초과 시 재검토). "
+                                   f"균형자료에서는 두 처리 평균의 차이가 LSD({ci['LSD']:.2f})보다 크면 유의한 차이로 볼 수 있습니다.")
                     if ci["CV"] > 30:
                         st.warning("⚠️ CV%가 30%를 넘습니다. 포장 불균일·조사 오차·이상값을 점검해 보세요.")
                     if ph.startswith("던넷"):
@@ -4747,7 +5519,13 @@ elif menu == "📊 통계분석":
                     elabel = "표준오차" if use_se else "표준편차"
                     fig, ax = plt.subplots(figsize=figsize(max(5, len(order))))
                     m = means.loc[order]; e_ = err.loc[order]
-                    ax.bar(order, m["mean"], yerr=e_, capsize=5, color=pcolor())
+                    ax.bar(order, m["mean"], yerr=e_, capsize=4,
+                           color=bar_colors(values=m["mean"].tolist()),
+                           edgecolor="none", width=.62 if pretty_on() else .8,
+                           error_kw={"ecolor": "#5a6067", "elinewidth": 1.1})
+                    bar_value_labels(ax, range(len(order)), m["mean"].tolist(),
+                                     e_.tolist(), dec=rnd())
+                    ax.margins(y=.16 if pretty_on() else .05)
                     for i, g in enumerate(order):
                         _lb = letters.get(g, "")
                         if _lb:
@@ -4768,9 +5546,11 @@ elif menu == "📊 통계분석":
                                     f"* CV(%) = {ci['CV']:.1f}, 평균±{elabel} "
                                     f"(n = {int(means['count'].min())})")
                     else:
+                        _lsd_note = (f"LSD(0.05) 근사 = {ci['LSD']:.2f}" if ci.get("LSD_is_approx")
+                                     else f"LSD(0.05) = {ci['LSD']:.2f}")
                         footnote = (f"* 같은 열의 다른 문자는 {_phname}으로 5% 수준에서 "
                                     "유의차가 있음을 나타냄.\n"
-                                    f"* CV(%) = {ci['CV']:.1f}, LSD(0.05) = {ci['LSD']:.2f}, "
+                                    f"* CV(%) = {ci['CV']:.1f}, {_lsd_note}, "
                                     f"평균±{elabel} (n = {int(means['count'].min())})")
                     st.markdown("###### 📋 표 각주 (복사해서 표 아래에 붙이세요)")
                     st.code(footnote, language=None)
@@ -4804,28 +5584,76 @@ elif menu == "📊 통계분석":
                                            {"text": footnote}])
                 report_button("cap_anova")
         elif mode.startswith("이원배치"):
-            if len(cat_cols) < 2 or not num_cols: st.warning("범주형 변수 2개와 측정값 1개가 필요합니다.")
+            if len(cat_cols) < 2 or not num_cols:
+                st.warning("범주형 변수 2개와 측정값 1개가 필요합니다.")
             else:
                 c1, c2, c3 = st.columns(3)
                 f1 = c1.selectbox("요인 A", cat_cols, key="tw_a")
-                f2 = c2.selectbox("요인 B", [c for c in cat_cols if c != f1], key="tw_b")
+                f2_opts = [c for c in cat_cols if c != f1]
+                f2 = c2.selectbox("요인 B", f2_opts, key="tw_b")
                 yv = c3.selectbox("측정값", num_cols, key="tw_y")
+                blk_opts = ["(없음 · 완전임의 요인배치)"] + [c for c in cat_cols if c not in (f1, f2)]
+                blk = st.selectbox("반복(블록) 열 — 요인배치 난괴법이면 선택", blk_opts,
+                                   index=guess_idx(blk_opts, ["반복", "블록", "block", "rep"]),
+                                   key="tw_blk")
+                use_blk = not blk.startswith("(없음")
+                st.caption("포장시험에서 각 반복마다 요인 A×B 조합을 배치했다면 반복(블록)을 지정하세요. "
+                           "블록을 지정하면 Y ~ Block + A + B + A×B 모형으로 분석합니다.")
                 if keep_running("twoway", "이원배치 ANOVA 실행"):
-                    data = df[[f1, f2, yv]].dropna()
-                    model = ols(safe_formula(yv, [f1, f2], interactions=[(f1, f2)]),
-                                data=data).fit()
-                    aov = sm.stats.anova_lm(model, typ=2); out = aov.round(4)
+                    need = [f1, f2, yv] + ([blk] if use_blk else [])
+                    data = df[need].dropna().copy()
+                    if data.empty or data[f1].nunique() < 2 or data[f2].nunique() < 2:
+                        st.error("⚠️ 결측치를 제외한 뒤 각 요인이 2수준 이상 남아 있어야 합니다.")
+                        st.stop()
+                    _fb = validate_factorial_balance(data, f1, f2, blk if use_blk else None)
+                    if not _fb["ok"]:
+                        _ex = []
+                        for _b, _pairs in list(_fb["missing"].items())[:3]:
+                            _ex.append(f"{_b}: " + ", ".join(f"{a}×{b}" for a, b in _pairs[:5]))
+                        st.error("⚠️ 요인 조합이 빠져 있어 현재의 이원배치 ANOVA를 안전하게 수행할 수 없습니다. "
+                                 "누락 조합 예: " + " / ".join(_ex))
+                        st.stop()
+                    if use_blk and _fb["duplicates"]:
+                        _d = _fb["duplicates"][:5]
+                        st.warning("⚠️ 같은 블록 안의 동일 A×B 조합이 여러 행 있습니다. "
+                                   "독립 반복이 아니라 동일 시험구의 하위표본이라면 먼저 시험구 평균으로 집계해야 합니다. "
+                                   "예: " + ", ".join(f"{r}/{a}×{b}={n}행" for r, a, b, n in _d))
+                    factors = ([blk] if use_blk else []) + [f1, f2]
+                    formula = safe_formula(yv, factors, interactions=[(f1, f2)])
+                    try:
+                        model = ols(formula, data=data).fit()
+                        if model.df_resid <= 0:
+                            st.error("⚠️ 잔차 자유도가 0 이하입니다. 각 A×B 조합의 반복이 부족합니다. "
+                                     "반복(블록) 열을 지정하거나 조합별 반복 자료를 추가하세요.")
+                            st.stop()
+                        aov = sm.stats.anova_lm(model, typ=2)
+                    except Exception as ex:
+                        st.error(f"이원배치 ANOVA를 계산하지 못했습니다: {ex}")
+                        st.stop()
+                    out = aov.round(4)
                     st.dataframe(out, width="stretch")
                     terms = {f"C({q_ref(f1)})": f"요인A({f1})",
                              f"C({q_ref(f2)})": f"요인B({f2})",
                              f"C({q_ref(f1)}):C({q_ref(f2)})": "상호작용"}
-                    txt = " / ".join(f"**{lab}**: {'유의' if aov.loc[k,'PR(>F)']<.05 else '비유의'}(p={aov.loc[k,'PR(>F)']:.3f})"
-                                     for k, lab in terms.items() if k in aov.index)
+                    if use_blk:
+                        terms = {f"C({q_ref(blk)})": f"블록({blk})", **terms}
+                    pieces = []
+                    for k, lab in terms.items():
+                        if k not in aov.index:
+                            continue
+                        p_ = aov.loc[k, "PR(>F)"]
+                        if pd.isna(p_):
+                            pieces.append(f"**{lab}**: 검정불가")
+                        else:
+                            pieces.append(f"**{lab}**: {'유의' if p_ < .05 else '비유의'}(p={p_:.3f})")
+                    txt = " / ".join(pieces)
                     st.info("💡 " + txt)
+                    st.caption("설계: " + (f"**요인배치 난괴법** — 블록 '{blk}' 효과 포함"
+                                          if use_blk else "**완전임의 요인배치** — 블록 없음"))
                     fig, ax = plt.subplots(figsize=figsize())
                     for lv in data[f2].unique():
-                        s = data[data[f2] == lv].groupby(f1)[yv].mean()
-                        ax.plot(s.index, s.values, marker="o", label=f"{f2}={lv}")
+                        ss = data[data[f2] == lv].groupby(f1)[yv].mean()
+                        ax.plot(ss.index.astype(str), ss.values, marker="o", label=f"{f2}={lv}")
                     ax.set_xlabel(f1); ax.set_ylabel(yv); deco(ax, "상호작용 그래프"); ax.legend()
                     png = fig_to_png(fig)
                     out2 = out.reset_index().rename(columns={"index": "요인"})
@@ -4866,10 +5694,29 @@ elif menu == "📊 통계분석":
                 sub_c = c4.selectbox("세구(작은 구역) 요인", sub_opts,
                                      index=guess_idx(sub_opts, ["품종", "계통", "시비"]), key="sp_s")
                 if keep_running("splitplot", "분할구 분산분석 실행"):
-                    data = df[[rep_c, main_c, sub_c, yv]].dropna()
+                    data = df[[rep_c, main_c, sub_c, yv]].dropna().copy()
                     ok_sp, msgs = validate_anova_data(data, main_c, yv)
                     for m in msgs: st.warning(m)
-                    if not ok_sp: st.stop()
+                    if not ok_sp:
+                        st.stop()
+                    _spbal = validate_split_plot_balance(data, rep_c, main_c, sub_c)
+                    if not _spbal["ok"]:
+                        details = []
+                        if _spbal["n_rep"] < 2 or _spbal["n_main"] < 2 or _spbal["n_sub"] < 2:
+                            details.append(f"수준 부족(반복 {_spbal['n_rep']}·주구 {_spbal['n_main']}·세구 {_spbal['n_sub']})")
+                        if _spbal["missing_main"]:
+                            details.append("일부 반복에서 주구 수준 누락")
+                        if _spbal["missing_sub"]:
+                            details.append("일부 반복×주구에서 세구 수준 누락")
+                        if _spbal["duplicate_cells"]:
+                            ex = _spbal["duplicate_cells"][:4]
+                            details.append("동일 반복×주구×세구 중복: " + ", ".join(
+                                f"{r}/{m}/{u}={n}행" for r, m, u, n in ex))
+                        st.error("⚠️ 현재 분할구 계산식은 균형 split-plot 설계를 전제로 합니다. "
+                                 + " / ".join(details)
+                                 + f" (기대 { _spbal['expected_n'] }행, 관측 { _spbal['observed_n'] }행). "
+                                   "누락 조합을 확인하고, 동일 subplot의 하위표본이 여러 행이면 먼저 시험구 평균으로 집계하세요.")
+                        st.stop()
                     try:
                         f_full = safe_formula(yv, [rep_c, main_c, sub_c],
                                               interactions=[(rep_c, main_c),
@@ -5125,17 +5972,39 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             if keep_running("nonparam", "비모수 검정 실행"):
                 data = df[[g, v]].dropna()
                 grp = [data[data[g] == x][v] for x in data[g].unique()]
-                if len(grp) >= 3:
-                    h, p = stats.kruskal(*grp)
-                    st.write(f"**Kruskal-Wallis** (그룹 {len(grp)}개)")
-                    c1, c2 = st.columns(2); c1.metric("H", f"{h:.3f}"); c2.metric("p", f"{p:.4f}")
-                    txt = "Kruskal-Wallis 결과 " + ("그룹 간 유의한 차이가 있습니다." if p < .05 else "차이가 없습니다.")
-                elif len(grp) == 2:
-                    u, p = stats.mannwhitneyu(grp[0], grp[1])
-                    st.write("**Mann-Whitney U**")
-                    c1, c2 = st.columns(2); c1.metric("U", f"{u:.1f}"); c2.metric("p", f"{p:.4f}")
-                    txt = "Mann-Whitney U 결과 " + ("두 그룹 간 유의한 차이가 있습니다." if p < .05 else "차이가 없습니다.")
-                else: txt = ""
+                txt = ""
+                if len(grp) < 2:
+                    st.error("⚠️ 비교할 그룹이 2개 이상 필요합니다.")
+                    st.stop()
+                if data[v].nunique() <= 1:
+                    st.warning("⚠️ 모든 측정값이 동일해 순위 기반 검정 통계량을 정의할 수 없습니다. "
+                               "그룹 차이 검정 대신 원자료 입력을 확인하세요.")
+                    txt = "모든 측정값이 동일하여 비모수 검정을 수행하지 못했습니다."
+                else:
+                    try:
+                        if len(grp) >= 3:
+                            h, p = stats.kruskal(*grp)
+                            st.write(f"**Kruskal-Wallis** (그룹 {len(grp)}개)")
+                            c1, c2 = st.columns(2)
+                            c1.metric("H", f"{h:.3f}")
+                            c2.metric("p", f"{p:.4f}" if np.isfinite(p) else "계산 불가")
+                            txt = ("Kruskal-Wallis 결과 " +
+                                   ("그룹 간 유의한 차이가 있습니다." if np.isfinite(p) and p < .05
+                                    else "그룹 간 유의한 차이가 확인되지 않았습니다." if np.isfinite(p)
+                                    else "검정 통계량을 계산할 수 없습니다."))
+                        else:
+                            u, p = stats.mannwhitneyu(grp[0], grp[1], alternative="two-sided")
+                            st.write("**Mann-Whitney U**")
+                            c1, c2 = st.columns(2)
+                            c1.metric("U", f"{u:.1f}")
+                            c2.metric("p", f"{p:.4f}" if np.isfinite(p) else "계산 불가")
+                            txt = ("Mann-Whitney U 결과 " +
+                                   ("두 그룹 간 유의한 차이가 있습니다." if np.isfinite(p) and p < .05
+                                    else "두 그룹 간 유의한 차이가 확인되지 않았습니다." if np.isfinite(p)
+                                    else "검정 통계량을 계산할 수 없습니다."))
+                    except ValueError as ex:
+                        st.warning(f"⚠️ 비모수 검정을 수행할 수 없습니다: {ex}")
+                        txt = "자료 구조 때문에 비모수 검정을 수행하지 못했습니다."
                 st.info("💡 " + txt)
                 med = data.groupby(g)[v].median().round(3).reset_index(); med.columns = [g, "중앙값"]
                 st.dataframe(med, width="stretch")
@@ -5152,9 +6021,25 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             feats = st.multiselect("분석할 변수", num_cols, default=num_cols, key="pca_f")
             cby = st.selectbox("색상 구분(선택)", ["(없음)"] + cat_cols, key="pca_c")
             if len(feats) >= 3 and keep_running("pca", "PCA 실행"):
-                data = df[feats].dropna()
+                data = df[feats].apply(pd.to_numeric, errors="coerce").dropna()
+                if len(data) < 3:
+                    st.error("⚠️ 결측치를 제외한 완전자료 행이 3개 미만이라 PCA를 안정적으로 수행할 수 없습니다.")
+                    st.stop()
+                _var_ok = [c for c in feats if data[c].nunique(dropna=True) > 1]
+                _const = [c for c in feats if c not in _var_ok]
+                if _const:
+                    st.warning("⚠️ 값이 모두 같은 변수는 PCA에서 정보가 없어 제외했습니다: " + ", ".join(_const))
+                if len(_var_ok) < 2:
+                    st.error("⚠️ 변동이 있는 숫자형 변수가 2개 이상 필요합니다.")
+                    st.stop()
+                data = data[_var_ok]
                 Xs = StandardScaler().fit_transform(data)
-                pca = PCA(n_components=2).fit(Xs); sc_ = pca.transform(Xs); evr = pca.explained_variance_ratio_
+                pca = PCA(n_components=2).fit(Xs)
+                sc_ = pca.transform(Xs)
+                evr = pca.explained_variance_ratio_
+                if not np.all(np.isfinite(evr)):
+                    st.error("⚠️ PCA 설명분산을 계산할 수 없습니다. 상수열·중복열·자료 수를 확인하세요.")
+                    st.stop()
                 txt = f"주성분 2개가 원본 정보의 {evr.sum()*100:.1f}%를 설명합니다 (PC1 {evr[0]*100:.1f}%, PC2 {evr[1]*100:.1f}%)."
                 st.info("💡 " + txt)
                 fig, ax = plt.subplots(figsize=figsize(h=float(st.session_state.get("fig_h",4.0))+1))
@@ -5170,7 +6055,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                 deco(ax, "PCA 산점도"); ax.axhline(0, color="gray", lw=.5); ax.axvline(0, color="gray", lw=.5)
                 png = fig_to_png(fig)
                 st.download_button("🖼️ PCA 그래프", png, "pca.png", "image/png")
-                load = pd.DataFrame(pca.components_.T, columns=["PC1", "PC2"], index=feats).round(3).reset_index().rename(columns={"index": "변수"})
+                load = pd.DataFrame(pca.components_.T, columns=["PC1", "PC2"], index=_var_ok).round(3).reset_index().rename(columns={"index": "변수"})
                 st.dataframe(load, width="stretch")
                 dl_table(load, "PCA 로딩 결과", "pca9", "pca")
                 report_capture("cap_pca", "주성분분석(PCA)", txt, load, png)
@@ -5438,20 +6323,59 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                     st.error(f"⚠️ '{tgt}'은 문자(범주)형이라 회귀 예측을 할 수 없습니다. "
                              "문제 유형을 '분류(범주 예측)'로 바꾸거나 숫자형 열을 선택하세요.")
                     st.stop()
-                data = df[[tgt]+fts].dropna(); X = data[fts]
+                data = df[[tgt] + fts].dropna().copy()
+                if len(data) < 5:
+                    st.error("⚠️ 결측치를 제외한 자료가 5행 미만이라 학습/테스트 분할을 할 수 없습니다.")
+                    st.stop()
+                if len(data) < 30:
+                    st.warning(f"⚠️ 현재 완전자료는 {len(data)}행입니다. 30행 미만의 머신러닝 성능은 "
+                               "분할에 따라 크게 흔들릴 수 있으므로 탐색용으로만 해석하세요.")
+                X = data[fts].apply(pd.to_numeric, errors="coerce")
+                if X.isna().any().any():
+                    st.error("⚠️ 입력 변수에 숫자로 변환할 수 없는 값이 있습니다. 데이터 탭에서 자료형을 확인하세요.")
+                    st.stop()
+                # SVM은 변수 단위에 매우 민감하므로 표준화를 파이프라인에 포함한다.
                 mreg = {"랜덤포레스트": RandomForestRegressor(n_estimators=200, random_state=0),
                         "의사결정나무": DecisionTreeRegressor(random_state=0),
-                        "그래디언트부스팅": GradientBoostingRegressor(random_state=0), "SVM": SVR()}
+                        "그래디언트부스팅": GradientBoostingRegressor(random_state=0),
+                        "SVM": make_pipeline(StandardScaler(), SVR())}
                 mclf = {"랜덤포레스트": RandomForestClassifier(n_estimators=200, random_state=0),
                         "의사결정나무": DecisionTreeClassifier(random_state=0),
-                        "그래디언트부스팅": GradientBoostingClassifier(random_state=0), "SVM": SVC()}
+                        "그래디언트부스팅": GradientBoostingClassifier(random_state=0),
+                        "SVM": make_pipeline(StandardScaler(), SVC())}
                 if is_reg:
-                    y = data[tgt]; Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=.3, random_state=0)
-                    model = mreg[algo].fit(Xtr, ytr); s_ = r2_score(yte, model.predict(Xte))
+                    y = pd.to_numeric(data[tgt], errors="coerce")
+                    if y.isna().any():
+                        st.error("⚠️ 회귀의 예측 대상에 숫자로 변환할 수 없는 값이 있습니다.")
+                        st.stop()
+                    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=.3, random_state=0)
+                    if len(yte) < 2:
+                        st.error("⚠️ 테스트 자료가 너무 적어 R²를 계산할 수 없습니다. 자료를 더 추가하세요.")
+                        st.stop()
+                    model = mreg[algo].fit(Xtr, ytr)
+                    s_ = r2_score(yte, model.predict(Xte))
                     st.metric("R² (테스트)", f"{s_:.3f}"); txt = f"[{algo}] 테스트 R²는 {s_:.3f}입니다."
+                    _classes = None
                 else:
-                    y = pd.factorize(data[tgt])[0]; Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=.3, random_state=0)
-                    model = mclf[algo].fit(Xtr, ytr); s_ = accuracy_score(yte, model.predict(Xte))
+                    y, _uniques = pd.factorize(data[tgt])
+                    _classes = list(_uniques)
+                    counts_y = pd.Series(y).value_counts()
+                    n_classes = len(counts_y)
+                    if n_classes < 2:
+                        st.error("⚠️ 분류 대상이 한 종류뿐이라 분류 모델을 학습할 수 없습니다.")
+                        st.stop()
+                    if counts_y.min() < 2:
+                        st.error("⚠️ 각 분류에는 최소 2개 이상의 자료가 필요합니다. "
+                                 "1개뿐인 분류가 있어 학습/테스트에 동시에 배치할 수 없습니다.")
+                        st.stop()
+                    n_test = max(int(np.ceil(len(data) * .3)), n_classes)
+                    if len(data) - n_test < n_classes:
+                        st.error("⚠️ 분류 수에 비해 자료가 너무 적어 각 분류를 학습·테스트에 나눌 수 없습니다.")
+                        st.stop()
+                    Xtr, Xte, ytr, yte = train_test_split(
+                        X, y, test_size=n_test, random_state=0, stratify=y)
+                    model = mclf[algo].fit(Xtr, ytr)
+                    s_ = accuracy_score(yte, model.predict(Xte))
                     st.metric("정확도 (테스트)", f"{s_:.3f}"); txt = f"[{algo}] 테스트 정확도는 {s_:.3f}입니다."
                 png, imp = None, None
                 if hasattr(model, "feature_importances_"):
@@ -5467,8 +6391,8 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                 # 학습된 모델을 세션에 저장 (새 데이터 예측용)
                 st.session_state["ml_model"] = {
                     "model": model, "feats": fts, "target": tgt, "is_reg": is_reg,
-                    "algo": algo, "classes": (list(pd.factorize(data[tgt])[1]) if not is_reg else None),
-                    "ranges": {f: (float(data[f].min()), float(data[f].max()), float(data[f].mean()))
+                    "algo": algo, "classes": _classes,
+                    "ranges": {f: (float(X[f].min()), float(X[f].max()), float(X[f].mean()))
                                for f in fts}}
             report_button("cap_ml")
 
@@ -5518,7 +6442,11 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         if miss:
                             st.error(f"필요한 열이 없습니다: {', '.join(miss)}")
                         elif st.button("일괄 예측 실행", key="ml_predict2"):
-                            Xnew = newdf[saved["feats"]].dropna()
+                            Xnew = newdf[saved["feats"]].apply(pd.to_numeric, errors="coerce").dropna()
+                            if Xnew.empty:
+                                st.error("⚠️ 필요한 입력 열에서 유효한 숫자 행을 찾지 못했습니다. "
+                                         "결측치와 자료형을 확인하세요.")
+                                st.stop()
                             preds = saved["model"].predict(Xnew)
                             out = newdf.loc[Xnew.index].copy()
                             if saved["is_reg"]:
@@ -6833,8 +7761,13 @@ elif menu == "💰 경제성분석":
             fw, fh = figsize()
             fig, axes = plt.subplots(1, 3, figsize=(fw*2.2, fh))
             x = e[trt].astype(str)
-            axes[0].bar(x, e["소득"], color=pcolor(), label="소득")
-            axes[0].bar(x, e["순수익"], color="#b85450", alpha=.75, width=.5, label="순수익")
+            _ramp = _RAMP.get(st.session_state.get("plot_color", "파랑"), _RAMP["파랑"])
+            axes[0].bar(x, e["소득"], label="소득", edgecolor="none",
+                        color=_ramp[3] if pretty_on() else pcolor())
+            axes[0].bar(x, e["순수익"], color="#b85450", alpha=.8, width=.5,
+                        label="순수익", edgecolor="none")
+            if pretty_on():
+                bar_value_labels(axes[0], range(len(x)), e["소득"].tolist(), dec=0)
             axes[0].set_ylabel("원/10a"); axes[0].legend(fontsize=7); deco(axes[0], "소득 · 순수익")
             comp.plot(kind="bar", stacked=True, ax=axes[1])
             axes[1].set_ylabel("원/10a"); axes[1].legend(fontsize=6); deco(axes[1], "경영비 구성")
@@ -7147,11 +8080,50 @@ elif menu == "📋 설문조사 분석":
         c1.metric("📊 리커트", len(likert)); c2.metric("👥 응답자 특성", len(demo_q))
         c3.metric("🔘 객관식 문항", len(single_q))
         c4.metric("☑️ 다중응답", len(multi)); c5.metric("✍️ 주관식", len(openq))
+        auto_scale_min = auto_scale_max = auto_negative_max = auto_positive_min = None
+        if likert:
+            _lk_vals = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in likert], ignore_index=True).dropna()
+            _obs_min = int(np.floor(_lk_vals.min())) if len(_lk_vals) else 1
+            _obs_max = int(np.ceil(_lk_vals.max())) if len(_lk_vals) else 5
+            _default_min = 1 if _obs_min >= 1 else max(0, _obs_min)
+            _default_max = min(10, max(_default_min + 1, _obs_max))
+            with st.expander("🎚️ 리커트 척도 설정 (자동분석)", expanded=False):
+                st.caption("자동분석에서 선택된 리커트 문항은 같은 척도를 쓴다고 가정합니다. "
+                           "실제 설문 척도와 다르면 여기서 수정하세요.")
+                _a1, _a2 = st.columns(2)
+                auto_scale_min = int(_a1.number_input("척도 최소값", 0, 9, _default_min,
+                                                       key="auto_lk_min"))
+                auto_scale_max = int(_a2.number_input("척도 최대값", 1, 10, _default_max,
+                                                       key="auto_lk_max"))
+                _ar = (likert_scale_rules(auto_scale_min, auto_scale_max)
+                       if auto_scale_max > auto_scale_min
+                       else {"negative_max": auto_scale_min,
+                             "positive_min": min(auto_scale_min + 1, 10)})
+                _a3, _a4 = st.columns(2)
+                auto_negative_max = int(_a3.number_input("부정 기준 (이 점수 이하)", 0, 10,
+                                                          _ar["negative_max"], key="auto_lk_neg"))
+                auto_positive_min = int(_a4.number_input("긍정 기준 (이 점수 이상)", 0, 10,
+                                                          _ar["positive_min"], key="auto_lk_pos"))
+                _auto_lk_rule_ok = (auto_scale_max > auto_scale_min and
+                                    auto_scale_min <= auto_negative_max < auto_positive_min <= auto_scale_max)
+                if not _auto_lk_rule_ok:
+                    st.warning("⚠️ 척도/기준 설정을 확인하세요. 최소값 < 최대값이고, "
+                               "최소값 ≤ 부정 기준 < 긍정 기준 ≤ 최대값이어야 합니다.")
         chart_style = st.radio("응답자 특성 그래프", ["도넛", "원형", "막대"],
                                horizontal=True, key="svy_chart")
         st.caption("판별이 잘못되었으면 위 탭에서 유형을 직접 골라 분석하세요.")
 
         if keep_running("autoan", "🚀 자동 분석 실행"):
+            if likert:
+                _lk_problems = validate_likert_frame(df, likert, auto_scale_min, auto_scale_max)
+                if _lk_problems:
+                    st.error("⚠️ 자동분류된 리커트 문항에 척도 범위를 벗어난 값이 있습니다. "
+                             "척도 설정을 고치거나 문항 유형을 다시 지정하세요.\n\n- "
+                             + "\n- ".join(_lk_problems[:12]))
+                    st.stop()
+                if not _auto_lk_rule_ok:
+                    st.error("⚠️ 리커트 척도/부정·긍정 기준 설정이 올바르지 않아 분석할 수 없습니다.")
+                    st.stop()
             rep_blocks = []
 
             # 1) 응답자 특성 · 객관식 문항 (원형/도넛) — 같은 그리기 방식을 나눠서 쓴다
@@ -7165,6 +8137,8 @@ elif menu == "📋 설문조사 분석":
                     with cols_[i % len(cols_)]:
                         if chart_style == "막대":
                             fig, ax = plt.subplots(figsize=(4.2, 3.4))
+                            # 설문 화면은 문항별 색 구분(_survey_palette)이 이미 있어
+                            # 그대로 둔다. 값 표시·격자 정리는 아래 deco 가 맡는다.
                             _bs = ax.bar(vc.index.astype(str), vc.values,
                                          color=_survey_palette(len(vc)), width=.62,
                                          edgecolor="white", linewidth=1.0)
@@ -7199,44 +8173,44 @@ elif menu == "📋 설문조사 분석":
             # 2) 리커트 (요약 + 다이버징 + 평균 막대)
             if likert:
                 st.markdown("## 📊 리커트 문항 분석")
-                sdat = df[likert]  # 문항별 기술통계는 문항 각자의 결측만 제외 (교집합 아님)
+                sdat = df[likert].apply(pd.to_numeric, errors="coerce")
                 cc = sdat.dropna()  # 크론바흐 α는 문항 간 상관을 봐야 하므로 전 문항 응답한 사람만
-                smax = int(sdat.max().max())
                 summ = pd.DataFrame({
                     "문항": likert,
                     "응답자(명)": [int(sdat[q].notna().sum()) for q in likert],
                     "평균": [round(sdat[q].dropna().mean(), 2) for q in likert],
                     "표준편차": [round(sdat[q].dropna().std(), 2) for q in likert],
-                    "긍정 응답(명)": [int((sdat[q].dropna() >= 4).sum()) for q in likert],
-                    "긍정(4↑)%": [round((sdat[q].dropna() >= 4).mean()*100, 1) for q in likert],
-                    "부정 응답(명)": [int((sdat[q].dropna() <= 2).sum()) for q in likert],
-                    "부정(2↓)%": [round((sdat[q].dropna() <= 2).mean()*100, 1) for q in likert]})
+                    "긍정 응답(명)": [int((sdat[q].dropna() >= auto_positive_min).sum()) for q in likert],
+                    f"긍정({auto_positive_min}점↑)%": [round((sdat[q].dropna() >= auto_positive_min).mean()*100, 1) for q in likert],
+                    "부정 응답(명)": [int((sdat[q].dropna() <= auto_negative_max).sum()) for q in likert],
+                    f"부정({auto_negative_max}점↓)%": [round((sdat[q].dropna() <= auto_negative_max).mean()*100, 1) for q in likert]})
                 a_ = cronbach_alpha(cc)
-                lvl = ("매우 높음" if a_ >= .9 else "높음" if a_ >= .8 else "양호" if a_ >= .7 else "낮음")
+                lvl = cronbach_level(a_)
                 m1, m2, m3 = st.columns(3)
                 m1.metric("문항 수", len(likert))
-                m2.metric("평균 만족도", f"{pd.concat([sdat[q].dropna() for q in likert]).mean():.2f}")
-                m3.metric("크론바흐 α", f"{a_:.3f}", lvl)
+                _all_lk = pd.concat([sdat[q].dropna() for q in likert])
+                m2.metric("평균 만족도", f"{_all_lk.mean():.2f}" if len(_all_lk) else "계산 불가")
+                m3.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "계산 불가", lvl)
                 if len(cc) < len(df):
                     st.caption(f"※ 크론바흐 α는 {len(likert)}개 문항에 모두 응답한 {len(cc)}명 기준입니다. "
                                f"(문항별 응답자 수는 위 표의 '응답자(명)' 참고)")
-                counts = {q: [int((sdat[q].dropna() == v).sum()) for v in range(1, smax+1)] for q in likert}
+                counts = {q: [int((sdat[q].dropna() == v).sum()) for v in range(auto_scale_min, auto_scale_max+1)] for q in likert}
                 st.markdown("##### 응답 분포 (다이버징 차트)")
-                figd = likert_diverging(counts, [f"{v}점" for v in range(1, smax+1)], "문항별 응답 분포")
+                figd = likert_diverging(counts, [f"{v}점" for v in range(auto_scale_min, auto_scale_max+1)], "문항별 응답 분포")
                 dv_png = fig_to_png(figd)
                 col_a, col_b = st.columns(2)
                 with col_a:
                     fig, ax = plt.subplots(figsize=figsize())
                     order = summ.sort_values("평균")
                     bars = ax.barh(order["문항"], order["평균"], color=pcolor())
-                    ax.set_xlim(0, smax); ax.set_xlabel("평균 점수"); deco(ax, "문항별 평균")
+                    ax.set_xlim(auto_scale_min, auto_scale_max); ax.set_xlabel("평균 점수"); deco(ax, "문항별 평균")
                     for bar, v in zip(bars, order["평균"]):
                         ax.text(v+0.05, bar.get_y()+bar.get_height()/2, f"{v}", va="center", fontsize=8)
                     st.pyplot(fig); plt.close(fig)
                 with col_b:
                     fig, ax = plt.subplots(figsize=figsize())
-                    ax.barh(summ["문항"], summ["긍정(4↑)%"], color="#4f81bd", label="긍정")
-                    ax.barh(summ["문항"], -summ["부정(2↓)%"], color="#c0504d", label="부정")
+                    ax.barh(summ["문항"], summ[f"긍정({auto_positive_min}점↑)%"], color="#4f81bd", label="긍정")
+                    ax.barh(summ["문항"], -summ[f"부정({auto_negative_max}점↓)%"], color="#c0504d", label="부정")
                     ax.axvline(0, color="#555", lw=1); ax.set_xlabel("← 부정 %    긍정 % →")
                     ax.invert_yaxis(); ax.legend(fontsize=8); deco(ax, "긍정·부정 응답률")
                     st.pyplot(fig); plt.close(fig)
@@ -7317,9 +8291,30 @@ elif menu == "📋 설문조사 분석":
                             default=[c for c in num_cols if not _looks_like_nominal_code(c)], key="s_q")
         demo = reorder_by_rank(demo, "s_d", "↕️ 응답자 특성 표시 순서 바꾸기")
         qs = reorder_by_rank(qs, "s_q", "↕️ 문항 표시 순서 바꾸기")
-        scale_max = st.number_input("척도 최대값 (5점 척도면 5)", 2, 10, 5)
+        sc1, sc2 = st.columns(2)
+        scale_min = int(sc1.number_input("척도 최소값", 0, 9, 1, key="sv_scale_min"))
+        scale_max = int(sc2.number_input("척도 최대값", 1, 10, 5, key="sv_scale_max"))
+        _rules = (likert_scale_rules(scale_min, scale_max) if scale_max > scale_min
+                  else {"negative_max": scale_min, "positive_min": min(scale_min + 1, 10)})
+        th1, th2 = st.columns(2)
+        negative_max = int(th1.number_input("부정 응답 기준 (이 점수 이하)", 0, 10,
+                                             _rules["negative_max"], key="sv_neg_max"))
+        positive_min = int(th2.number_input("긍정 응답 기준 (이 점수 이상)", 0, 10,
+                                             _rules["positive_min"], key="sv_pos_min"))
+        _lk_rule_ok = scale_max > scale_min and scale_min <= negative_max < positive_min <= scale_max
+        if not _lk_rule_ok:
+            st.warning("⚠️ 척도/기준 설정을 확인하세요. 최소값 < 최대값이고, "
+                       "최소값 ≤ 부정 기준 < 긍정 기준 ≤ 최대값이어야 합니다.")
         if qs and keep_running("svlikert", "리커트 분석 실행"):
-            s = df[qs]  # 문항별 기술통계는 문항 각자의 결측만 제외 (교집합으로 자르지 않음)
+            _lk_problems = validate_likert_frame(df, qs, scale_min, scale_max)
+            if _lk_problems:
+                st.error("⚠️ 리커트 척도 범위와 맞지 않는 응답이 있습니다. 분석 전에 수정하세요.\n\n- "
+                         + "\n- ".join(_lk_problems[:12]))
+                st.stop()
+            if not _lk_rule_ok:
+                st.error("⚠️ 리커트 척도/부정·긍정 기준 설정이 올바르지 않아 분석할 수 없습니다.")
+                st.stop()
+            s = df[qs].apply(pd.to_numeric, errors="coerce")  # 검증 후 숫자형으로 통일
             cc = s.dropna()  # 크론바흐 α·문항 제외 α는 전 문항 응답자만 필요
             st.markdown("#### 1) 응답자 특성")
             if demo:
@@ -7339,17 +8334,18 @@ elif menu == "📋 설문조사 분석":
                 "평균": [round(s[q].dropna().mean(), 2) for q in qs],
                 "표준편차": [round(s[q].dropna().std(), 2) for q in qs],
                 "중앙값": [round(s[q].dropna().median(), 1) for q in qs],
-                "긍정 응답(명)": [int((s[q].dropna() >= 4).sum()) for q in qs],
-                "긍정(4점↑)%": [round((s[q].dropna() >= 4).mean()*100, 1) for q in qs],
-                "부정 응답(명)": [int((s[q].dropna() <= 2).sum()) for q in qs],
-                "부정(2점↓)%": [round((s[q].dropna() <= 2).mean()*100, 1) for q in qs]})
+                "긍정 응답(명)": [int((s[q].dropna() >= positive_min).sum()) for q in qs],
+                f"긍정({positive_min}점↑)%": [round((s[q].dropna() >= positive_min).mean()*100, 1) for q in qs],
+                "부정 응답(명)": [int((s[q].dropna() <= negative_max).sum()) for q in qs],
+                f"부정({negative_max}점↓)%": [round((s[q].dropna() <= negative_max).mean()*100, 1) for q in qs]})
             st.dataframe(summ, width="stretch")
 
             st.markdown("#### 3) 신뢰도 분석")
             a_ = cronbach_alpha(cc)
-            lvl = ("매우 높음" if a_ >= .9 else "높음" if a_ >= .8 else "양호" if a_ >= .7 else "낮음")
+            lvl = cronbach_level(a_)
             c1, c2 = st.columns(2)
-            c1.metric("크론바흐 α", f"{a_:.3f}"); c2.metric("신뢰도 수준", lvl)
+            c1.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "계산 불가")
+            c2.metric("신뢰도 수준", lvl)
             if len(cc) < len(df):
                 st.caption(f"※ 크론바흐 α는 {len(qs)}개 문항에 모두 응답한 {len(cc)}명 기준입니다.")
             drop = pd.DataFrame({"제외 문항": qs,
@@ -7358,13 +8354,13 @@ elif menu == "📋 설문조사 분석":
             st.dataframe(drop, width="stretch")
 
             st.markdown("#### 4) 응답 분포")
-            dist = pd.DataFrame({q: [int((s[q].dropna() == v).sum()) for v in range(1, scale_max+1)] for q in qs},
-                                index=[f"{v}점" for v in range(1, scale_max+1)]).T
+            dist = pd.DataFrame({q: [int((s[q].dropna() == v).sum()) for v in range(scale_min, scale_max+1)] for q in qs},
+                                index=[f"{v}점" for v in range(scale_min, scale_max+1)]).T
             # 인원과 비율을 함께 보여준다 (예: 12명 (20.0%))
             _dist_show = dist.copy().astype(object)
             for q in qs:
                 _tot = max(int(dist.loc[q].sum()), 1)
-                for v in range(1, scale_max+1):
+                for v in range(scale_min, scale_max+1):
                     _cnt = int(dist.loc[q, f"{v}점"])
                     _dist_show.loc[q, f"{v}점"] = f"{_cnt}명 ({_cnt/_tot*100:.1f}%)"
             _dist_show["합계"] = [f"{int(dist.loc[q].sum())}명 (100.0%)" for q in qs]
@@ -7372,17 +8368,17 @@ elif menu == "📋 설문조사 분석":
                          width="stretch")
             st.caption("각 칸은 **응답 인원(명)과 비율(%)** 입니다.")
             st.markdown("##### 다이버징 차트 (중립 기준 좌우 분리)")
-            counts_d = {q: [int((s[q].dropna() == v).sum()) for v in range(1, scale_max+1)] for q in qs}
-            figd = likert_diverging(counts_d, [f"{v}점" for v in range(1, scale_max+1)], "문항별 응답 분포")
+            counts_d = {q: [int((s[q].dropna() == v).sum()) for v in range(scale_min, scale_max+1)] for q in qs}
+            figd = likert_diverging(counts_d, [f"{v}점" for v in range(scale_min, scale_max+1)], "문항별 응답 분포")
             png = fig_to_png(figd)
             fig, axes = plt.subplots(1, 2, figsize=(figsize()[0]*2, figsize()[1]))
             axes[0].barh(summ["문항"], summ["평균"], color=pcolor()); axes[0].invert_yaxis()
-            axes[0].set_xlim(0, scale_max); axes[0].set_xlabel("평균"); deco(axes[0], "문항별 평균")
+            axes[0].set_xlim(scale_min, scale_max); axes[0].set_xlabel("평균"); deco(axes[0], "문항별 평균")
             bottom = np.zeros(len(qs))
-            for v in range(1, scale_max+1):
+            for v in range(scale_min, scale_max+1):
                 vals = dist[f"{v}점"].values
                 axes[1].barh(qs, vals, left=bottom, label=f"{v}점"); bottom += vals
-            axes[1].invert_yaxis(); deco(axes[1], "응답 분포(누적)"); axes[1].legend(fontsize=7, ncol=scale_max)
+            axes[1].invert_yaxis(); deco(axes[1], "응답 분포(누적)"); axes[1].legend(fontsize=7, ncol=min(scale_max - scale_min + 1, 6))
             plt.tight_layout(); st.pyplot(fig); plt.close(fig)
 
             st.markdown("#### 5) 집단별 비교")
@@ -7415,8 +8411,10 @@ elif menu == "📋 설문조사 분석":
             else:
                 top = valid_summ.loc[valid_summ["평균"].idxmax(), "문항"]
                 low = valid_summ.loc[valid_summ["평균"].idxmin(), "문항"]
+            _alpha_txt = f"{a_:.3f}" if np.isfinite(a_) else "계산 불가"
             txt = (f"평균이 가장 높은 문항은 '{top}', 가장 낮은 문항은 '{low}'입니다. "
-                   f"전체 신뢰도(크론바흐 α)는 {a_:.3f}로 {lvl} 수준입니다.")
+                   f"전체 신뢰도(크론바흐 α)는 {_alpha_txt} ({lvl})입니다. "
+                   f"긍정은 {positive_min}점 이상, 부정은 {negative_max}점 이하로 집계했습니다.")
             st.download_button("🖼️ 그래프 다운로드", png, "survey.png", "image/png")
             dl_table(summ, "설문 문항별 분석 결과", "survey17", "survey", image=png)
             log_action("설문 리커트 분석")
