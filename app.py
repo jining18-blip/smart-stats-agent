@@ -9600,8 +9600,8 @@ elif menu == "💰 경제성분석":
             # (예: 실제 318kg인데 손익분기 23kg → 어떤 처리든 무조건 흑자로 보임).
             # 그래서 기본은 '수량비례비 없음' = 생산비 전액을 회수 대상으로 보고,
             # 수확·선별·포장·운송처럼 실제로 수량에 비례하는 비용만 사용자가 지정한다.
-            _yv = [c for c in yield_var_col if c in e.columns]
-            _vc_total = (e[_yv].sum(axis=1) if _yv
+            _yield_var_cost_cols = [c for c in yield_var_col if c in e.columns]
+            _vc_total = (e[_yield_var_cost_cols].sum(axis=1) if _yield_var_cost_cols
                          else pd.Series(0.0, index=e.index))
             # 부산물가액은 주산물 수량과 무관하게 들어오는 수입이므로 회수 대상에서 뺀다.
             _fc = (e["생산비"] - _vc_total - e["부산물가액"]).clip(lower=0)
@@ -9716,7 +9716,7 @@ elif menu == "💰 경제성분석":
             _mean_mgmt = float(e["경영비"].mean())
             _mgmt_bc = (float(e["총수입"].mean()) / _mean_mgmt) if _mean_mgmt > 0 else np.nan
             _mgmt_bc_txt = f"{_mgmt_bc:.2f}" if pd.notna(_mgmt_bc) else "계산 불가"
-            _yv_txt = (", ".join(map(str, _yv)) if _yv else "지정 안 함")
+            _yv_txt = (", ".join(map(str, _yield_var_cost_cols)) if _yield_var_cost_cols else "지정 안 함")
             st.caption("**손익분기수량 = (생산비 − 부산물가액 − 수량비례비) ÷ "
                        "(단가 − 단위당 수량비례비)**입니다. "
                        f"수량에 비례하는 비용: **{_yv_txt}** — 지정하지 않으면 "
@@ -9974,18 +9974,18 @@ elif menu == "💰 경제성분석":
                            if np.isfinite(_sens_plot[_i, _j])]
                     _ys.sort(key=lambda z: z[0])
                     _placed = []
-                    for _yv, _i in _ys:
-                        _ly = _yv + _base_gap
+                    for _yval, _i in _ys:
+                        _ly = _yval + _base_gap
                         if _placed and _ly - _placed[-1][0] < _min_gap:
                             _ly = _placed[-1][0] + _min_gap
-                        _placed.append((_ly, _i, _yv))
-                    for _ly, _i, _yv in _placed:
+                        _placed.append((_ly, _i, _yval))
+                    for _ly, _i, _yval in _placed:
                         _col = _line_palette[_i % len(_line_palette)]
                         # 점과 숫자가 멀어진 경우에만 아주 얇은 연결선을 보여준다.
-                        if abs(_ly - _yv) > _base_gap * 1.7:
-                            ax2.plot([_rx, _rx], [_yv, _ly - _base_gap*0.25],
+                        if abs(_ly - _yval) > _base_gap * 1.7:
+                            ax2.plot([_rx, _rx], [_yval, _ly - _base_gap*0.25],
                                      color=_col, lw=.45, alpha=.55, zorder=2)
-                        ax2.text(_rx, _ly, f"{_yv:,.0f}",
+                        ax2.text(_rx, _ly, f"{_yval:,.0f}",
                                  ha="center", va="bottom", fontsize=7.2,
                                  color=_col, fontweight="bold",
                                  bbox=dict(facecolor="white", edgecolor="none",
@@ -10027,7 +10027,8 @@ elif menu == "💰 경제성분석":
             _tsel = tw1.selectbox("기준 처리구", e[trt].astype(str).tolist(), key="tw_trt")
             _tstep = tw2.selectbox("변동 간격", [5, 10], index=1, key="tw_step")
             _row = e[e[trt].astype(str) == _tsel].iloc[0]
-            _row_yvc = float(_row[_yv].sum()) if _yv else 0.0
+            _row_yvc = (float(_row[_yield_var_cost_cols].sum())
+                        if _yield_var_cost_cols else 0.0)
             hm = two_way_sensitivity(float(_row[yq]), float(_row[pr]),
                                      float(_row["경영비"]),
                                      float(_row["부산물가액"]) if "부산물가액" in e.columns else 0,
