@@ -49,6 +49,26 @@ def is_excluded_cost(name) -> bool:
                for token in CONTAINS_EXCLUDE_COST_NAMES)
 
 
+def is_depreciation_cost(name) -> bool:
+    """감가상각·상각 성격의 경영비 열인지 이름으로 보수적으로 판별한다."""
+    normalized = _norm_name(name)
+    return any(token in normalized for token in ("감가상각", "상각비", "시설상각", "대농구상각"))
+
+
+def is_land_rent_cost(name) -> bool:
+    """토지 임차료로 볼 가능성이 높은 비용명만 판별한다. 장비·시설 임차는 제외한다."""
+    raw = str(name).strip()
+    normalized = _norm_name(name)
+    machine_hints = ("농기계", "기계", "장비", "시설", "하우스", "트랙터",
+                     "관리기", "드론", "로봇", "스마트", "설비", "차량")
+    if any(k in raw for k in machine_hints):
+        return False
+    land_hints = ("토지", "농지", "지대", "밭", "논", "경지", "부지", "전답")
+    generic = {_norm_name(x) for x in ("임차료", "임대료", "지대", "임차비", "임대비")}
+    return normalized in generic or (any(k in raw for k in land_hints)
+                                     and any(k in raw for k in ("임차", "임대", "지대")))
+
+
 def round_half_up(value, digits: int = 0):
     """회계 표시용 사사오입(ROUND_HALF_UP). NaN은 NaN으로 유지한다."""
     if value is None or (isinstance(value, (float, np.floating)) and not np.isfinite(value)):
@@ -104,6 +124,7 @@ def validate_economic_inputs(
     cost_cols: Iterable,
     labor_col=None,
     land_cost_per_10a=0,
+    land_cash_rent_per_10a=0,
     land_type="토지비 제외",
     source_area_a=10.0,
     byproduct_col=None,
@@ -111,7 +132,9 @@ def validate_economic_inputs(
     interest_rate=0,
     capital_months=6,
     fixed_asset_per_10a=0,
+    fixed_asset_use_rate_percent=100.0,
     establishment_amort_per_10a=0,
+    depreciation_cost_cols=None,
 ) -> list[str]:
     """경제성 계산을 왜곡할 설정·결측·음수·무한대를 사전에 검사한다."""
     errors: list[str] = []
@@ -125,6 +148,14 @@ def validate_economic_inputs(
     missing_costs = [c for c in cost_cols if c not in columns]
     if missing_costs:
         errors.append("자료에 없는 경영비 열: " + ", ".join(map(str, missing_costs)))
+    depreciation_cost_cols = list(depreciation_cost_cols or [])
+    missing_dep = [c for c in depreciation_cost_cols if c not in columns]
+    if missing_dep:
+        errors.append("자료에 없는 감가상각비 열: " + ", ".join(map(str, missing_dep)))
+    not_in_cost = [c for c in depreciation_cost_cols if c not in cost_cols]
+    if not_in_cost:
+        errors.append("감가상각비 열은 경영비에 포함된 열 중에서 선택해야 합니다: "
+                      + ", ".join(map(str, not_in_cost)))
     if not cost_cols:
         errors.append("경영비 열을 하나 이상 선택해야 합니다.")
     if quantity_col == price_col:
@@ -148,8 +179,10 @@ def validate_economic_inputs(
     _finite_nonnegative_scalar(wage_per_hour, "농촌임료금", errors)
     _finite_nonnegative_scalar(interest_rate, "자본 이자율", errors, maximum=100)
     _finite_nonnegative_scalar(capital_months, "자본 적용기간", errors, maximum=12)
-    _finite_nonnegative_scalar(fixed_asset_per_10a, "고정자산 평가액", errors)
-    _finite_nonnegative_scalar(land_cost_per_10a, "토지용역비", errors)
+    _finite_nonnegative_scalar(fixed_asset_per_10a, "고정자산 부분현재가/평가액", errors)
+    _finite_nonnegative_scalar(fixed_asset_use_rate_percent, "고정자산 작목부담률", errors, maximum=100)
+    _finite_nonnegative_scalar(land_cost_per_10a, "자가토지 용역비", errors)
+    _finite_nonnegative_scalar(land_cash_rent_per_10a, "토지 임차료", errors)
     _finite_nonnegative_scalar(establishment_amort_per_10a, "조성비 상각액", errors)
 
     risky = [c for c in cost_cols if is_excluded_cost(c)]
@@ -159,13 +192,13 @@ def validate_economic_inputs(
         if any(any(key in _norm_name(c) for key in ("자가노력", "자가노동"))
                for c in cost_cols):
             errors.append("자가노력비 열과 자가노동시간×노임을 동시에 사용할 수 없습니다.")
-    rent_cols = [c for c in cost_cols if any(k in str(c) for k in ("임차", "임대", "지대"))]
+    rent_cols = [c for c in cost_cols if is_land_rent_cost(c)]
     try:
-        land_value = float(land_cost_per_10a or 0)
+        cash_rent_value = float(land_cash_rent_per_10a or 0)
     except (TypeError, ValueError):
-        land_value = 0
-    if rent_cols and land_value > 0 and land_type != "토지비 제외":
-        errors.append("경영비의 임차료와 별도 토지용역비를 동시에 적용할 수 없습니다: "
+        cash_rent_value = 0
+    if rent_cols and cash_rent_value > 0:
+        errors.append("경영비의 토지 임차료 열과 별도 토지 임차료를 동시에 적용할 수 없습니다: "
                       + ", ".join(map(str, rent_cols)))
 
     if treatment_col in columns:
@@ -207,19 +240,25 @@ def calculate_row_economics(
     interest_rate=0,
     capital_months=6,
     fixed_asset_per_10a=0,
+    fixed_asset_use_rate_percent=100.0,
     land_cost_per_10a=0,
+    land_cash_rent_per_10a=0,
     establishment_amort_per_10a=0,
     source_area_a=10.0,
+    depreciation_cost_cols=None,
 ):
     """각 행에서 10a 경제성을 계산한 뒤 처리 평균으로 집계한다."""
     errors = validate_economic_inputs(
         data, treatment_col, quantity_col, price_col, cost_cols,
         labor_col=labor_col, land_cost_per_10a=land_cost_per_10a,
-        land_type="토지비 적용" if float(land_cost_per_10a or 0) > 0 else "토지비 제외",
+        land_cash_rent_per_10a=land_cash_rent_per_10a,
+        land_type="토지비 적용" if (float(land_cost_per_10a or 0) > 0 or float(land_cash_rent_per_10a or 0) > 0) else "토지비 제외",
         source_area_a=source_area_a, byproduct_col=byproduct_col,
         wage_per_hour=wage_per_hour, interest_rate=interest_rate,
         capital_months=capital_months, fixed_asset_per_10a=fixed_asset_per_10a,
+        fixed_asset_use_rate_percent=fixed_asset_use_rate_percent,
         establishment_amort_per_10a=establishment_amort_per_10a,
+        depreciation_cost_cols=depreciation_cost_cols,
     )
     # calculate_row_economics는 임차료 중복 여부를 UI에서 land_type과 함께 검사한다.
     errors = [e for e in errors if not e.startswith("경영비의 임차료와 별도 토지용역비")]
@@ -251,12 +290,33 @@ def calculate_row_economics(
     for col in cost_cols:
         d[f"__비용10a__{col}"] = d[col] * factor
     d["_경영비"] = d[[f"__비용10a__{c}" for c in cost_cols]].sum(axis=1)
-    d["_경영비"] += float(establishment_amort_per_10a)
+    d["_조성비상각"] = float(establishment_amort_per_10a)
+    d["_토지임차료"] = float(land_cash_rent_per_10a)
+    d["_경영비"] += d["_조성비상각"] + d["_토지임차료"]
     d["_자가노동시간10a"] = d[labor_col] * factor if labor_col else 0.0
     d["_자가노력비"] = d["_자가노동시간10a"] * float(wage_per_hour)
-    d["_유동자본용역비"] = (d["_경영비"] * float(interest_rate) / 100
-                         * (float(capital_months) / 12))
-    d["_고정자본용역비"] = float(fixed_asset_per_10a) * float(interest_rate) / 100
+
+    # 농촌진흥청 농산물소득조사 방식: 유동자본은 감가상각 성격의 비용을 제외한
+    # 실제 유동자본액에 연이자율 × 산출계수 1/2 × 재포기간(월/12)을 적용한다.
+    dep_cols = list(depreciation_cost_cols or [])
+    if not dep_cols:
+        dep_cols = [c for c in cost_cols if is_depreciation_cost(c)]
+    dep_cols = [c for c in dep_cols if c in cost_cols]
+    if dep_cols:
+        d["_감가상각제외액"] = d[[f"__비용10a__{c}" for c in dep_cols]].sum(axis=1)
+    else:
+        d["_감가상각제외액"] = 0.0
+    # 별도로 더한 조성비상각도 유동자본으로 보지 않는다.
+    d["_감가상각제외액"] += float(establishment_amort_per_10a)
+    d["_유동자본기준액"] = (d["_경영비"] - d["_감가상각제외액"]).clip(lower=0)
+    d["_유동자본용역비"] = (d["_유동자본기준액"] * float(interest_rate) / 100
+                         * 0.5 * (float(capital_months) / 12))
+
+    # 고정자본은 부분현재가(또는 현재 평가액)에 해당 작목 부담률을 적용한 금액에
+    # 연이자율을 곱한다.
+    d["_고정자본기준액"] = (float(fixed_asset_per_10a)
+                         * float(fixed_asset_use_rate_percent) / 100.0)
+    d["_고정자본용역비"] = d["_고정자본기준액"] * float(interest_rate) / 100
     d["_토지용역비"] = float(land_cost_per_10a)
     d["_총수입"] = d["_주산물가액"] + d["_부산물가액"]
     d["_생산비"] = (d["_경영비"] + d["_자가노력비"] + d["_유동자본용역비"]
@@ -266,7 +326,8 @@ def calculate_row_economics(
 
     group = d.groupby(treatment_col, sort=False, dropna=False)
     source_cols = [price_col, "_수량10a", "_주산물가액", "_부산물가액", "_경영비",
-                   "_자가노동시간10a", "_자가노력비", "_유동자본용역비",
+                   "_조성비상각", "_토지임차료", "_자가노동시간10a", "_자가노력비", "_감가상각제외액",
+                   "_유동자본기준액", "_유동자본용역비", "_고정자본기준액",
                    "_고정자본용역비", "_토지용역비", "_총수입", "_생산비",
                    "_소득", "_순수익"]
     source_cols += [f"__비용10a__{c}" for c in cost_cols]
@@ -293,6 +354,11 @@ def validate_economic_results(row_data: pd.DataFrame, summary: pd.DataFrame,
     for label, column, expected in relations:
         if not np.allclose(row_data[column], expected, rtol=tolerance, atol=tolerance, equal_nan=False):
             errors.append(f"행별 {label} 역산 검증에 실패했습니다.")
+    if "_유동자본기준액" in row_data.columns and "_감가상각제외액" in row_data.columns:
+        expected_wc = (row_data["_경영비"] - row_data["_감가상각제외액"]).clip(lower=0)
+        if not np.allclose(row_data["_유동자본기준액"], expected_wc,
+                           rtol=tolerance, atol=tolerance, equal_nan=False):
+            errors.append("행별 유동자본 기준액 역산 검증에 실패했습니다.")
     for col in ["_수량10a", "_주산물가액", "_부산물가액", "_경영비", "_생산비",
                 "_총수입", "_소득", "_순수익"]:
         if col in summary.columns and not np.isfinite(summary[col].to_numpy(dtype=float)).all():
@@ -573,6 +639,167 @@ def calculate_mrr_table(dominance_df: pd.DataFrame, treatment_col,
     return undominated
 
 
+def _investment_npv(cashflows, rate_percent: float) -> float:
+    """연도 0부터의 순현금흐름 현재가치 합계."""
+    rate = float(rate_percent) / 100.0
+    if rate <= -1:
+        raise ValueError("할인율은 -100%보다 커야 합니다.")
+    return float(sum(float(cf) / ((1.0 + rate) ** t) for t, cf in enumerate(cashflows)))
+
+
+def _solve_irr(cashflows, max_rate=1_000_000.0):
+    """NPV=0을 만드는 IRR(%)을 이분법으로 계산. 해가 없으면 NaN."""
+    flows = [float(x) for x in cashflows]
+    if not flows or not (any(x < 0 for x in flows) and any(x > 0 for x in flows)):
+        return np.nan
+
+    def f(r):
+        return _investment_npv(flows, r)
+
+    lo = -99.9999
+    flo = f(lo)
+    # 10%, 20% ... 식으로 상한을 확장해 부호가 바뀌는 구간을 찾는다.
+    candidates = [10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 100000, max_rate]
+    hi = None
+    fhi = None
+    for cand in candidates:
+        val = f(cand)
+        if flo == 0:
+            return lo
+        if val == 0:
+            return float(cand)
+        if flo * val < 0:
+            hi, fhi = float(cand), val
+            break
+    if hi is None:
+        return np.nan
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        fm = f(mid)
+        if abs(fm) < 1e-8 or abs(hi - lo) < 1e-9:
+            return float(mid)
+        if flo * fm <= 0:
+            hi, fhi = mid, fm
+        else:
+            lo, flo = mid, fm
+    return float((lo + hi) / 2.0)
+
+
+def calculate_investment_analysis(
+    initial_investment,
+    life_years,
+    discount_rate,
+    annual_benefit,
+    annual_operating_cost,
+    salvage_value=0,
+    annual_benefit_growth_percent=0.0,
+    annual_cost_growth_percent=0.0,
+):
+    """시설·농기계 등 장기투자의 NPV, 할인 B/C, IRR, 회수기간을 계산한다.
+
+    비용·편익은 연말 발생을 기본으로 하며, 최초투자비는 0년차에 전액 지출한다.
+    잔존가치는 마지막 연도의 편익으로 처리한다.
+    """
+    vals = {
+        "최초투자비": initial_investment, "내용연수": life_years,
+        "할인율": discount_rate, "연간편익": annual_benefit,
+        "연간운영비": annual_operating_cost, "잔존가치": salvage_value,
+        "편익증가율": annual_benefit_growth_percent,
+        "비용증가율": annual_cost_growth_percent,
+    }
+    nums = {}
+    for k, v in vals.items():
+        try:
+            nums[k] = float(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{k}은(는) 숫자여야 합니다.") from exc
+        if not math.isfinite(nums[k]):
+            raise ValueError(f"{k}에 NaN 또는 무한대를 사용할 수 없습니다.")
+    years = int(nums["내용연수"])
+    if years < 1 or abs(nums["내용연수"] - years) > 1e-9:
+        raise ValueError("내용연수는 1 이상의 정수여야 합니다.")
+    if nums["최초투자비"] < 0 or nums["연간편익"] < 0 or nums["연간운영비"] < 0 or nums["잔존가치"] < 0:
+        raise ValueError("투자비·편익·운영비·잔존가치는 음수일 수 없습니다.")
+    if nums["할인율"] <= -100:
+        raise ValueError("할인율은 -100%보다 커야 합니다.")
+    if nums["편익증가율"] <= -100 or nums["비용증가율"] <= -100:
+        raise ValueError("연간 증가율은 -100%보다 커야 합니다.")
+
+    r = nums["할인율"] / 100.0
+    bg = nums["편익증가율"] / 100.0
+    cg = nums["비용증가율"] / 100.0
+    rows = [{"연도": 0, "편익": 0.0, "비용": nums["최초투자비"],
+             "순현금흐름": -nums["최초투자비"], "할인계수": 1.0,
+             "편익현재가": 0.0, "비용현재가": nums["최초투자비"],
+             "순현재가": -nums["최초투자비"]}]
+    cashflows = [-nums["최초투자비"]]
+    for year in range(1, years + 1):
+        benefit = nums["연간편익"] * ((1.0 + bg) ** (year - 1))
+        cost = nums["연간운영비"] * ((1.0 + cg) ** (year - 1))
+        if year == years:
+            benefit += nums["잔존가치"]
+        net = benefit - cost
+        disc = 1.0 / ((1.0 + r) ** year)
+        rows.append({"연도": year, "편익": benefit, "비용": cost,
+                     "순현금흐름": net, "할인계수": disc,
+                     "편익현재가": benefit * disc, "비용현재가": cost * disc,
+                     "순현재가": net * disc})
+        cashflows.append(net)
+
+    table = pd.DataFrame(rows)
+    pv_benefit = float(table["편익현재가"].sum())
+    pv_cost = float(table["비용현재가"].sum())
+    npv = float(table["순현재가"].sum())
+    bcr = pv_benefit / pv_cost if pv_cost > 0 else np.nan
+    irr = _solve_irr(cashflows)
+
+    cumulative = table["순현금흐름"].cumsum().to_numpy(dtype=float)
+    cumulative_disc = table["순현재가"].cumsum().to_numpy(dtype=float)
+
+    def payback(cum, flows):
+        for year in range(1, len(cum)):
+            if cum[year] >= 0:
+                prev = cum[year - 1]
+                inc = float(flows[year])
+                if inc <= 0:
+                    return float(year)
+                frac = max(0.0, min(1.0, -prev / inc))
+                return float(year - 1 + frac)
+        return np.nan
+
+    simple_pb = payback(cumulative, table["순현금흐름"].to_numpy(dtype=float))
+    disc_pb = payback(cumulative_disc, table["순현재가"].to_numpy(dtype=float))
+    summary = {
+        "NPV": npv,
+        "할인 B/C": bcr,
+        "IRR(%)": irr,
+        "단순 회수기간(년)": simple_pb,
+        "할인 회수기간(년)": disc_pb,
+        "편익 현재가": pv_benefit,
+        "비용 현재가": pv_cost,
+        "경제성 판정": "경제성 있음" if npv > 0 else ("경제성 없음" if npv < 0 else "경계"),
+    }
+    return table, summary
+
+
+def investment_sensitivity_table(initial_investment, life_years, discount_rate,
+                                 annual_benefit, annual_operating_cost, salvage_value=0,
+                                 change_rates=(-20, -10, 0, 10, 20)):
+    """장기투자의 편익·운영비 변동에 따른 NPV 민감도 표."""
+    rows = []
+    for bchg in change_rates:
+        row = {"편익 변동": f"{int(bchg):+d}%"}
+        for cchg in change_rates:
+            _, res = calculate_investment_analysis(
+                initial_investment, life_years, discount_rate,
+                float(annual_benefit) * (1 + float(bchg) / 100.0),
+                float(annual_operating_cost) * (1 + float(cchg) / 100.0),
+                salvage_value=salvage_value)
+            row[f"비용 {int(cchg):+d}%"] = res["NPV"]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def run_economic_self_test() -> pd.DataFrame:
     """앱 안에서 빠르게 실행할 수 있는 핵심 경제성 자가진단."""
     rows = []
@@ -607,9 +834,41 @@ def run_economic_self_test() -> pd.DataFrame:
     def partial_case():
         row, _, _ = calculate_partial_budget(sample, "처리", "수량", "단가", ["비료비"])
         assert not validate_partial_budget_results(row)
+    def working_capital_case():
+        d0 = pd.DataFrame({"처리":["A"], "수량":[1], "단가":[1],
+                           "재료비":[800.0], "감가상각비":[200.0]})
+        row, _ = calculate_row_economics(
+            d0, "처리", "수량", "단가", ["재료비", "감가상각비"],
+            interest_rate=12, capital_months=12,
+            depreciation_cost_cols=["감가상각비"])
+        assert abs(float(row["_유동자본기준액"].iloc[0]) - 800.0) < 1e-9
+        assert abs(float(row["_유동자본용역비"].iloc[0]) - 48.0) < 1e-9
+    def fixed_capital_case():
+        d0 = pd.DataFrame({"처리":["A"], "수량":[1], "단가":[1], "비용":[1]})
+        row, _ = calculate_row_economics(
+            d0, "처리", "수량", "단가", ["비용"], interest_rate=5,
+            fixed_asset_per_10a=100000, fixed_asset_use_rate_percent=50)
+        assert abs(float(row["_고정자본용역비"].iloc[0]) - 2500.0) < 1e-9
+    def investment_case():
+        _, res = calculate_investment_analysis(1000, 3, 0, 600, 100)
+        assert abs(float(res["NPV"]) - 500.0) < 1e-9
+        assert abs(float(res["할인 B/C"]) - (1800/1300)) < 1e-9
+    def land_rent_case():
+        d0 = pd.DataFrame({"처리":["A"], "수량":[10], "단가":[1000], "비용":[1000]})
+        row, _ = calculate_row_economics(
+            d0, "처리", "수량", "단가", ["비용"], land_cash_rent_per_10a=2000,
+            land_cost_per_10a=3000, interest_rate=0)
+        assert abs(float(row["_경영비"].iloc[0]) - 3000.0) < 1e-9
+        assert abs(float(row["_토지용역비"].iloc[0]) - 3000.0) < 1e-9
+        assert abs(float(row["_소득"].iloc[0]) - 7000.0) < 1e-9
+        assert abs(float(row["_생산비"].iloc[0]) - 6000.0) < 1e-9
 
     for name, func in [("정상 소득계산", normal_case), ("5a→10a 환산", area_case),
                        ("음수 입력 차단", invalid_case), ("산출근거 파싱", manual_case),
-                       ("ROUND_HALF_UP", rounding_case), ("부분예산 역산", partial_case)]:
+                       ("ROUND_HALF_UP", rounding_case), ("부분예산 역산", partial_case),
+                       ("유동자본 1/2·상각제외", working_capital_case),
+                       ("고정자본 작목부담률", fixed_capital_case),
+                       ("장기투자 NPV/B-C", investment_case),
+                       ("임차료 경영비·자가토지 기회비용", land_rent_case)]:
         record(name, func)
     return pd.DataFrame(rows)

@@ -20,15 +20,21 @@ import statsmodels.api as sm
 from statsmodels.formula.api import ols
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import scikit_posthocs as sp
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.ensemble import (RandomForestClassifier, RandomForestRegressor,
-                              GradientBoostingClassifier, GradientBoostingRegressor)
+                              ExtraTreesClassifier, ExtraTreesRegressor,
+                              GradientBoostingClassifier, GradientBoostingRegressor,
+                              HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+                              AdaBoostClassifier, AdaBoostRegressor)
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.svm import SVC, SVR
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.naive_bayes import GaussianNB
+from sklearn.pipeline import Pipeline
+from sklearn.inspection import permutation_importance
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import make_pipeline
 from sklearn.metrics import accuracy_score, r2_score
 try:
     import anthropic
@@ -85,7 +91,197 @@ def set_korean_font():
             break
     plt.rcParams["axes.unicode_minus"] = False
 set_korean_font()
+
+# ================================================================ 공통 그래프 디자인
+# 원클릭 보고서의 차분한 블루 톤을 앱 전체 그래프의 기본값으로 사용한다.
+# 개별 그래프에서 별도 색을 지정하지 않아도 같은 분위기로 보이도록 rcParams에 반영한다.
+from cycler import cycler as _cycler
+_SMART_CHART_BLUE = ["#DCE9F5", "#C2D9EE", "#A3C4E2", "#82ACD3",
+                     "#6291C2", "#4576AB", "#2D5A8E", "#1F4569"]
+_SMART_CHART_RED = "#C96767"
+_SMART_CHART_RED_LIGHT = "#E9B5B5"
+_SMART_CHART_NEUTRAL = "#E3E9EF"
+plt.rcParams.update({
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "savefig.facecolor": "white",
+    "axes.edgecolor": "#AEBECD",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.labelcolor": "#43576A",
+    "axes.titlecolor": "#23394D",
+    "axes.titleweight": "bold",
+    "axes.titlesize": 11.5,
+    "axes.labelsize": 9.5,
+    "xtick.color": "#5B6F82",
+    "ytick.color": "#5B6F82",
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "grid.color": "#DCE7F0",
+    "grid.linewidth": 0.8,
+    "grid.alpha": 0.9,
+    "legend.frameon": False,
+    "legend.fontsize": 8,
+    "axes.prop_cycle": _cycler(color=["#4576AB", "#6F9FC8", "#91B8D8", "#2D5A8E",
+                                       "#B2CEE5", "#5A86B3", "#789FC3", "#355F8A"]),
+})
+
 st.set_page_config(page_title="스마트 통계 에이전트", page_icon="📊", layout="wide")
+
+
+# ================================================================ 공통 화면/엑셀 표 디자인
+# 모든 분석 화면이 같은 "스마트 블루" 표 디자인을 쓰도록 한 곳에서 관리한다.
+# 나중에 색을 바꾸고 싶으면 아래 팔레트만 수정하면 앱 전체에 반영된다.
+_ST_DATAFRAME = st.dataframe
+_SMART_BLUE = {
+    "navy": "#244A73", "header": "#3D6F9F", "mid": "#9EC5E5",
+    "light": "#EAF3FA", "pale": "#F7FBFF", "line": "#C9DCEB",
+}
+
+# Streamlit 기본 표 주변도 카드처럼 보이게 한다. 셀 색은 pandas Styler가 담당한다.
+st.markdown("""
+<style>
+[data-testid="stDataFrame"] {border:1px solid #d7e5f1; border-radius:10px; overflow:hidden;}
+[data-testid="stDataEditor"] {border:1px solid #d7e5f1; border-radius:10px; overflow:hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+
+def _smart_excluded_gradient_col(name):
+    """값의 크기가 '좋고 나쁨'을 뜻하지 않는 통계 열은 값 기반 그라데이션에서 제외."""
+    s = str(name).lower().replace(" ", "")
+    keys = ("p-value", "pvalue", "p값", "p(", "유의", "통계량", "t값", "t통계",
+            "f값", "f통계", "df", "자유도", "ci", "신뢰구간", "표준오차", "se(",
+            "표준편차", "sd(", "검정", "판정", "반복", "번호", "순번")
+    return any(k in s for k in keys)
+
+
+def smart_table(data, *args, **kwargs):
+    """st.dataframe 호환 래퍼.
+
+    - 원클릭 보고서의 푸른 계열 분위기를 모든 표에 통일한다.
+    - 일반 결과표에는 값 크기에 따른 자동 색상(그라데이션)을 넣지 않는다.
+      숫자가 크다는 이유만으로 더 중요하거나 더 좋은 값처럼 보이는 오해를 막기 위함이다.
+    - 머리행과 아주 옅은 행 구분만 유지한다.
+    - 이미 Styler가 넘어온 경우(결측치 강조 등) 기존 의미 기반 스타일은 보존한다.
+    """
+    try:
+        is_styler = data.__class__.__name__ == "Styler"
+        if is_styler:
+            sty = data
+            try:
+                sty = sty.set_table_styles([
+                    {"selector": "th", "props": [("background-color", _SMART_BLUE["header"]),
+                                                    ("color", "white"), ("font-weight", "700"),
+                                                    ("border", f"1px solid {_SMART_BLUE['line']}")]},
+                    {"selector": "td", "props": [("border", f"1px solid {_SMART_BLUE['line']}")]},
+                ], overwrite=False)
+            except Exception:
+                pass
+            return _ST_DATAFRAME(sty, *args, **kwargs)
+
+        if isinstance(data, pd.DataFrame):
+            shown = sup_display(data)
+            sty = shown.style
+            try:
+                # 연한 행 구분 + 파란 머리행
+                def _band_rows(row):
+                    bg = _SMART_BLUE["pale"] if (row.name % 2 == 0 if isinstance(row.name, (int, np.integer)) else False) else "white"
+                    return [f"background-color:{bg}" for _ in row]
+                sty = sty.apply(_band_rows, axis=1)
+            except Exception:
+                pass
+
+            try:
+                sty = sty.set_table_styles([
+                    {"selector": "th", "props": [("background-color", _SMART_BLUE["header"]),
+                                                    ("color", "white"), ("font-weight", "700"),
+                                                    ("border", f"1px solid {_SMART_BLUE['line']}")]},
+                    {"selector": "td", "props": [("border", f"1px solid {_SMART_BLUE['line']}")]},
+                ], overwrite=False)
+            except Exception:
+                pass
+            return _ST_DATAFRAME(sty, *args, **kwargs)
+    except Exception:
+        pass
+    return _ST_DATAFRAME(data, *args, **kwargs)
+
+
+def dataframe_to_styled_xlsx(df, title="스마트 통계 에이전트 분석 결과", sheet_name="분석결과"):
+    """화면의 스마트 블루 디자인을 실제 .xlsx에도 반영한다."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.utils import get_column_letter
+    import datetime as _dt
+
+    frame = sup_display(df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df))
+    wb = Workbook()
+    ws = wb.active
+    ws.title = str(sheet_name)[:31] or "분석결과"
+    ws.sheet_properties.tabColor = "3D6F9F"
+    ws.sheet_view.showGridLines = False
+    ncol = max(len(frame.columns), 1)
+
+    # 제목/메타
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
+    c = ws.cell(1, 1, title)
+    c.fill = PatternFill("solid", fgColor="244A73")
+    c.font = Font(color="FFFFFF", bold=True, size=14)
+    c.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 27
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=ncol)
+    c2 = ws.cell(2, 1, f"생성일: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    c2.font = Font(color="5B6F82", size=9, italic=True)
+    c2.fill = PatternFill("solid", fgColor="F7FBFF")
+    c2.alignment = Alignment(horizontal="left")
+
+    header_row = 4
+    thin = Side(style="thin", color="C9DCEB")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for j, col in enumerate(frame.columns, 1):
+        cell = ws.cell(header_row, j, str(col))
+        cell.fill = PatternFill("solid", fgColor="3D6F9F")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+    ws.row_dimensions[header_row].height = 24
+
+    for i, row in enumerate(frame.itertuples(index=False, name=None), header_row + 1):
+        for j, val in enumerate(row, 1):
+            cell = ws.cell(i, j)
+            if pd.isna(val):
+                cell.value = None
+            elif isinstance(val, (np.integer,)):
+                cell.value = int(val)
+            elif isinstance(val, (np.floating,)):
+                cell.value = float(val)
+            else:
+                cell.value = val
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if (i - header_row) % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor="F7FBFF")
+            if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                cell.number_format = '#,##0.###'
+
+    if len(frame) > 0 and len(frame.columns) > 0:
+        # Excel 내장 TableStyle은 Office 테마에 따라 색이 달라져 앱 화면과 어긋날 수 있다.
+        # 필터 기능만 유지하고 셀 색은 전부 스마트 블루 팔레트로 직접 지정한다.
+        ref = f"A{header_row}:{get_column_letter(len(frame.columns))}{header_row + len(frame)}"
+        ws.auto_filter.ref = ref
+
+    ws.freeze_panes = f"A{header_row + 1}"
+    ws.auto_filter.ref = (f"A{header_row}:{get_column_letter(len(frame.columns))}{header_row + len(frame)}"
+                          if len(frame.columns) and len(frame) else None)
+    for j, col in enumerate(frame.columns, 1):
+        vals = [str(col)] + ["" if pd.isna(v) else str(v) for v in frame[col].head(200)]
+        width = min(max(max((len(v) for v in vals), default=8) + 3, 10), 34)
+        ws.column_dimensions[get_column_letter(j)].width = width
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 MM = 7200 / 25.4          # 1mm = 283.46 HWPUNIT
 BODY_W = int(150 * MM)    # 본문 폭 150mm
@@ -503,6 +699,7 @@ from economic_core import (
     perform_dominance_analysis, calculate_mrr_table,
     validate_manual_budget_table,
     round_half_up, run_economic_self_test,
+    calculate_investment_analysis, investment_sensitivity_table,
 )
 
 
@@ -522,117 +719,6 @@ def validate_repeated_measure_balance(data, subject_col, time_col):
         "bad_subjects": bad_subjects,
         "duplicate_subjects": duplicate_subjects,
     }
-
-
-def validate_factorial_balance(data, factor_a, factor_b, block_col=None):
-    """이원배치/요인배치 자료의 조합 누락과 중복을 점검한다.
-
-    block_col이 있으면 각 블록에 A×B의 모든 조합이 존재하는지 확인한다.
-    같은 블록·같은 A×B 조합이 2행 이상이면 독립 반복인지 단순 하위표본인지
-    구분할 수 없으므로 경고를 반환한다.
-    """
-    d = data[[c for c in (block_col, factor_a, factor_b) if c]].dropna().copy()
-    a_levels = list(pd.unique(d[factor_a]))
-    b_levels = list(pd.unique(d[factor_b]))
-    expected = {(a, b) for a in a_levels for b in b_levels}
-    missing = {}
-    duplicates = []
-    if block_col:
-        for blk, g in d.groupby(block_col, dropna=False):
-            got = set(zip(g[factor_a], g[factor_b]))
-            miss = expected - got
-            if miss:
-                missing[blk] = sorted(miss, key=lambda x: (str(x[0]), str(x[1])))
-            cnt = g.groupby([factor_a, factor_b], dropna=False).size()
-            for (a, b), n in cnt[cnt > 1].items():
-                duplicates.append((blk, a, b, int(n)))
-    else:
-        got = set(zip(d[factor_a], d[factor_b]))
-        miss = expected - got
-        if miss:
-            missing["전체"] = sorted(miss, key=lambda x: (str(x[0]), str(x[1])))
-    return {
-        "ok": not missing,
-        "missing": missing,
-        "duplicates": duplicates,
-        "expected_cells": len(expected),
-        "a_levels": a_levels,
-        "b_levels": b_levels,
-    }
-
-
-def validate_split_plot_balance(data, rep_col, main_col, sub_col):
-    """고전적 균형 분할구법에 필요한 반복×주구×세구 구조를 엄격히 확인한다.
-
-    현재 앱의 F 검정은 균형 split-plot 오차항을 전제로 하므로, 조합 누락이나
-    한 subplot 조합의 중복 관측(하위표본)이 있으면 계산을 중단하는 것이 안전하다.
-    """
-    d = data[[rep_col, main_col, sub_col]].dropna().copy()
-    reps = list(pd.unique(d[rep_col]))
-    mains = list(pd.unique(d[main_col]))
-    subs = list(pd.unique(d[sub_col]))
-    expected_main = set(mains)
-    expected_sub = set(subs)
-    missing_main = {}
-    missing_sub = {}
-    duplicate_cells = []
-    for rep, g in d.groupby(rep_col, dropna=False):
-        got_main = set(g[main_col].unique())
-        if got_main != expected_main:
-            missing_main[rep] = sorted(expected_main - got_main, key=str)
-        for main in mains:
-            gm = g[g[main_col] == main]
-            got_sub = set(gm[sub_col].unique())
-            if got_sub != expected_sub:
-                missing_sub[(rep, main)] = sorted(expected_sub - got_sub, key=str)
-    cnt = d.groupby([rep_col, main_col, sub_col], dropna=False).size()
-    for (rep, main, sub), n in cnt[cnt > 1].items():
-        duplicate_cells.append((rep, main, sub, int(n)))
-    return {
-        "ok": (len(reps) >= 2 and len(mains) >= 2 and len(subs) >= 2
-               and not missing_main and not missing_sub and not duplicate_cells),
-        "missing_main": missing_main,
-        "missing_sub": missing_sub,
-        "duplicate_cells": duplicate_cells,
-        "n_rep": len(reps),
-        "n_main": len(mains),
-        "n_sub": len(subs),
-        "expected_n": len(reps) * len(mains) * len(subs),
-        "observed_n": len(d),
-    }
-
-
-def likert_scale_rules(scale_min, scale_max):
-    """리커트 척도 범위에 맞춘 기본 긍정/부정 기준을 반환한다.
-
-    5점 이상 척도는 상위 2개 범주를 긍정, 하위 2개 범주를 부정으로 두고
-    2~4점 척도는 최상/최하 범주만 사용한다. 화면에서 사용자가 기준을 바꿀 수 있다.
-    """
-    lo, hi = int(scale_min), int(scale_max)
-    if hi <= lo:
-        raise ValueError("척도 최대값은 최소값보다 커야 합니다.")
-    n_levels = hi - lo + 1
-    edge = 2 if n_levels >= 5 else 1
-    return {"negative_max": lo + edge - 1, "positive_min": hi - edge + 1}
-
-
-def validate_likert_frame(frame, columns, scale_min, scale_max):
-    """리커트 문항의 숫자·정수·척도 범위를 검증한다."""
-    problems = []
-    for c in columns:
-        raw = frame[c].dropna()
-        num = pd.to_numeric(raw, errors="coerce")
-        bad_num = int(num.isna().sum())
-        if bad_num:
-            problems.append(f"{c}: 숫자로 읽을 수 없는 응답 {bad_num}개")
-            continue
-        non_int = int((~np.isclose(num % 1, 0)).sum())
-        out = int(((num < scale_min) | (num > scale_max)).sum())
-        if non_int:
-            problems.append(f"{c}: 정수가 아닌 응답 {non_int}개")
-        if out:
-            problems.append(f"{c}: {scale_min}~{scale_max} 범위를 벗어난 응답 {out}개")
-    return problems
 
 
 def scale_observed_value_to_10a(value, source_area_a):
@@ -721,15 +807,12 @@ def calc_cv_lsd(model, data, group_col, value_col, alpha=0.05):
         grand = data[value_col].mean()
         cv = np.sqrt(mse) / grand * 100 if grand else np.nan
         counts = data.groupby(group_col)[value_col].count()
-        balanced = bool(len(counts) and counts.nunique() == 1)
-        # 반복수가 다르면 단일 LSD는 정확히 동일하지 않으므로 조화평균 기반 근사값으로 표시한다.
+        # 반복수가 다르면 조화평균 사용
         r = len(counts) / np.sum(1.0 / counts) if len(counts) else np.nan
         lsd = stats.t.ppf(1 - alpha/2, dfe) * np.sqrt(2 * mse / r) if r and r > 0 else np.nan
-        return {"CV": cv, "LSD": lsd, "MSE": mse, "dfe": dfe, "r": r,
-                "LSD_is_approx": not balanced}
+        return {"CV": cv, "LSD": lsd, "MSE": mse, "dfe": dfe, "r": r}
     except Exception:
-        return {"CV": np.nan, "LSD": np.nan, "MSE": np.nan, "dfe": np.nan, "r": np.nan,
-                "LSD_is_approx": False}
+        return {"CV": np.nan, "LSD": np.nan, "MSE": np.nan, "dfe": np.nan, "r": np.nan}
 
 def cv_grade(cv):
     """포장시험 CV% 판정"""
@@ -763,41 +846,138 @@ def to_numeric_clean(ser):
                   .str.replace(r"[^\d.\-]", "", regex=True))
     return pd.to_numeric(cleaned, errors="coerce")
 
-def fig_to_png(fig, show=True):
-    """그래프를 화면에 표시하고 PNG 바이트로 변환한 뒤 메모리에서 해제(누적 방지)"""
-    if show:
-        st.pyplot(fig)
+def _polish_figure(fig):
+    """공통 그래프 마감.
+
+    검은 윤곽선은 '그래프 전체'가 아니라 실제 데이터 요소에만 적용한다.
+    - 막대그래프: 막대 자체에만 얇은 검은 선
+    - 원형/도넛: 조각 자체에만 얇은 검은 선
+    - 선그래프/히트맵/산점도: 검은 외곽 프레임 없음
+    단일 계열 막대는 원클릭 보고서와 같은 블루 그라데이션으로 자동 통일한다.
+    """
+    try:
+        from matplotlib.container import BarContainer
+        from matplotlib.patches import Wedge
+        fig.patch.set_facecolor("white")
+        elem_border = bool(st.session_state.get("fig_border", True))
+        for ax in fig.axes:
+            ax.set_facecolor("white")
+            ax.tick_params(colors="#4B5F73", labelsize=9, length=3, direction="out")
+            ax.xaxis.label.set_color("#31485E")
+            ax.yaxis.label.set_color("#31485E")
+            if ax.title:
+                ax.title.set_color("#23394D")
+                ax.title.set_fontweight("bold")
+
+            # 전체 사각 프레임 금지. 좌·하단 축선만 연하게 유지한다.
+            if getattr(ax, "name", "rectilinear") == "rectilinear":
+                for side in ("top", "right"):
+                    if side in ax.spines:
+                        ax.spines[side].set_visible(False)
+                for side in ("left", "bottom"):
+                    if side in ax.spines:
+                        ax.spines[side].set_visible(True)
+                        ax.spines[side].set_color("#AEBECD")
+                        ax.spines[side].set_linewidth(0.75)
+
+            bars = [c for c in getattr(ax, "containers", []) if isinstance(c, BarContainer)]
+            # 단일 계열 막대는 옅은→진한 블루 그라데이션.
+            if len(bars) == 1 and len(bars[0].patches) > 1:
+                n = len(bars[0].patches)
+                grad = ["#BFD7EA", "#93B9D8", "#6F9FC8", "#4F7FAF",
+                        "#35658F", "#244A73"]
+                for i, p in enumerate(bars[0].patches):
+                    idx = round((len(grad)-1) * i / max(n-1, 1))
+                    p.set_facecolor(grad[idx])
+
+            # 검은 윤곽선은 '단일 계열의 일반 막대'에만 적용한다.
+            # 리커트·누적경영비처럼 여러 계열을 쌓는 그래프까지 각 조각을 검게 두르면
+            # 표가 잘게 끊겨 보이므로 해당 그래프는 원래의 흰 구분선을 유지한다.
+            if elem_border:
+                if len(bars) == 1:
+                    for p in bars[0].patches:
+                        try:
+                            p.set_edgecolor("#111111")
+                            p.set_linewidth(0.55)
+                        except Exception:
+                            pass
+                # 원형/도넛 조각 윤곽선.
+                for p in ax.patches:
+                    if isinstance(p, Wedge):
+                        try:
+                            p.set_edgecolor("#111111")
+                            p.set_linewidth(0.60)
+                        except Exception:
+                            pass
+
+            lg = ax.get_legend()
+            if lg is not None:
+                try:
+                    lg.get_frame().set_linewidth(0)
+                    lg.get_frame().set_facecolor("white")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return fig
+
+def _figure_png(fig, dpi=150):
+    """Matplotlib Figure를 화면/다운로드 공용 PNG bytes로 변환한다."""
+    _polish_figure(fig)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
     buf.seek(0)
-    data = buf.getvalue()
+    return buf.getvalue()
+
+
+def show_plot(fig, max_width=660):
+    """그래프를 브라우저 전체 폭으로 억지 확대하지 않고 보고서 크기로 표시한다.
+
+    Streamlit 버전에 따라 st.pyplot의 기본 폭 정책이 달라졌기 때문에, 화면 표시만큼은
+    PNG로 고정해 CSS stretch의 영향을 받지 않게 한다. 그래프 가로 설정은 반영하되
+    일반 단일 그래프는 660px, 2패널 이상은 최대 920px까지만 표시한다.
+    """
+    data = _figure_png(fig, dpi=145)
+    try:
+        fig_w = float(fig.get_figwidth())
+    except Exception:
+        fig_w = 6.0
+    px = int(max(430, min(int(max_width), round(fig_w * 92))))
+    st.image(data, width=px)
+    return data
+
+
+def fig_to_png(fig, show=True):
+    """그래프를 스마트 블루 스타일로 마감해 PNG로 반환한다."""
+    data = _figure_png(fig, dpi=160)
+    if show:
+        try:
+            fig_w = float(fig.get_figwidth())
+        except Exception:
+            fig_w = 6.0
+        # 1패널은 660px, 매우 넓은 다중패널 그림도 920px을 넘기지 않는다.
+        cap = 920 if fig_w >= 10 else 660
+        px = int(max(430, min(cap, round(fig_w * 92))))
+        st.image(data, width=px)
     plt.close(fig)
     return data
 
 def cronbach_alpha(df_items):
-    """Cronbach α. 문항 2개 미만·완전응답자 2명 미만·총점 분산 0이면 계산 불가."""
-    try:
-        x = df_items.apply(pd.to_numeric, errors="coerce").dropna()
-    except Exception:
-        return np.nan
-    k = x.shape[1]
-    if k < 2 or len(x) < 2:
-        return np.nan
-    item_var = x.var(axis=0, ddof=1).sum()
-    total_var = x.sum(axis=1).var(ddof=1)
-    if not np.isfinite(item_var) or not np.isfinite(total_var) or total_var <= 0:
-        return np.nan
-    return float((k / (k - 1)) * (1 - item_var / total_var))
+    k = df_items.shape[1]
+    if k < 2: return np.nan
+    item_var = df_items.var(axis=0, ddof=1).sum()
+    total_var = df_items.sum(axis=1).var(ddof=1)
+    if total_var == 0: return np.nan
+    return (k / (k - 1)) * (1 - item_var / total_var)
 
 
-def cronbach_level(alpha):
-    """Cronbach α 표시용 등급. 계산 불가를 '낮음'으로 오표시하지 않는다."""
-    if alpha is None or not np.isfinite(alpha):
-        return "계산 불가"
-    if alpha >= .9: return "매우 높음"
-    if alpha >= .8: return "높음"
-    if alpha >= .7: return "양호"
-    return "낮음"
+def likert_cutoffs(scale_max):
+    """척도 범위에 맞는 부정/긍정 경계. 5점이면 <=2 / >=4, 7점이면 <=3 / >=5."""
+    m = max(int(scale_max), 2)
+    center = (m + 1) / 2.0
+    neg = int(np.ceil(center) - 1)
+    pos = int(np.floor(center) + 1)
+    return pos, neg
 
 # ---------------------------------------------------------------- hwpx 스타일
 _HH = "http://www.hancom.co.kr/hwpml/2011/head"
@@ -905,9 +1085,19 @@ def _fills_plain(doc, shade, line_color, lw="0.1 mm"):
     return (bf(none_), bf(top_bottom, shade), bf(none_), bf(top_bottom, shade),
             bf(bottom))
 
+def _selected_hwp_font():
+    """한글 표/보고서에 실제 적용할 글꼴명. 목록 밖 글꼴은 직접 입력할 수 있다."""
+    ss = st.session_state
+    choice = str(ss.get("hwp_font", "휴먼명조"))
+    if choice == "직접 입력…":
+        custom = str(ss.get("hwp_font_custom", "")).strip()
+        return custom or "휴먼명조"
+    return choice
+
+
 def _doc_opts():
     ss = st.session_state
-    return dict(font=ss.get("hwp_font", "휴먼명조"), size=ss.get("hwp_size", 10),
+    return dict(font=_selected_hwp_font(), size=ss.get("hwp_size", 10),
                 shade=ss.get("hwp_shade", "#D9D9D9"), line=ss.get("hwp_line", "#000000"),
                 lw=ss.get("hwp_lw", "0.1 mm"), sides=ss.get("hwp_sides", False),
                 row_h=float(ss.get("hwp_rowh", 6.5)),
@@ -921,10 +1111,7 @@ def _cells_of(s):
 
 def _col_widths(tdf, total, min_cells=5, max_cells=46):
     """열마다 들어가는 글자 길이에 비례해 폭을 나눈다.
-
-    열 수가 많을 때도 최소폭의 합이 본문폭을 넘지 않도록 바닥폭을 동적으로 줄인다.
-    이전 방식은 17열 이상에서 각 열에 6%를 강제로 배정해 마지막 열 폭이 음수가 될 수 있었다.
-    """
+    (모든 열을 똑같이 나누면 긴 글이 든 열만 여러 줄로 접혀 표가 지저분해진다)"""
     n = tdf.shape[1]
     if n <= 0:
         return []
@@ -933,24 +1120,9 @@ def _col_widths(tdf, total, min_cells=5, max_cells=46):
         vals = [tdf.columns[c]] + list(tdf.iloc[:, c])
         longest = max((_cells_of(v) for v in vals), default=min_cells)
         need.append(min(max(longest, min_cells), max_cells))
-    weight_sum = float(sum(need)) or 1.0
-    # 적은 열에서는 기존 6% 수준을 유지하되, 많은 열에서는 전체폭의 절반까지만
-    # 최소폭으로 선점하도록 제한한다. 따라서 마지막 열이 0/음수가 되지 않는다.
-    floor_w = min(int(total * 0.06), max(int(total / max(2 * n, 1)), 1))
-    remaining = max(int(total) - floor_w * n, 0)
-    out = [floor_w + int(remaining * w / weight_sum) for w in need]
-    # 정수 나눗셈 잔여폭을 뒤에서부터 1씩 분배한다.
-    diff = int(total) - sum(out)
-    i = n - 1
-    while diff > 0:
-        out[i] += 1
-        diff -= 1
-        i = (i - 1) % n
-    # 방어적 안전장치: 폭이 1 미만인 열은 만들지 않는다.
-    if any(w <= 0 for w in out):
-        base = max(int(total // n), 1)
-        out = [base] * n
-        out[-1] = max(int(total) - sum(out[:-1]), 1)
+    s = float(sum(need)) or 1.0
+    out = [max(int(total * w / s), int(total * 0.06)) for w in need]
+    out[-1] = total - sum(out[:-1])          # 반올림 오차는 마지막 열이 흡수
     return out
 
 
@@ -1352,29 +1524,192 @@ def _xl_split(v):
     return float(m.group(1).replace(",", "")), (m.group(2) or "") + letters
 
 
-def make_xlsx(df, title, chart=True):
-    """표 + **엑셀에서 직접 편집할 수 있는 진짜 그래프**가 든 xlsx 를 만든다.
+def _xlsx_blue_fill(value, vmin, vmax):
+    """숫자 셀용 옅은 파랑 그라데이션 색상(HEX)을 반환."""
+    try:
+        if value is None or pd.isna(value) or vmax <= vmin:
+            return None
+        ratio = max(0.0, min(1.0, (float(value) - float(vmin)) / (float(vmax) - float(vmin))))
+        lo = (247, 251, 255)   # F7FBFF
+        hi = (158, 197, 229)   # 9EC5E5
+        rgb = tuple(round(lo[i] + (hi[i] - lo[i]) * ratio) for i in range(3))
+        return ''.join(f'{x:02X}' for x in rgb)
+    except Exception:
+        return None
 
-    화면의 그래프는 그림(PNG)이라 색·글꼴을 바꿀 수 없다. 여기서 만드는 것은
-    엑셀 기본 차트 개체라서, 받는 사람이 막대 색·글꼴·축 범위·차트 종류까지
-    평소 쓰던 대로 자유롭게 고칠 수 있다.
+
+def _xlsx_sig_specs_for_df(df, sheet_name='데이터', hdr=4):
+    """make_xlsx의 출력 열 구조를 그대로 재현해 차트용 유의성 문자 위치를 계산한다.
+
+    반환 key: (시트명, 값 열 문자) -> {sig_col, sig_values, start_row}
+    """
+    from openpyxl.utils import get_column_letter
+    out_cols = []
+    sig_map = {}
+    for c in df.columns:
+        raw_vals = list(df[c])
+        pairs = [_xl_split(v) for v in raw_vals]
+        nonempty = [i for i, v in enumerate(raw_vals)
+                    if not pd.isna(v) and str(v).strip().lower() not in ('', 'nan', 'none', '-', '―')]
+        all_parseable = bool(nonempty) and all(pairs[i][0] is not None for i in nonempty)
+        is_native_num = pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
+        is_num_col = is_native_num or all_parseable
+        value_pos = len(out_cols) + 1
+        out_cols.append((c, is_num_col))
+        letters = [p[1] or '' for p in pairs]
+        if is_num_col and any(letters):
+            sig_pos = len(out_cols) + 1
+            out_cols.append((f'{c} 유의성', False))
+            sig_map[(str(sheet_name), get_column_letter(value_pos))] = {
+                'sig_col': get_column_letter(sig_pos),
+                'sig_values': letters,
+                'value_values': [p[0] for p in pairs],
+                'start_row': hdr + 1,
+            }
+    return sig_map
+
+
+def _inject_xlsx_significance_labels(xlsx_bytes, specs):
+    """Excel 막대 위에 ``165.25ᵃ`` 형태의 유의성 레이블을 넣는다.
+
+    Excel의 일반 데이터 레이블과 셀 참조 텍스트를 동시에 켜면 일부 버전에서
+    작은 '범례 키 사각형 + a'처럼 렌더링되는 문제가 있다. 따라서 각 막대에
+    **값과 유의성 문자를 합친 하나의 사용자 지정 텍스트 레이블**만 넣는다.
+    범례 키·계열명·범주명은 모두 명시적으로 끈다.
+    """
+    if not specs:
+        return xlsx_bytes
+    import zipfile, re as _re
+    from lxml import etree as _ET
+
+    src = io.BytesIO(xlsx_bytes)
+    out = io.BytesIO()
+    CURI = 'http://schemas.openxmlformats.org/drawingml/2006/chart'
+    AURI = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    ns = {'c': CURI, 'a': AURI}
+    C = '{%s}' % CURI
+    A = '{%s}' % AURI
+
+    def _parse_formula(f):
+        m = _re.match(r"(?:'((?:[^']|'')+)'|([^!]+))!\$?([A-Z]+)\$?\d+", str(f or ''))
+        if not m:
+            return None, None
+        sheet = (m.group(1) or m.group(2) or '').replace("''", "'")
+        return sheet, m.group(3)
+
+    def _fmt_num(v):
+        try:
+            x = float(v)
+            if abs(x) >= 1000:
+                return f"{x:,.2f}".rstrip('0').rstrip('.')
+            return f"{x:.2f}".rstrip('0').rstrip('.')
+        except Exception:
+            return ''
+
+    def _rich_value_sig(parent, value_txt, sig_txt):
+        """Excel 데이터 레이블에 값 + 실제 위첨자 a/b/c를 rich text로 넣는다.
+
+        작은 범례키 사각형이나 Unicode 위첨자 글꼴 깨짐 없이
+        165.25ᵃ처럼 보이되, a는 DrawingML baseline 속성으로 진짜 위첨자 처리한다.
+        """
+        tx = _ET.SubElement(parent, C + 'tx')
+        rich = _ET.SubElement(tx, C + 'rich')
+        _ET.SubElement(rich, A + 'bodyPr')
+        _ET.SubElement(rich, A + 'lstStyle')
+        p = _ET.SubElement(rich, A + 'p')
+        r1 = _ET.SubElement(p, A + 'r')
+        _ET.SubElement(r1, A + 'rPr', lang='ko-KR', sz='900')
+        _ET.SubElement(r1, A + 't').text = value_txt
+        if sig_txt:
+            r2 = _ET.SubElement(p, A + 'r')
+            # baseline=30000은 본문 기준 약 30% 위로 올리는 DrawingML superscript 효과.
+            _ET.SubElement(r2, A + 'rPr', lang='en-US', sz='720', baseline='30000')
+            _ET.SubElement(r2, A + 't').text = str(sig_txt)
+        _ET.SubElement(p, A + 'endParaRPr', lang='ko-KR', sz='900')
+
+    with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            raw = zin.read(info.filename)
+            if not (info.filename.startswith('xl/charts/chart') and info.filename.endswith('.xml')):
+                zout.writestr(info, raw)
+                continue
+            try:
+                root = _ET.fromstring(raw)
+                changed = False
+                for ser in root.xpath('.//c:barChart/c:ser', namespaces=ns):
+                    fnode = ser.find('.//c:val/c:numRef/c:f', namespaces=ns)
+                    if fnode is None:
+                        continue
+                    sh, vcol = _parse_formula(fnode.text)
+                    spec = specs.get((sh, vcol))
+                    if not spec:
+                        continue
+                    old = ser.find(C + 'dLbls')
+                    if old is not None:
+                        ser.remove(old)
+                    dlbls = _ET.Element(C + 'dLbls')
+                    sig_values = list(spec.get('sig_values') or [])
+                    num_values = list(spec.get('value_values') or [])
+                    for i, sigv in enumerate(sig_values):
+                        if not sigv:
+                            continue
+                        dl = _ET.SubElement(dlbls, C + 'dLbl')
+                        _ET.SubElement(dl, C + 'idx', val=str(i))
+                        _ET.SubElement(dl, C + 'layout')
+                        _value_txt = _fmt_num(num_values[i] if i < len(num_values) else None)
+                        _rich_value_sig(dl, _value_txt, sigv)
+                        _ET.SubElement(dl, C + 'dLblPos', val='outEnd')
+                        _ET.SubElement(dl, C + 'showLegendKey', val='0')
+                        _ET.SubElement(dl, C + 'showVal', val='0')
+                        _ET.SubElement(dl, C + 'showCatName', val='0')
+                        _ET.SubElement(dl, C + 'showSerName', val='0')
+                        _ET.SubElement(dl, C + 'showPercent', val='0')
+                    _ET.SubElement(dlbls, C + 'showLegendKey', val='0')
+                    _ET.SubElement(dlbls, C + 'showVal', val='0')
+                    _ET.SubElement(dlbls, C + 'showCatName', val='0')
+                    _ET.SubElement(dlbls, C + 'showSerName', val='0')
+                    _ET.SubElement(dlbls, C + 'showPercent', val='0')
+                    _ET.SubElement(dlbls, C + 'dLblPos', val='outEnd')
+                    children = list(ser)
+                    pos = next((i for i, el in enumerate(children)
+                                if el.tag in (C + 'cat', C + 'val')), len(children))
+                    ser.insert(pos, dlbls)
+                    changed = True
+                if changed:
+                    raw = _ET.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+            except Exception:
+                pass
+            zout.writestr(info, raw)
+    return out.getvalue()
+
+
+
+def make_xlsx(df, title, chart=True, error_bars=False):
+    """스마트 블루 표 + 엑셀에서 직접 편집 가능한 차트가 든 xlsx를 만든다.
+
+    app(9)의 편집 가능한 Excel 차트 기능을 보존하면서, 화면과 같은 푸른 계열
+    머리행·행 구분·숫자 그라데이션·테두리·필터·틀 고정을 적용한다.
+    기본 차트는 처리구명 + 평균값을 명확히 보여주고 오차막대는 자동으로 넣지 않는다.
     """
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, Reference
     from openpyxl.chart.error_bar import ErrorBars
-    from openpyxl.chart.data_source import NumDataSource, NumRef
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.data_source import NumDataSource, NumRef, AxDataSource, StrRef, StrData, StrVal
+    from openpyxl.chart.marker import DataPoint
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
     from openpyxl.utils import get_column_letter
 
     # ① 값과 유의성 문자를 분리해 숫자 셀로 만든다.
-    # 문자열 열은 '비어 있지 않은 값이 전부 숫자로 해석될 때'만 숫자열로 바꾼다.
-    # 일부만 숫자인 열을 억지로 변환하면 나머지 문자값이 빈칸으로 사라지는 자료손실이 생긴다.
+    # 문자열 열은 비어 있지 않은 값이 모두 숫자로 해석될 때만 숫자열로 취급한다.
+    # 일부만 숫자인 열을 숫자열로 바꾸면 나머지 문자값이 빈칸으로 사라질 수 있다.
     cols, sig = [], {}
     for c in df.columns:
         raw_vals = list(df[c])
         pairs = [_xl_split(v) for v in raw_vals]
         nonempty = [i for i, v in enumerate(raw_vals)
-                    if not pd.isna(v) and str(v).strip().lower() not in ("", "nan", "none", "-", "―")]
+                    if not pd.isna(v) and str(v).strip().lower() not in ('', 'nan', 'none', '-', '―')]
         all_parseable = bool(nonempty) and all(pairs[i][0] is not None for i in nonempty)
         is_native_num = pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
         is_num_col = is_native_num or all_parseable
@@ -1382,184 +1717,328 @@ def make_xlsx(df, title, chart=True):
             vals = [p[0] if p[0] is not None else None for p in pairs]
             cols.append((c, vals, True))
             if any(p[1] for p in pairs):
-                sig[c] = [p[1] or "" for p in pairs]
+                sig[c] = [p[1] or '' for p in pairs]
         else:
-            cols.append((c, [("" if pd.isna(v) else str(v)) for v in raw_vals], False))
+            cols.append((c, [('' if pd.isna(v) else str(v)) for v in raw_vals], False))
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "데이터"
-    FONT = "맑은 고딕"
-    head_fill = PatternFill("solid", fgColor="D9E2D4")
+    ws.title = '데이터'
+    ws.sheet_properties.tabColor = '3D6F9F'
+    ws.sheet_view.showGridLines = False
+    FONT = '맑은 고딕'
+    NAVY, HEADER, MID, LIGHT, PALE, LINE = '244A73', '3D6F9F', '9EC5E5', 'EAF3FA', 'F7FBFF', 'C9DCEB'
+    thin = Side(style='thin', color=LINE)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws["A1"] = title
-    ws["A1"].font = Font(name=FONT, size=13, bold=True)
-    ws["A2"] = "숫자를 고치면 그래프가 바로 따라 바뀝니다. 그래프를 눌러 색·글꼴·축을 자유롭게 바꾸세요."
-    ws["A2"].font = Font(name=FONT, size=9, italic=True, color="666666")
-
-    HDR = 4                                        # 머리행 위치
+    HDR = 4
     out_cols = []
     for name, vals, is_num in cols:
         out_cols.append((name, vals, is_num))
-        if name in sig:                            # 유의성 문자는 별도 열로 뺀다
-            out_cols.append((f"{name} 유의성", sig[name], False))
+        if name in sig:
+            out_cols.append((f'{name} 유의성', sig[name], False))
+
+    n_out = max(len(out_cols), 1)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_out)
+    a1 = ws.cell(1, 1, title)
+    a1.fill = PatternFill('solid', fgColor=NAVY)
+    a1.font = Font(name=FONT, size=14, bold=True, color='FFFFFF')
+    a1.alignment = Alignment(horizontal='left', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_out)
+    a2 = ws.cell(2, 1, '숫자를 고치면 그래프가 바로 따라 바뀝니다. 그래프를 눌러 색·글꼴·축을 자유롭게 바꾸세요.')
+    a2.font = Font(name=FONT, size=9, italic=True, color='5B6F82')
+    a2.fill = PatternFill('solid', fgColor='F7FBFF')
+    a2.alignment = Alignment(horizontal='left')
 
     for j, (name, vals, is_num) in enumerate(out_cols, start=1):
         h = ws.cell(row=HDR, column=j, value=str(name))
-        h.font = Font(name=FONT, bold=True)
-        h.fill = head_fill
-        h.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        h.font = Font(name=FONT, bold=True, color='FFFFFF', size=10)
+        h.fill = PatternFill('solid', fgColor=HEADER)
+        h.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        h.border = border
         for i, v in enumerate(vals, start=HDR + 1):
             cell = ws.cell(row=i, column=j, value=v)
             cell.font = Font(name=FONT)
-            cell.alignment = Alignment(horizontal="center" if not is_num else "right")
-            if is_num and v is not None and abs(v) < 1000:
-                cell.number_format = "0.00"
-        w = max([len(str(name))] + [len(str(v)) for v in vals]) * 1.9 + 4
-        ws.column_dimensions[get_column_letter(j)].width = min(max(w, 10), 34)
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center' if not is_num else 'right', vertical='center')
+            # 값 크기와 무관한 아주 옅은 행 구분만 사용한다.
+            # 평균·CV·순위 같은 숫자가 크다는 이유로 더 중요해 보이지 않게 한다.
+            fill_color = PALE if (i - HDR) % 2 == 0 else 'FFFFFF'
+            cell.fill = PatternFill('solid', fgColor=fill_color)
+            if is_num and v is not None:
+                try:
+                    fv = float(v)
+                    cell.number_format = '#,##0.00' if abs(fv) < 1000 else '#,##0.###'
+                except Exception:
+                    pass
+        w = max([len(str(name))] + [len(str(v)) for v in vals[:200]]) * 1.55 + 4
+        ws.column_dimensions[get_column_letter(j)].width = min(max(w, 11), 32)
 
     nrow = len(df)
+    if out_cols:
+        ws.freeze_panes = f'A{HDR+1}'
+        ws.auto_filter.ref = f'A{HDR}:{get_column_letter(len(out_cols))}{HDR+nrow}' if nrow else f'A{HDR}:{get_column_letter(len(out_cols))}{HDR}'
+
     if not chart or nrow == 0:
         buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
     # ② 범주축은 원본 표의 첫 번째 열을 우선 사용한다.
-    # 처리구가 1·2·3처럼 숫자 코드여도 유의성 문자 열을 X축으로 잘못 잡지 않게 한다.
+    # 처리구가 1·2·3 같은 숫자 코드여도 유의성 문자 열을 X축으로 잘못 잡지 않는다.
     lab_idx = 1 if out_cols else None
     val_idx = [j for j, (nm, _, isn) in enumerate(out_cols, 1)
                if j != lab_idx and isn and _xl_is_value_col(nm)]
     err_idx = next((j for j, (nm, _, isn) in enumerate(out_cols, 1)
-                    if isn and any(k in str(nm) for k in ("표준편차", "표준오차", "SD", "SE"))), None)
+                    if isn and any(k in str(nm) for k in ('표준편차', '표준오차', 'SD', 'SE'))), None)
     if lab_idx is None or not val_idx:
         buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
-    val_idx = val_idx[:3]                          # 너무 많으면 앞의 3개만
+    val_idx = val_idx[:3]
 
     ch = BarChart()
-    ch.type = "col"
-    ch.style = 2
+    ch.type = 'col'
+    # Excel 기본 테마(style 번호)는 앱의 색을 덮어쓸 수 있어 사용하지 않는다.
     ch.title = title
-    ch.y_axis.title = str(out_cols[val_idx[0] - 1][0])
-    ch.x_axis.title = str(out_cols[lab_idx - 1][0])
-    ch.gapWidth = 60
-    ch.height, ch.width = 9.5, 17
+    # X축은 처리구명이 바로 보이므로 '처리구' 같은 축 제목은 따로 넣지 않는다.
+    # 축 제목이 범주명 자리를 먹어 처리구명이 안 보이는 문제를 방지한다.
+    # 단위/측정항목은 차트 제목에 이미 포함된다. Excel의 세로축 제목은
+    # 폭이 좁을 때 눈금과 겹치므로 표시하지 않는다.
+    ch.y_axis.title = None
+    ch.x_axis.title = None
+    ch.gapWidth = 82
+    ch.height, ch.width = 9.2, 17
+    ch.roundedCorners = False
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.x_axis.axPos = "b"
+    ch.y_axis.axPos = "l"
+    ch.x_axis.tickLblPos = "nextTo"
+    ch.y_axis.tickLblPos = "nextTo"
+    ch.x_axis.majorTickMark = "none"
+    ch.y_axis.majorTickMark = "out"
+    ch.x_axis.noMultiLvlLbl = True
 
     cats = Reference(ws, min_col=lab_idx, min_row=HDR + 1, max_row=HDR + nrow)
     for j in val_idx:
         data = Reference(ws, min_col=j, min_row=HDR, max_row=HDR + nrow)
-        ch.add_data(data, titles_from_data=True)
+        ch.add_data(data, titles_from_data=True, from_rows=False)
     ch.set_categories(cats)
+    # 처리구가 문자일 때 openpyxl의 기본 set_categories()가 numRef를 만들면
+    # Excel에서 X축 처리구명이 통째로 안 보일 수 있다. 문자 범주는 strRef로 강제한다.
+    if not out_cols[lab_idx - 1][2]:
+        _cat_formula = "'데이터'!${}${}:${}${}".format(
+            get_column_letter(lab_idx), HDR + 1, get_column_letter(lab_idx), HDR + nrow)
+        _cat_values = [str(v) if v is not None else "" for v in out_cols[lab_idx - 1][1]]
+        _cache = StrData(
+            ptCount=len(_cat_values),
+            pt=[StrVal(idx=i, v=v) for i, v in enumerate(_cat_values)]
+        )
+        for _ser in ch.series:
+            _ser.cat = AxDataSource(strRef=StrRef(f=_cat_formula, strCache=_cache))
 
-    # ③ 값 열이 하나뿐일 때만 오차막대를 붙인다(여러 개면 어느 오차인지 모호해진다)
-    if err_idx and len(val_idx) == 1:
+    # 차트도 화면과 같은 스마트 블루. 단일 계열 막대는 처리별로 밝기 그라데이션을 준다.
+    _excel_series = ('3D6F9F', '6FA3CF', '9EC5E5')
+    _excel_points = ('C2D9EE', 'A3C4E2', '82ACD3', '6291C2', '4576AB', '2D5A8E', '1F4569')
+    for _si, (ser, col) in enumerate(zip(ch.series, _excel_series)):
         try:
-            ref = NumRef(f="'데이터'!${}${}:${}${}".format(
+            ser.graphicalProperties.solidFill = col
+            ser.graphicalProperties.line.solidFill = '000000'
+            ser.graphicalProperties.line.width = 6350
+            if len(ch.series) == 1 and nrow > 1:
+                # 화면의 원클릭 막대처럼 각 처리별로 옅은→진한 블루를 준다.
+                pts = []
+                for _i in range(nrow):
+                    _c = _excel_points[round((len(_excel_points)-1) * _i / max(nrow-1, 1))]
+                    _dp = DataPoint(idx=_i)
+                    _dp.graphicalProperties = GraphicalProperties(solidFill=_c)
+                    _dp.graphicalProperties.line.solidFill = '000000'
+                    _dp.graphicalProperties.line.width = 4763
+                    pts.append(_dp)
+                ser.dPt = pts
+        except Exception:
+            pass
+    try:
+        # 차트/플롯 전체를 둘러싸는 검은 사각 프레임은 넣지 않는다.
+        ch.graphical_properties = GraphicalProperties(solidFill='FFFFFF')
+        ch.graphical_properties.line.noFill = True
+        ch.plot_area.graphicalProperties = GraphicalProperties(solidFill='FFFFFF')
+        ch.plot_area.graphicalProperties.line.noFill = True
+
+        # 사용자가 요청한 대로 차트 전체/축/격자선의 불필요한 선은 모두 제거한다.
+        # 검은 윤곽선은 막대 자체에만 남는다.
+        ch.x_axis.spPr = GraphicalProperties()
+        ch.x_axis.spPr.line.noFill = True
+        ch.y_axis.spPr = GraphicalProperties()
+        ch.y_axis.spPr.line.noFill = True
+        from openpyxl.chart.axis import ChartLines
+        _nogrid_x = ChartLines()
+        _nogrid_x.spPr = GraphicalProperties()
+        _nogrid_x.spPr.line.noFill = True
+        _nogrid_y = ChartLines()
+        _nogrid_y.spPr = GraphicalProperties()
+        _nogrid_y.spPr.line.noFill = True
+        ch.x_axis.majorGridlines = _nogrid_x
+        ch.y_axis.majorGridlines = _nogrid_y
+    except Exception:
+        pass
+    if len(ch.series) == 1:
+        ch.legend = None
+        ch.varyColors = False
+        try:
+            # 평균값은 막대 위에 바로 표시한다.
+            ch.dLbls = DataLabelList()
+            ch.dLbls.showVal = True
+            ch.dLbls.showCatName = False
+            ch.dLbls.showSerName = False
+            ch.dLbls.showLegendKey = False
+            ch.dLbls.position = "outEnd"
+            ch.dLbls.numFmt = '#,##0.00'
+        except Exception:
+            pass
+    else:
+        try:
+            ch.legend.position = "r"
+            ch.legend.overlay = False
+            # 응답자 특성처럼 빈도·비율이 함께 있는 그룹 막대도 값이 바로 보이게 한다.
+            ch.dLbls = DataLabelList()
+            ch.dLbls.showVal = True
+            ch.dLbls.showCatName = False
+            ch.dLbls.showSerName = False
+            ch.dLbls.showLegendKey = False
+            ch.dLbls.position = "outEnd"
+            ch.dLbls.numFmt = '0.##'
+        except Exception:
+            pass
+
+    if error_bars and err_idx and len(val_idx) == 1:
+        try:
+            ref = NumRef("'데이터'!${}${}:${}${}".format(
                 get_column_letter(err_idx), HDR + 1, get_column_letter(err_idx), HDR + nrow))
             ch.series[0].errBars = ErrorBars(
-                errDir="y", errBarType="both", errValType="cust",
+                errDir='y', errBarType='both', errValType='cust',
                 plus=NumDataSource(numRef=ref), minus=NumDataSource(numRef=ref))
+            try:
+                ch.series[0].errBars.spPr = GraphicalProperties()
+                ch.series[0].errBars.spPr.line.solidFill = '000000'
+            except Exception:
+                pass
         except Exception:
-            pass                                   # 오차막대는 있으면 좋은 것 — 실패해도 표·차트는 남긴다
+            pass
 
-    ws.add_chart(ch, f"{get_column_letter(len(out_cols) + 2)}{HDR}")
+    ws.add_chart(ch, f'{get_column_letter(len(out_cols) + 2)}{HDR}')
 
     note = HDR + nrow + 2
-    ws.cell(row=note, column=1, value="※ 유의성 문자(a, b, c)는 옆 열에 따로 담았습니다. "
-                                      "그래프에 넣으려면 막대를 누르고 [데이터 레이블 추가] 후 "
-                                      "[셀 값]으로 해당 열을 지정하세요.").font = \
-        Font(name=FONT, size=9, color="666666")
-    if err_idx and len(val_idx) == 1:
+    ws.cell(row=note, column=1, value='※ 유의성 문자(a, b, c)가 있는 결과는 그래프의 막대 위에도 자동 표시됩니다.').font = Font(name=FONT, size=9, color='5B6F82')
+    if error_bars and err_idx and len(val_idx) == 1:
         ws.cell(row=note + 1, column=1,
-                value=f"※ 오차막대는 '{out_cols[err_idx - 1][0]}' 열을 사용했습니다.").font = \
-            Font(name=FONT, size=9, color="666666")
+                value=f"※ 오차막대는 '{out_cols[err_idx - 1][0]}' 열을 사용했습니다.").font = Font(name=FONT, size=9, color='5B6F82')
 
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    buf = io.BytesIO(); wb.save(buf)
+    _raw = buf.getvalue()
+    _raw = _inject_xlsx_significance_labels(_raw, _xlsx_sig_specs_for_df(df, '데이터', HDR))
+    return _raw
 
 
-def _rewrite_chart_sheet_refs(chart, new_sheet, old_sheet="데이터"):
-    """openpyxl 차트의 셀 참조 시트명을 안전하게 바꾼다."""
+def _rewrite_chart_sheet_refs(chart, new_sheet, old_sheet='데이터'):
+    """openpyxl 차트의 값·범주·오차막대 참조 시트명을 바꾼다."""
     old_tokens = (f"'{old_sheet}'", old_sheet)
     new_token = f"'{new_sheet}'"
-    for ser in getattr(chart, "series", []):
-        refs = [getattr(ser, "val", None), getattr(ser, "cat", None),
-                getattr(ser, "tx", None), getattr(ser, "errBars", None)]
+    for ser in getattr(chart, 'series', []):
+        refs = [getattr(ser, 'val', None), getattr(ser, 'cat', None),
+                getattr(ser, 'tx', None), getattr(ser, 'errBars', None)]
         for ref in refs:
             if ref is None:
                 continue
-            for sub in ("numRef", "strRef"):
+            for sub in ('numRef', 'strRef'):
                 r = getattr(ref, sub, None)
-                if r is not None and getattr(r, "f", None):
+                if r is not None and getattr(r, 'f', None):
                     f = r.f
                     for old in old_tokens:
-                        f = f.replace(old + "!", new_token + "!")
+                        f = f.replace(old + '!', new_token + '!')
                     r.f = f
-            for side in ("plus", "minus"):
+            for side in ('plus', 'minus'):
                 nd = getattr(ref, side, None)
-                r = getattr(nd, "numRef", None) if nd is not None else None
-                if r is not None and getattr(r, "f", None):
+                r = getattr(nd, 'numRef', None) if nd is not None else None
+                if r is not None and getattr(r, 'f', None):
                     f = r.f
                     for old in old_tokens:
-                        f = f.replace(old + "!", new_token + "!")
+                        f = f.replace(old + '!', new_token + '!')
                     r.f = f
     return chart
 
 
-def make_xlsx_multi(blocks, doc_title="분석 결과"):
-    """여러 분석 결과를 **항목마다 시트 하나씩** 담은 엑셀 통합문서로 만든다.
-
-    원클릭 보고서는 조사항목이 8개씩 나오므로, 한 시트에 몰아넣는 대신
-    항목별로 시트를 나누고 각 시트에 편집 가능한 차트를 하나씩 넣는다.
-    """
+def make_xlsx_multi(blocks, doc_title='분석 결과'):
+    """여러 분석 결과를 항목별 시트로 나누고, 각 시트에 스마트 블루 표/편집가능 차트를 담는다."""
     from openpyxl import load_workbook
     used, sheets = set(), []
     for b in blocks:
-        tb = b.get("table")
+        tb = b.get('table')
         if tb is None or not len(tb):
             continue
-        # 시트 이름은 31자 제한 + : \ / ? * [ ] 사용 불가
-        nm = str(b.get("caption") or "결과")
-        for ch in ':\\/?*[]':
-            nm = nm.replace(ch, " ")
-        nm = (nm.strip() or "결과")[:28]
+        nm = str(b.get('caption') or '결과')
+        for bad in ':\\/?*[]':
+            nm = nm.replace(bad, ' ')
+        nm = (nm.strip() or '결과')[:28]
         base, i = nm, 2
         while nm in used:
-            nm = f"{base[:26]}_{i}"; i += 1
+            nm = f'{base[:26]}_{i}'; i += 1
         used.add(nm)
-        sheets.append((nm, tb, str(b.get("caption") or doc_title)))
+        sheets.append((nm, tb, str(b.get('caption') or doc_title)))
     if not sheets:
         return None
-    # 시트별로 만든 뒤 하나로 합친다(make_xlsx 한 벌만 유지해 동작이 어긋나지 않게)
+
     first = io.BytesIO(make_xlsx(sheets[0][1], sheets[0][2]))
     wb = load_workbook(first)
-    _first_ws = wb.active
-    _first_name = sheets[0][0]
-    _first_ws.title = _first_name
-    # 첫 번째 시트도 이름을 바꾼 뒤 차트 수식의 '데이터' 참조를 함께 바꿔야 한다.
-    for _ch in getattr(_first_ws, "_charts", []):
-        _rewrite_chart_sheet_refs(_ch, _first_name)
+    first_ws = wb.active
+    first_name = sheets[0][0]
+    first_ws.title = first_name
+    try:
+        first_ws.sheet_properties.tabColor = '3D6F9F'
+        first_ws.sheet_view.showGridLines = False
+    except Exception:
+        pass
+    for ch in getattr(first_ws, '_charts', []):
+        _rewrite_chart_sheet_refs(ch, first_name)
+
     for nm, tb, cap in sheets[1:]:
         src = load_workbook(io.BytesIO(make_xlsx(tb, cap)))
         ws_src = src.active
         ws = wb.create_sheet(nm)
-        for row in ws_src.iter_rows():
-            for c in row:
-                if c.value is None:
-                    continue
-                nc = ws.cell(row=c.row, column=c.column, value=c.value)
-                nc.font = c.font.copy(); nc.fill = c.fill.copy()
-                nc.alignment = c.alignment.copy()
-                nc.number_format = c.number_format
+        # 병합 셀/행 높이/열 너비/셀 스타일을 최대한 그대로 복사한다.
+        for mr in ws_src.merged_cells.ranges:
+            ws.merge_cells(str(mr))
+        for r, dim in ws_src.row_dimensions.items():
+            ws.row_dimensions[r].height = dim.height
         for k, v in ws_src.column_dimensions.items():
             ws.column_dimensions[k].width = v.width
-        for ch in getattr(ws_src, "_charts", []):
-            # 차트가 새 시트를 가리키도록 값·범주·오차막대 참조를 모두 치환한다.
+        for row in ws_src.iter_rows():
+            for c in row:
+                if c.value is None and not c.has_style:
+                    continue
+                nc = ws.cell(row=c.row, column=c.column, value=c.value)
+                nc.font = c.font.copy(); nc.fill = c.fill.copy(); nc.border = c.border.copy()
+                nc.alignment = c.alignment.copy(); nc.number_format = c.number_format
+                nc.protection = c.protection.copy()
+        ws.freeze_panes = ws_src.freeze_panes
+        ws.auto_filter.ref = ws_src.auto_filter.ref
+        try:
+            ws.sheet_properties.tabColor = '3D6F9F'
+            ws.sheet_view.showGridLines = False
+        except Exception:
+            pass
+        for ch in getattr(ws_src, '_charts', []):
             try:
                 _rewrite_chart_sheet_refs(ch, nm)
                 ws.add_chart(ch, ch.anchor)
             except Exception:
-                pass                      # 차트는 있으면 좋은 것 — 실패해도 표는 남는다
-    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
-
+                pass
+    buf = io.BytesIO(); wb.save(buf)
+    _raw = buf.getvalue()
+    _specs = {}
+    for _nm, _tb, _cap in sheets:
+        _specs.update(_xlsx_sig_specs_for_df(_tb, _nm, 4))
+    _raw = _inject_xlsx_significance_labels(_raw, _specs)
+    return _raw
 
 def dl_table(df, title, key, fname="table", image=None):
     """표(+선택적으로 그래프) 내려받기 — 체크했을 때만 파일을 만들어 화면이 빨라집니다.
@@ -1594,11 +2073,12 @@ def dl_table(df, title, key, fname="table", image=None):
             c2.caption(f"워드 파일 생성 실패 ({type(_e).__name__})")
     else:
         c2.caption("워드 저장: pip install python-docx 필요")
+    # app(9)의 "편집 가능한 Excel 차트" 기능을 유지하면서 스마트 블루 디자인을 적용한다.
     try:
-        c2.download_button("📈 엑셀(xlsx) — 그래프 편집 가능", make_xlsx(df, title),
+        c2.download_button("📈 엑셀(xlsx) — 스마트 블루 디자인 + 편집 가능한 그래프", make_xlsx(df, title),
                            f"{fname}.xlsx", key=f"xls_{key}", width="stretch",
-                           help="엑셀 기본 차트가 함께 들어갑니다. 막대 색·글꼴·축 범위·차트 종류를 "
-                                "엑셀에서 평소 쓰던 대로 바꿀 수 있습니다.")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           help="화면과 같은 스마트 블루 표·차트 디자인으로 저장됩니다. 막대 색·글꼴·축 범위·차트 종류도 엑셀에서 직접 바꿀 수 있습니다.")
     except Exception as _e:
         c2.caption(f"엑셀 파일 생성 실패 ({type(_e).__name__})")
     c1.download_button("📊 CSV (표만)", csv_text.encode("utf-8-sig"),
@@ -1615,6 +2095,391 @@ def report_button(slot, label="➕ 이 결과를 보고서에 담기"):
         if st.button(label, key="btn_" + slot):
             st.session_state.report_items.append(st.session_state[slot])
             st.success(f"보고서에 담았습니다! (현재 {len(st.session_state.report_items)}개) — '📑 보고서'에서 생성하세요.")
+
+
+def survey_download_panel(slot, key, fname):
+    """설문 결과의 한글/엑셀 다운로드를 체크박스에 숨기지 않고 바로 보여준다."""
+    item = st.session_state.get(slot)
+    if not item:
+        return
+    st.markdown("#### 📥 설문 분석 결과 다운로드")
+    st.caption("한글은 표·그래프를 묶은 보고서로, Excel은 결과표를 항목별 시트로 저장합니다.")
+
+    # 이전 버전의 상태 보존 로직이 download_button key를 session_state에 써 둔 세션에서는
+    # StreamlitValueAssignmentNotAllowedError가 계속 재현될 수 있다. 렌더 직전에 정리한다.
+    for _wk in (f"dl_svyhwp_{key}", f"dl_svyxls_{key}"):
+        try:
+            if _wk in st.session_state:
+                del st.session_state[_wk]
+        except Exception:
+            pass
+
+    c1, c2 = st.columns(2)
+    try:
+        hwp = build_report_hwpx([item], doc_title=item.get("heading", "설문조사 분석 결과"))
+        c1.download_button("📘 한글 보고서(hwpx)", hwp, f"{fname}.hwpx",
+                           key=f"dl_svyhwp_{key}", width="stretch")
+    except Exception as ex:
+        c1.caption(f"한글 파일 생성 실패 ({type(ex).__name__})")
+    blocks = item.get("blocks") or []
+    if not blocks and item.get("table") is not None:
+        blocks = [{"caption": item.get("heading", "설문 결과"), "table": item.get("table")}]
+    xblocks = [b for b in blocks if b.get("table") is not None]
+    try:
+        if xblocks:
+            xls = make_xlsx_multi(xblocks, doc_title=item.get("heading", "설문조사 분석 결과"))
+            c2.download_button("📈 Excel(xlsx) — 항목별 시트", xls, f"{fname}.xlsx",
+                               key=f"dl_svyxls_{key}", width="stretch",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            c2.caption("Excel로 저장할 표가 없습니다.")
+    except Exception as ex:
+        c2.caption(f"Excel 파일 생성 실패 ({type(ex).__name__})")
+
+
+# ================================================================ 회원가입/로그인 (Supabase Auth)
+# 별도 Python 패키지 없이 Supabase의 공식 Auth/REST endpoint를 requests로 호출한다.
+def _secret(name, default=""):
+    import os
+    try:
+        v = st.secrets.get(name, None)
+        if v is not None:
+            return str(v)
+    except Exception:
+        pass
+    return str(os.environ.get(name, default))
+
+
+def _truthy(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _auth_config():
+    # 2026년 Supabase 권장 키: publishable / secret.
+    # 기존 프로젝트의 anon / service_role 키도 호환되도록 fallback을 둔다.
+    publishable = _secret("SUPABASE_PUBLISHABLE_KEY") or _secret("SUPABASE_ANON_KEY")
+    secret = _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY")
+    return {
+        "url": _secret("SUPABASE_URL").rstrip("/"),
+        "anon": publishable,      # 기존 코드 호환용 이름
+        "service": secret,        # 기존 코드 호환용 이름
+        "required": _truthy(_secret("AUTH_REQUIRED", "false")),
+        "admins": {x.strip().lower() for x in _secret("ADMIN_EMAILS", "").split(",") if x.strip()},
+    }
+
+
+def _supabase_headers(token=None, service=False, content_type=False):
+    """Supabase 새 API key 모델과 legacy key를 모두 지원하는 헤더."""
+    cfg = _auth_config()
+    key = cfg["service"] if service and cfg["service"] else cfg["anon"]
+    headers = {"apikey": key} if key else {}
+    # 새 sb_publishable_/sb_secret_ 키는 API key 자체를 Bearer JWT로 보내면 안 된다.
+    # 사용자 세션 JWT가 있을 때만 Authorization에 넣는다.
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif key and not str(key).startswith("sb_"):
+        # legacy anon/service_role은 JWT 형태라 기존 방식과 호환된다.
+        headers["Authorization"] = f"Bearer {key}"
+    if content_type:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _supabase_post(path, payload, token=None, service=False, params=None, timeout=25):
+    cfg = _auth_config()
+    if not cfg["url"] or not cfg["anon"]:
+        return None, "Supabase 설정이 없습니다."
+    if service and not cfg["service"]:
+        return None, "Supabase Secret key 설정이 없습니다."
+    headers = _supabase_headers(token=token, service=service, content_type=True)
+    try:
+        r = _requests.post(cfg["url"] + path, headers=headers, json=payload,
+                           params=params, timeout=timeout)
+    except Exception as ex:
+        return None, f"네트워크 오류: {type(ex).__name__}"
+    if r.status_code not in (200, 201, 204):
+        try:
+            body = r.json() or {}
+            msg = body.get("msg") or body.get("message") or body.get("error_description") or body.get("error") or r.text
+        except Exception:
+            msg = r.text
+        return None, f"{r.status_code}: {str(msg)[:180]}"
+    if r.status_code == 204 or not r.text.strip():
+        return {}, None
+    try:
+        return r.json(), None
+    except Exception:
+        return {}, None
+
+
+def _supabase_get(path, token=None, service=False, params=None, timeout=25):
+    cfg = _auth_config()
+    if not cfg["url"] or not cfg["anon"]:
+        return None, "Supabase 설정이 없습니다."
+    if service and not cfg["service"]:
+        return None, "Supabase Secret key 설정이 없습니다."
+    headers = _supabase_headers(token=token, service=service)
+    try:
+        r = _requests.get(cfg["url"] + path, headers=headers, params=params, timeout=timeout)
+    except Exception as ex:
+        return None, f"네트워크 오류: {type(ex).__name__}"
+    if r.status_code != 200:
+        return None, f"{r.status_code}: {r.text[:180]}"
+    try:
+        return r.json(), None
+    except Exception:
+        return None, "응답을 읽지 못했습니다."
+
+def _supabase_signup(email, password, name, org_type, organization, department):
+    payload = {
+        "email": email.strip(), "password": password,
+        "data": {"name": name.strip(), "organization_type": org_type,
+                 "organization": organization.strip(), "department": department.strip()}
+    }
+    return _supabase_post("/auth/v1/signup", payload)
+
+
+def _supabase_login(email, password):
+    return _supabase_post("/auth/v1/token", {"email": email.strip(), "password": password},
+                          params={"grant_type": "password"})
+
+
+def _supabase_refresh(refresh_token):
+    return _supabase_post("/auth/v1/token", {"refresh_token": refresh_token},
+                          params={"grant_type": "refresh_token"})
+
+
+def _supabase_recover(email):
+    return _supabase_post("/auth/v1/recover", {"email": email.strip()})
+
+
+def _save_auth_session(js):
+    import time
+    if not js:
+        return False
+    user = js.get("user") or {}
+    token = js.get("access_token")
+    if not token or not user:
+        return False
+    st.session_state["auth_user"] = user
+    st.session_state["auth_access_token"] = token
+    st.session_state["auth_refresh_token"] = js.get("refresh_token", "")
+    st.session_state["auth_expires_at"] = time.time() + float(js.get("expires_in") or 3600)
+    return True
+
+
+def _current_auth_user():
+    import time
+    user = st.session_state.get("auth_user")
+    if not user:
+        return None
+    if time.time() > float(st.session_state.get("auth_expires_at", 0)) - 60:
+        rt = st.session_state.get("auth_refresh_token")
+        if rt:
+            js, err = _supabase_refresh(rt)
+            if not err and _save_auth_session(js):
+                user = st.session_state.get("auth_user")
+    return user
+
+
+def _record_login(user):
+    """관리자 대시보드용 프로필/접속 기록. service role secret은 서버 안에서만 사용."""
+    cfg = _auth_config()
+    if not user or not cfg["service"]:
+        return
+    import datetime as _dt
+    meta = user.get("user_metadata") or {}
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    profile = {
+        "id": user.get("id"), "email": user.get("email", ""),
+        "name": meta.get("name", ""), "organization_type": meta.get("organization_type", ""),
+        "organization": meta.get("organization", ""), "department": meta.get("department", ""),
+        "last_login_at": now,
+    }
+    # profiles: id unique/PK 전제. merge-duplicates로 가입자 프로필을 갱신한다.
+    cfg2 = _auth_config(); key = cfg2["service"]
+    headers = _supabase_headers(service=True, content_type=True)
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    try:
+        _requests.post(cfg2["url"] + "/rest/v1/profiles", headers=headers,
+                       params={"on_conflict": "id"}, json=profile, timeout=15)
+        event = {"user_id": profile.get("id"), "email": profile.get("email", ""),
+                 "name": profile.get("name", ""), "organization_type": profile.get("organization_type", ""),
+                 "organization": profile.get("organization", ""), "department": profile.get("department", ""),
+                 "logged_in_at": now}
+        _requests.post(cfg2["url"] + "/rest/v1/login_events", headers=headers,
+                       json=event, timeout=15)
+    except Exception:
+        pass
+
+
+def _auth_logout():
+    for k in ("auth_user", "auth_access_token", "auth_refresh_token", "auth_expires_at"):
+        st.session_state.pop(k, None)
+    st.rerun()
+
+
+def _record_usage(action):
+    """로그인 사용자가 실제 분석/보고서 기능을 실행했을 때 기관별 이용량을 남긴다."""
+    cfg = _auth_config(); user = _current_auth_user()
+    if not user or not cfg["service"]:
+        return
+    import datetime as _dt
+    meta = user.get("user_metadata") or {}
+    key = cfg["service"]
+    headers = _supabase_headers(service=True, content_type=True)
+    payload = {
+        "user_id": user.get("id"), "email": user.get("email", ""),
+        "name": meta.get("name", ""), "organization": meta.get("organization", ""),
+        "department": meta.get("department", ""), "action": str(action)[:300],
+        "used_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    try:
+        _requests.post(cfg["url"] + "/rest/v1/usage_events", headers=headers, json=payload, timeout=10)
+    except Exception:
+        pass
+
+
+def render_auth_gate():
+    """AUTH_REQUIRED=true이고 Supabase가 설정된 경우 회원만 앱에 진입하게 한다."""
+    cfg = _auth_config()
+    configured = bool(cfg["url"] and cfg["anon"])
+    if not (configured and cfg["required"]):
+        return True
+    user = _current_auth_user()
+    if user:
+        return True
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 1.35, 1])
+    with c2:
+        st.markdown("## 📊 스마트 통계 에이전트")
+        st.caption("회원가입 후 연구 데이터를 쉽고 정확하게 분석하세요.")
+        login_tab, signup_tab, reset_tab = st.tabs(["🔐 로그인", "✨ 회원가입", "🔑 비밀번호 찾기"])
+        with login_tab:
+            em = st.text_input("이메일", key="auth_login_email")
+            pw = st.text_input("비밀번호", type="password", key="auth_login_pw")
+            if st.button("로그인", type="primary", width="stretch", key="auth_login_btn"):
+                if not em or not pw:
+                    st.warning("이메일과 비밀번호를 입력해 주세요.")
+                else:
+                    with st.spinner("로그인 중..."):
+                        js, err = _supabase_login(em, pw)
+                    if err:
+                        st.error("로그인에 실패했습니다. 이메일/비밀번호 또는 이메일 인증 여부를 확인해 주세요.")
+                    elif _save_auth_session(js):
+                        _record_login(st.session_state.get("auth_user"))
+                        st.rerun()
+                    else:
+                        st.error("로그인 응답을 확인하지 못했습니다.")
+
+        with signup_tab:
+            nm = st.text_input("이름", key="auth_name")
+            em2 = st.text_input("이메일", key="auth_signup_email")
+            pw2 = st.text_input("비밀번호 (8자 이상 권장)", type="password", key="auth_signup_pw")
+            org_type = st.selectbox("기관 유형", ["도·특광역시 농업기술원", "농촌진흥청/소속기관",
+                                                  "시·군 농업기술센터", "대학교/연구기관",
+                                                  "농업 관련 기업/단체", "기타"], key="auth_org_type")
+            org = st.text_input("소속기관", placeholder="예: 경상북도농업기술원", key="auth_org")
+            dept = st.text_input("부서/연구소 (선택)", placeholder="예: 영양고추연구소", key="auth_dept")
+            consent = st.checkbox("이름·이메일·소속기관 및 서비스 접속기록을 운영 목적으로 저장하는 것에 동의합니다.",
+                                  key="auth_consent")
+            if st.button("회원가입", type="primary", width="stretch", key="auth_signup_btn"):
+                if not all([nm, em2, pw2, org]) or not consent:
+                    st.warning("이름·이메일·비밀번호·소속기관과 개인정보 안내 동의를 확인해 주세요.")
+                elif len(pw2) < 8:
+                    st.warning("비밀번호는 8자 이상을 권장합니다.")
+                else:
+                    with st.spinner("회원가입 중..."):
+                        js, err = _supabase_signup(em2, pw2, nm, org_type, org, dept)
+                    if err:
+                        st.error(f"회원가입에 실패했습니다: {err}")
+                    elif _save_auth_session(js):
+                        _record_login(st.session_state.get("auth_user"))
+                        st.success("가입과 로그인이 완료되었습니다.")
+                        st.rerun()
+                    else:
+                        st.success("가입 신청이 완료되었습니다. 이메일 인증 메일을 확인한 뒤 로그인해 주세요.")
+
+        with reset_tab:
+            rem = st.text_input("가입한 이메일", key="auth_reset_email")
+            if st.button("비밀번호 재설정 메일 보내기", width="stretch", key="auth_reset_btn"):
+                if not rem:
+                    st.warning("이메일을 입력해 주세요.")
+                else:
+                    _, err = _supabase_recover(rem)
+                    if err:
+                        st.error("재설정 메일 요청에 실패했습니다.")
+                    else:
+                        st.success("재설정 안내 메일을 보냈습니다.")
+        st.caption("🔒 비밀번호는 스마트 통계 에이전트 코드가 직접 저장하지 않고 Supabase Auth가 처리합니다.")
+    st.stop()
+
+
+def _is_admin_user(user=None):
+    user = user or _current_auth_user()
+    email = str((user or {}).get("email", "")).lower()
+    return bool(email and email in _auth_config()["admins"])
+
+
+def render_admin_dashboard():
+    st.title("👑 관리자 — 이용 현황")
+    cfg = _auth_config()
+    if not _is_admin_user():
+        st.error("관리자 계정만 접근할 수 있습니다.")
+        return
+    if not cfg["service"]:
+        st.warning("SUPABASE_SECRET_KEY(또는 기존 SERVICE_ROLE_KEY)가 설정되어야 관리자 통계를 볼 수 있습니다.")
+        return
+    profiles, e1 = _supabase_get("/rest/v1/profiles", service=True,
+                                 params={"select": "*", "order": "last_login_at.desc"})
+    events, e2 = _supabase_get("/rest/v1/login_events", service=True,
+                               params={"select": "*", "order": "logged_in_at.desc", "limit": 5000})
+    usage, e3 = _supabase_get("/rest/v1/usage_events", service=True,
+                              params={"select": "*", "order": "used_at.desc", "limit": 10000})
+    if e1:
+        st.error(f"회원 목록을 불러오지 못했습니다: {e1}")
+        return
+    p = pd.DataFrame(profiles or [])
+    ev = pd.DataFrame(events or [])
+    uv = pd.DataFrame(usage or [])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("가입/프로필 사용자", f"{len(p):,}명")
+    c2.metric("확인된 소속기관", f"{p['organization'].replace('', np.nan).nunique() if 'organization' in p else 0:,}곳")
+    c3.metric("로그인 기록", f"{len(ev):,}회")
+    c4.metric("기능 이용 기록", f"{len(uv):,}회")
+    if not p.empty and "organization" in p:
+        st.markdown("### 🏢 기관별 사용자")
+        g = (p.assign(소속기관=p["organization"].fillna("미입력").replace("", "미입력"))
+               .groupby("소속기관", dropna=False).size().reset_index(name="사용자 수")
+               .sort_values("사용자 수", ascending=False))
+        smart_table(g, width="stretch", hide_index=True)
+    if not p.empty:
+        st.markdown("### 👥 사용자 목록")
+        cols = [c for c in ["name", "email", "organization_type", "organization", "department", "last_login_at"] if c in p]
+        show = p[cols].rename(columns={"name":"이름", "email":"이메일", "organization_type":"기관유형",
+                                      "organization":"소속기관", "department":"부서", "last_login_at":"최근 로그인"})
+        smart_table(show, width="stretch", hide_index=True)
+        st.download_button("📊 사용자 목록 Excel", dataframe_to_styled_xlsx(show, "스마트 통계 에이전트 사용자 목록"),
+                           "사용자목록.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if not uv.empty:
+        st.markdown("### 📈 기관별 기능 이용")
+        _orguse = (uv.assign(소속기관=uv.get("organization", pd.Series(index=uv.index, dtype=object)).fillna("미입력").replace("", "미입력"))
+                     .groupby("소속기관", dropna=False).size().reset_index(name="기능 이용 횟수")
+                     .sort_values("기능 이용 횟수", ascending=False))
+        smart_table(_orguse, width="stretch", hide_index=True)
+        st.markdown("### 🧭 최근 기능 이용 기록")
+        _ucols = [c for c in ["used_at", "name", "email", "organization", "department", "action"] if c in uv]
+        _ushow = uv[_ucols].head(500).rename(columns={"used_at":"이용시각", "name":"이름", "email":"이메일",
+                                                        "organization":"소속기관", "department":"부서", "action":"기능"})
+        smart_table(_ushow, width="stretch", hide_index=True)
+
+    if not ev.empty:
+        st.markdown("### 🕘 최근 로그인")
+        cols = [c for c in ["logged_in_at", "name", "email", "organization", "department"] if c in ev]
+        show2 = ev[cols].head(300).rename(columns={"logged_in_at":"접속시각", "name":"이름", "email":"이메일",
+                                                   "organization":"소속기관", "department":"부서"})
+        smart_table(show2, width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------- AI 호출
 _AI_SYS = (
@@ -2016,6 +2881,160 @@ def ai_call(prompt, api_key=None, model=None, max_tokens=900, system=None, provi
         return "⚠️ 알 수 없는 AI 제공사입니다."
     return fn(prompt, api_key, model, max_tokens=max_tokens, system=system)
 
+
+# ================================================================ 이미지/음성 데이터 입력
+
+def _extract_ai_text_from_openai_response(js):
+    txt = str((js or {}).get("output_text") or "").strip()
+    if txt:
+        return txt
+    parts = []
+    for item in (js or {}).get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for c in item.get("content") or []:
+            if isinstance(c, dict) and c.get("type") in ("output_text", "text"):
+                v = c.get("text", "")
+                if isinstance(v, dict): v = v.get("value", "")
+                if v: parts.append(str(v))
+    return "".join(parts).strip()
+
+
+def ai_multimodal_text(binary, mime_type, prompt, kind="image"):
+    """현재 사이드바에서 선택한 AI 제공사로 이미지/오디오를 읽어 텍스트를 반환."""
+    import base64
+    provider = st.session_state.get("ai_provider", "Claude (Anthropic)")
+    api_key = st.session_state.get("api_key")
+    model = st.session_state.get("ai_model_g")
+    if not api_key or not model:
+        return "⚠️ 먼저 사이드바의 '🤖 AI 기능 켜기'에서 API 키와 모델을 설정해 주세요."
+    if not _HAS_REQUESTS:
+        return "⚠️ requests 라이브러리가 필요합니다."
+    b64 = base64.b64encode(binary).decode("ascii")
+
+    # Claude: 현재 모델은 이미지 입력 지원. 오디오는 직접 입력 미지원이므로 안내.
+    if str(provider).startswith("Claude"):
+        if kind == "audio":
+            return "⚠️ Claude 선택 상태에서는 음성 전사를 지원하지 않습니다. ChatGPT 또는 Gemini를 선택해 주세요."
+        try:
+            client = anthropic.Anthropic(api_key=api_key, timeout=90, max_retries=2)
+            msg = client.messages.create(
+                model=model, max_tokens=4000,
+                messages=[{"role":"user","content":[
+                    {"type":"image", "source":{"type":"base64", "media_type":mime_type, "data":b64}},
+                    {"type":"text", "text":prompt},
+                ]}])
+            return "".join(getattr(x, "text", "") for x in msg.content if getattr(x, "type", "") == "text").strip()
+        except Exception as ex:
+            return f"⚠️ 이미지 인식 오류: {_ai_mask(str(ex), api_key)[:160]}"
+
+    if str(provider).startswith("Gemini"):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        payload = {"contents":[{"parts":[
+            {"inline_data":{"mime_type":mime_type, "data":b64}}, {"text":prompt}
+        ]}], "generationConfig":{"maxOutputTokens":4000}}
+        r, err = _ai_http(_requests.post, url, api_key=api_key,
+                          headers={"x-goog-api-key":api_key, "Content-Type":"application/json"},
+                          json=payload, timeout=100)
+        if err: return err
+        try:
+            parts = (((r.json().get("candidates") or [])[0].get("content") or {}).get("parts") or [])
+            return "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+        except Exception:
+            return "⚠️ Gemini 멀티모달 응답을 읽지 못했습니다."
+
+    # OpenAI: image는 Responses API, audio는 공식 Transcriptions API.
+    if str(provider).startswith("ChatGPT"):
+        if kind == "audio":
+            try:
+                files = {"file": ("voice.wav", binary, mime_type or "audio/wav")}
+                data = {"model": "gpt-transcribe",
+                        "prompt": "한국어 농업 시험 조사 데이터입니다. 처리구, 반복, 초장, 수량, 과장, 과폭 등 숫자와 단위를 정확히 전사하세요."}
+                r = _requests.post("https://api.openai.com/v1/audio/transcriptions",
+                                   headers={"Authorization": f"Bearer {api_key}"},
+                                   files=files, data=data, timeout=100)
+                if r.status_code != 200:
+                    return _ai_error_message(r.status_code, _ai_mask(r.text, api_key))
+                return str((r.json() or {}).get("text") or "").strip()
+            except Exception as ex:
+                return f"⚠️ 음성 전사 오류: {_ai_mask(str(ex), api_key)[:160]}"
+        try:
+            payload = {
+                "model": model, "store": False, "max_output_tokens": 4000,
+                "input":[{"role":"user","content":[
+                    {"type":"input_text", "text":prompt},
+                    {"type":"input_image", "image_url":f"data:{mime_type};base64,{b64}"},
+                ]}]
+            }
+            r, err = _ai_http(_requests.post, "https://api.openai.com/v1/responses", api_key=api_key,
+                              headers={"Authorization":f"Bearer {api_key}", "Content-Type":"application/json"},
+                              json=payload, timeout=100)
+            if err: return err
+            return _extract_ai_text_from_openai_response(r.json())
+        except Exception as ex:
+            return f"⚠️ 이미지 인식 오류: {_ai_mask(str(ex), api_key)[:160]}"
+    return "⚠️ 지원하지 않는 AI 제공사입니다."
+
+
+def _json_from_ai_text(text):
+    import json, re
+    if not text or str(text).startswith("⚠️"):
+        return None
+    t = str(text).strip()
+    t = re.sub(r"^```(?:json)?\\s*", "", t, flags=re.I)
+    t = re.sub(r"\\s*```$", "", t)
+    # 앞뒤 설명이 붙어도 첫 JSON object/array를 최대한 복원
+    candidates = [t]
+    for left, right in (("{", "}"), ("[", "]")):
+        if left in t and right in t:
+            candidates.append(t[t.find(left):t.rfind(right)+1])
+    for c in candidates:
+        try:
+            return json.loads(c)
+        except Exception:
+            pass
+    return None
+
+
+def image_to_dataframe(binary, mime_type):
+    prompt = """이 이미지는 연구/조사 데이터 표입니다. 표의 글자와 숫자를 그대로 읽어 구조화하세요.
+반드시 JSON만 출력하세요. 형식:
+{"columns":["열1","열2"],"rows":[[값,값],[값,값]],"warnings":["애매한 셀 설명"]}
+규칙: 1) 보이지 않는 값을 추측하지 말고 null, 2) 소수점/음수/단위를 특히 정확히, 3) 병합 머리글은 의미가 보존되도록 한 줄 열 이름으로 합치기, 4) 표가 여러 개면 가장 큰 데이터 표 하나를 우선."""
+    raw = ai_multimodal_text(binary, mime_type, prompt, kind="image")
+    js = _json_from_ai_text(raw)
+    if not isinstance(js, dict):
+        return None, [raw if raw else "표를 구조화하지 못했습니다."]
+    cols, rows = js.get("columns") or [], js.get("rows") or []
+    if not cols or not isinstance(rows, list):
+        return None, ["열 또는 행을 찾지 못했습니다."]
+    fixed = []
+    for r in rows:
+        if isinstance(r, dict):
+            fixed.append([r.get(c) for c in cols])
+        elif isinstance(r, list):
+            fixed.append((r + [None] * len(cols))[:len(cols)])
+    return clean_columns(pd.DataFrame(fixed, columns=cols)), list(js.get("warnings") or [])
+
+
+def voice_text_to_row(transcript, columns=None):
+    cols = [str(c) for c in (columns or [])]
+    prompt = f"""다음은 연구자가 음성으로 말한 한 행의 조사 데이터입니다.
+음성: {transcript}
+현재 데이터 열: {cols if cols else '없음'}
+반드시 JSON만 출력하세요.
+현재 열이 있으면 {{"row": {{"열이름": 값, ...}}, "warnings": []}} 형식으로 해당 열 이름을 그대로 사용하세요.
+현재 열이 없으면 {{"row": {{"처리구":"A", "반복":1, ...}}, "warnings": []}} 형태로 의미 있는 열을 만드세요.
+말하지 않은 값은 null로 두고 숫자는 가능하면 숫자형으로 반환하세요. 추측하지 마세요."""
+    raw = ai_call(prompt, max_tokens=1200, system="데이터 입력 도우미입니다. JSON만 출력합니다.")
+    js = _json_from_ai_text(raw)
+    if not isinstance(js, dict) or not isinstance(js.get("row"), dict):
+        return None, [raw if raw else "음성을 행 데이터로 변환하지 못했습니다."]
+    row = js["row"]
+    if cols:
+        row = {c: row.get(c, None) for c in cols}
+    return row, list(js.get("warnings") or [])
+
 def ai_disclaimer():
     st.warning("⚠️ **AI가 만든 초안입니다.** 논문·보고서에 넣기 전에 반드시 연구자가 "
                "수치와 해석이 맞는지 확인하고 수정하세요. AI는 없는 인과관계를 서술하거나 "
@@ -2231,6 +3250,250 @@ def build_econ_context(**kw):
         "cautions": kw.get("cautions", []),
     }
     return _json_safe({k: v for k, v in ctx.items() if v is not None})
+
+
+# ---------------------------------------------------------------- 경제성 분석 길잡이(규칙 기반)
+_ECON_MODE_PARTIAL = "📕 부분예산표 (손실적·이익적 요소)"
+_ECON_MODE_INCOME = "📗 소득분석"
+_ECON_MODE_MRR = "📘 신기술 경제성 (부분예산·한계수익률)"
+_ECON_MODE_INVEST = "📙 시설·장기투자 경제성 (NPV·B/C·IRR)"
+
+
+def recommend_economic_guide(goal, change, comparison, period, data_items=None):
+    """초보자용 경제성 분석 길잡이의 순수 규칙 엔진.
+
+    STEP 1~5 응답을 받아 현재 앱의 경제성 모듈 중 가장 적합한 것을 추천한다.
+    AI/API를 쓰지 않으며, '잘 모르겠어요'가 포함되어도 나머지 답으로 판단한다.
+    정책·공공사업 CBA는 기존 농가단위 모듈로 억지 연결하지 않는다.
+    """
+    data_items = list(data_items or [])
+    values = [str(goal or ''), str(change or ''), str(comparison or ''), str(period or '')]
+    unknown_count = sum('잘 모르' in v or '아직 모르' in v for v in values)
+    if any('아직 거의 준비' in str(x) or '자료가 어떤' in str(x) for x in data_items):
+        unknown_count += 1
+
+    def has(text, *tokens):
+        s = str(text or '')
+        return any(t in s for t in tokens)
+
+    scores = {
+        _ECON_MODE_PARTIAL: 0.0,
+        _ECON_MODE_INCOME: 0.0,
+        _ECON_MODE_MRR: 0.0,
+        _ECON_MODE_INVEST: 0.0,
+    }
+    reasons = []
+    tags = []
+    warnings = []
+
+    # 정책·공공사업은 현재 농가단위 모듈 범위를 벗어난다.
+    if has(goal, '정책', '사회적') or has(change, '사회적', '환경적', '공공사업'):
+        return {
+            'primary_mode': None,
+            'title': '🏛️ 비용편익분석(CBA) — 현재 직접 계산 미지원',
+            'confidence': '높음',
+            'scores': scores,
+            'reasons': [
+                '정책·공공사업은 농가 개인의 수입·비용뿐 아니라 사회 전체의 편익·비용과 외부효과를 평가해야 합니다.',
+                '현재 프로그램의 소득분석·부분예산·MRR은 농가 또는 기술대안 단위 분석이므로 범위가 다릅니다.',
+            ],
+            'needs': ['사회적 편익', '사회적 비용', '외부효과의 화폐가치', '분석기간', '사회적 할인율'],
+            'together': ['재무성 분석과 경제성(CBA)을 구분', '비시장 편익·비용의 평가 근거 명시'],
+            'tags': ['CBA'], 'warnings': [], 'ambiguous': False,
+            'missing_reported': [], 'top_two': [],
+        }
+
+    # STEP 1: 연구 목적
+    if has(goal, '기존 방식보다', '신품종', '신기술'):
+        scores[_ECON_MODE_PARTIAL] += 7
+        scores[_ECON_MODE_MRR] += 2
+        reasons.append('기존 방식과 신기술의 차이를 평가하는 목적입니다.')
+    elif has(goal, '현재 작목', '현재 처리', '수익성'):
+        scores[_ECON_MODE_INCOME] += 8
+        reasons.append('현재 한 해의 조수입·소득·순수익 자체가 핵심 질문입니다.')
+    elif has(goal, '여러 대안', '가장 경제적', '무엇을 권'):
+        scores[_ECON_MODE_MRR] += 8
+        scores[_ECON_MODE_INCOME] += 2
+        reasons.append('여러 대안 중 추가비용 대비 추가편익을 비교하려는 목적입니다.')
+    elif has(goal, '시설', '농기계', '투자할 가치'):
+        scores[_ECON_MODE_INVEST] += 10
+        reasons.append('초기 투자비를 들여 여러 해 사용하는 자산의 투자 타당성이 핵심 질문입니다.')
+    elif has(goal, '어느 가격', '어느 수량', '손해'):
+        scores[_ECON_MODE_INCOME] += 8
+        tags.append('손익분기점')
+        reasons.append('현재 비용구조를 기준으로 손익이 0이 되는 가격·수량을 찾는 질문입니다.')
+    elif has(goal, '가격', '수량', '유지', '위험'):
+        scores[_ECON_MODE_INCOME] += 8
+        tags.append('민감도 분석')
+        reasons.append('기준 소득을 계산한 뒤 가격·수량 변동에 대한 위험을 확인하는 질문입니다.')
+    elif has(goal, '여러 작형', '여러 품종', '경영성과'):
+        scores[_ECON_MODE_INCOME] += 7
+        scores[_ECON_MODE_PARTIAL] += 1
+        reasons.append('같은 기간의 처리·작형별 경영성과를 동일 기준으로 비교하려는 목적입니다.')
+
+    # STEP 2: 실제로 달라지는 것
+    if has(change, '품종', '방제', '재배법', '재배기술'):
+        scores[_ECON_MODE_PARTIAL] += 5
+        scores[_ECON_MODE_MRR] += 1
+        reasons.append('품종·방제·재배기술 변경은 기존 방식 대비 변화분 비교가 중요합니다.')
+    elif has(change, '투입수준', '투입량', '비료량', '농약량', '노동량'):
+        scores[_ECON_MODE_MRR] += 5
+        scores[_ECON_MODE_PARTIAL] += 2
+        reasons.append('투입수준에 따라 비용이 단계적으로 달라지는 구조입니다.')
+    elif has(change, '시설', '농기계', '신규 투자'):
+        scores[_ECON_MODE_INVEST] += 8
+        reasons.append('시설·농기계의 신규 투자가 포함됩니다.')
+    elif has(change, '판매가격', '상품수량', '상품률', '수량·가격'):
+        scores[_ECON_MODE_INCOME] += 4
+        tags.append('민감도 분석')
+        reasons.append('가격·수량 변화가 수익성에 미치는 영향 확인이 필요합니다.')
+    elif has(change, '특별한 변경 없음', '현재 경영성과'):
+        scores[_ECON_MODE_INCOME] += 6
+        reasons.append('특정 신기술의 변화분보다 현재 경영성과 자체를 평가하는 구조입니다.')
+
+    # STEP 3: 비교 구조
+    if has(comparison, '대조구 1개', '신기술 1', '신품종 1'):
+        scores[_ECON_MODE_PARTIAL] += 6
+        reasons.append('대조구와 신기술을 직접 비교하는 구조라 부분예산법과 잘 맞습니다.')
+    elif has(comparison, '3개 이상', '비용이 다른', '여러 대안'):
+        scores[_ECON_MODE_MRR] += 8
+        reasons.append('비용이 다른 3개 이상 대안은 지배분석과 MRR로 단계적 채택 여부를 보기 좋습니다.')
+    elif has(comparison, '여러 품종', '여러 작형', '한 해 성과'):
+        scores[_ECON_MODE_INCOME] += 6
+        reasons.append('여러 처리의 한 해 소득·순수익을 같은 기준으로 비교하는 구조입니다.')
+    elif has(comparison, '비교대상 없음'):
+        scores[_ECON_MODE_INCOME] += 3
+        reasons.append('비교대상이 없으므로 우선 현재 수익성의 기준선을 만드는 것이 적합합니다.')
+
+    # STEP 4: 분석기간
+    if has(period, '한 작기', '1년'):
+        scores[_ECON_MODE_PARTIAL] += 2
+        scores[_ECON_MODE_INCOME] += 2
+        scores[_ECON_MODE_MRR] += 2
+        scores[_ECON_MODE_INVEST] -= 1
+        reasons.append('경제효과를 한 작기·1년 기준으로 평가합니다.')
+    elif has(period, '2년 이상'):
+        scores[_ECON_MODE_INVEST] += 4
+        warnings.append('여러 해 자료라도 매년 독립적인 재배기술 비교라면 연도별 부분예산/소득분석을 병행할 수 있습니다.')
+        reasons.append('효과가 여러 해 지속되므로 시간가치를 확인할 필요가 있습니다.')
+    elif has(period, '내용연수', '사용기간 전체'):
+        scores[_ECON_MODE_INVEST] += 8
+        reasons.append('시설·기계의 내용연수 전체를 보므로 할인현금흐름 분석이 필요합니다.')
+
+    # STEP 5: 보유자료 — 추천을 뒤집기보다 실행가능성 판단에 가중치를 조금만 준다.
+    items_text = ' | '.join(map(str, data_items))
+    if has(items_text, '최초 투자비'):
+        scores[_ECON_MODE_INVEST] += 2
+    if has(items_text, '연도별 편익', '연간 편익'):
+        scores[_ECON_MODE_INVEST] += 2
+    if has(items_text, '할인율', '잔존가치'):
+        scores[_ECON_MODE_INVEST] += 2
+    if has(items_text, '달라지는 비용'):
+        scores[_ECON_MODE_PARTIAL] += 1
+        scores[_ECON_MODE_MRR] += 1
+    if has(items_text, '항목별 경영비'):
+        scores[_ECON_MODE_INCOME] += 1
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_mode, top_score = ranked[0]
+    second_mode, second_score = ranked[1]
+    margin = top_score - second_score
+
+    # 모든 응답이 거의 미정이면 억지 추천하지 않는다.
+    ambiguous = bool(top_score < 5 or (unknown_count >= 3 and margin < 3))
+    if ambiguous:
+        primary_mode = None
+        title = '🧭 추천 보류 — 두 가지만 더 정리하면 정확히 고를 수 있어요'
+        confidence = '낮음'
+    else:
+        primary_mode = top_mode
+        confidence = '높음' if unknown_count <= 1 and margin >= 3 else ('중간' if margin >= 1.5 else '낮음')
+        title_map = {
+            _ECON_MODE_PARTIAL: '📕 부분예산법',
+            _ECON_MODE_INCOME: '📗 소득분석',
+            _ECON_MODE_MRR: '📘 신기술 경제성(MRR)',
+            _ECON_MODE_INVEST: '📙 시설·장기투자 분석',
+        }
+        title = title_map[top_mode]
+
+    meta = {
+        _ECON_MODE_PARTIAL: {
+            'needs': ['대조구·신기술구 구분', '조사면적과 수량(또는 판매수입)', '실제 판매가격', '신기술 때문에 달라진 비용: 종묘·비료·농약·자재·노동·위탁·임차 등 변화분만'],
+            'together': ['반복시험이면 수량·소득의 통계검정', '가격 변동이 크면 민감도 분석'],
+            'data_groups': [
+                ('처리구/대조구 구분', ['처리구/대조구 구분']),
+                ('수량·생산량', ['수량·생산량']),
+                ('판매가격/판매액', ['판매가격/판매액']),
+                ('변화 비용', ['신기술로 달라지는 비용만', '항목별 경영비']),
+            ],
+        },
+        _ECON_MODE_INCOME: {
+            'needs': ['처리구/작형·반복(비교 시)', '조사면적과 생산량', '실제 판매가격과 부산물수입(있으면)', '경영비: 종자·종묘, 비료, 농약, 수도광열, 재료, 소농구, 감가상각, 수선, 임차, 위탁영농, 고용노동 등 실제 발생 항목', '순수익까지 볼 때: 자가노동시간, 자본용역비, 자가토지 용역비'],
+            'together': ['손익분기점', '가격·수량 민감도', '반복자료가 있으면 소득·순수익 통계검정'],
+            'data_groups': [
+                ('수량·생산량', ['수량·생산량']),
+                ('판매가격/판매액', ['판매가격/판매액']),
+                ('항목별 경영비', ['항목별 경영비']),
+            ],
+        },
+        _ECON_MODE_MRR: {
+            'needs': ['비용이 다른 여러 처리구(보통 3개 이상)와 대조구', '조사면적·처리별 수량', '실제 판매가격', '처리 수준에 따라 달라지는 가변비용: 비료·농약·노동·자재·위탁비 등', '수량 조정률 및 최소수용 MRR 기준'],
+            'together': ['부분예산', '지배분석', '최소수용 MRR', '가격·수량 민감도'],
+            'data_groups': [
+                ('처리구/대조구 구분', ['처리구/대조구 구분']),
+                ('수량·생산량', ['수량·생산량']),
+                ('판매가격/판매액', ['판매가격/판매액']),
+                ('가변비용', ['신기술로 달라지는 비용만', '항목별 경영비']),
+            ],
+        },
+        _ECON_MODE_INVEST: {
+            'needs': ['최초 투자비(설치·구입·부대공사 포함)', '분석기간/내용연수', '연도별 또는 연간 추가수입·비용절감 편익', '연간 운영·유지·수선비와 예상 교체비', '할인율', '잔존가치(있으면)'],
+            'together': ['NPV', '할인 B/C', 'IRR', '단순·할인 회수기간', '편익·비용 민감도'],
+            'data_groups': [
+                ('최초 투자비', ['최초 투자비']),
+                ('연도별 편익·운영비', ['연도별 편익·운영비']),
+                ('분석기간·할인율', ['분석기간·할인율·잔존가치']),
+            ],
+        },
+    }
+    chosen_meta = meta.get(top_mode, meta[_ECON_MODE_INCOME])
+    present = set(map(str, data_items))
+    missing = []
+    for label, alternatives in chosen_meta['data_groups']:
+        if not any(a in present for a in alternatives):
+            missing.append(label)
+
+    # 목적별 보조 분석 태그
+    if top_mode == _ECON_MODE_PARTIAL and '반복(블록) 자료' in present:
+        tags.append('통계검정 병행')
+    if top_mode == _ECON_MODE_MRR:
+        tags.extend(['지배분석', 'MRR'])
+    if top_mode == _ECON_MODE_INVEST:
+        tags.extend(['NPV', '할인 B/C', 'IRR'])
+    tags = list(dict.fromkeys(tags))
+
+    if ambiguous:
+        reasons = reasons[-4:] if reasons else [
+            '연구목적·비교대상·분석기간 중 아직 정해지지 않은 항목이 많습니다.',
+            '“기존 방식과 다른 처리가 있는지”와 “효과가 1년인지 여러 해인지”만 정하면 대부분의 경우 분석법을 고를 수 있습니다.'
+        ]
+    else:
+        reasons = list(dict.fromkeys(reasons))[-5:]
+
+    return {
+        'primary_mode': primary_mode,
+        'title': title,
+        'confidence': confidence,
+        'scores': scores,
+        'reasons': reasons,
+        'needs': chosen_meta['needs'],
+        'together': chosen_meta['together'],
+        'tags': tags,
+        'warnings': warnings,
+        'ambiguous': ambiguous,
+        'missing_reported': missing,
+        'top_two': [(ranked[0][0], ranked[0][1]), (ranked[1][0], ranked[1][1])],
+    }
 
 
 def parse_ai_json(text):
@@ -2813,10 +4076,12 @@ PCA는 이 10개 정보를 **가장 정보 손실이 적은 2개의 새 축**으
 - 설문·센서·기상 등 **자료가 많을 때**
 
 **알고리즘 고르기**
-- **랜덤포레스트**: 무난하고 안정적. 먼저 시도해 보세요.
-- **의사결정나무**: 규칙이 단순해 이해하기 쉬움
-- **그래디언트부스팅**: 정확도가 높은 편
-- **SVM**: 변수가 적고 경계가 뚜렷할 때
+- **트리·앙상블**: 랜덤포레스트, Extra Trees, 그래디언트부스팅, 히스토그램 부스팅, AdaBoost, 의사결정나무
+- **거리·경계 기반**: SVM(RBF), KNN — 변수 단위가 달라도 자동 표준화합니다.
+- **회귀 전용 규제모형**: Ridge, Lasso, ElasticNet — 선형 관계와 다중공선성이 있을 때 유용합니다.
+- **분류 전용 기본모형**: 로지스틱 회귀, GaussianNB
+
+처음이라면 **랜덤포레스트**를 기준모형으로 먼저 돌리고, 다른 알고리즘과 테스트 성능을 비교하세요.
 
 **결과 읽는 법**
 - **R²**(회귀) / **정확도**(분류): 1에 가까울수록 잘 맞춤. 학습에 쓰지 않은 자료(테스트)로 평가한 값입니다.
@@ -2829,22 +4094,25 @@ PCA는 이 10개 정보를 **가장 정보 손실이 적은 2개의 새 축**으
 
 **계산 체계** (농촌진흥청 농축산물 소득조사 기준)
 - **총수입(조수입)** = 주산물가액(수량×단가) + **부산물가액**
-- **경영비** = 직접 지출한 비용(종묘비·비료비·농약비·고용노력비·감가상각비 등)
-- **생산비** = 경영비 + 자가노력비 + 유동자본용역비 + 고정자본용역비 + 토지용역비
-- **소득 = 총수입 − 경영비** → 농가가 손에 쥐는 금액
+- **경영비** = 생산에 투입된 경영비(종묘비·비료비·농약비·고용노력비·임차료·감가상각비 등). 현금지출만을 뜻하지는 않습니다.
+- **생산비** = 경영비 + 자가노력비 + 유동자본용역비 + 고정자본용역비 + 자가토지 용역비
+- **소득 = 총수입 − 경영비** → 경영비를 차감한 농업경영 성과
 - **순수익 = 총수입 − 생산비** → 자기 노동·토지의 기회비용까지 뺀 순수 이익
 - **소득률(%) = 소득 ÷ 총수입 × 100**
 
 **지표 읽는 법**
 - **소득률**: 고추는 대체로 50% 내외입니다(2024년 시설고추 56.3%).
-- **B/C**: 1보다 크면 경제성 있음
+- **단년도 총수입/생산비**: 1보다 크면 해당 연도의 입력 조건에서 총수입이 생산비보다 큼. 시설투자의 할인 B/C와는 다른 지표입니다.
 - **손익분기수량**: (생산비 − 부산물가액 − 수량비례비) ÷ (단가 − 단위당 수량비례비)로 구합니다. 수확·선별·포장비처럼 수량에 비례하는 비용을 따로 지정하지 않으면 **(생산비 − 부산물가액) ÷ 단가**가 되어, "그해 들어간 비용을 회수하려면 몇 kg을 수확해야 하는가"를 뜻합니다. 실제 수량이 이보다 많아야 이익입니다.
 - **가격 민감도**: 단가가 떨어져도 소득이 (+)로 유지되는 처리가 가격 위험에 강합니다.
 
-**두 가지 분석 방식**
+**네 가지 분석 방식**
+- **📕 부분예산표**: 기존 기술과 비교해 바뀌는 비용·수입만 계산
 - **📗 소득분석**: 처리별 소득·순수익을 계산해 비교 (보고서·소득자료용)
-- **📘 부분예산·MRR**: 신기술을 **농가에 권장할지** 판단하는 국제 표준 방법(CIMMYT).
-  비용이 더 드는데 이익이 적은 처리를 걸러내고(지배분석), 추가 투입 1원당 얼마를 더 버는지(한계수익률)를 계산합니다. **MRR은 사용자가 정한 최소 기준과 자료 신뢰도·민감도를 함께 보고 판단합니다.""",
+- **📘 부분예산·MRR**: 지배분석 후 추가 비용 대비 순편익 증가율을 비교
+- **📙 시설·장기투자**: 여러 해의 현금흐름을 할인해 NPV·할인 B/C·IRR·회수기간을 계산
+
+MRR은 사용자가 정한 최소수용 기준과 자료 신뢰도·민감도를 함께 보고 판단합니다.""",
 
 "survey": """**설문 분석**은 응답자 특성과 문항 응답을 함께 살펴봅니다.
 
@@ -2984,6 +4252,7 @@ _PIN_GLOBAL_EXACT = {
     "files", "df", "cur_key", "price_db", "report_items",
     "hdr_rows", "del_sel", "err_type", "round_n", "plot_color",
     "svy_type", "econ_mode", "stat_sub", "svy_chart",
+    "menu_choice", "menu_main", "menu_support",
     "ap_ph", "ap_err", "ap_max",
     "_pin_store", "_pin_owner", "_pin_deny",
 }
@@ -2999,6 +4268,14 @@ _PIN_GLOBAL_PREFIX = ("hwp_", "sup_", "fig_", "kamis_", "kosis_", "price_",
 _PIN_BUTTON_EXACT = {
     "econ_selftest", "econ_test_run", "ml_predict1", "ml_predict2", "ml_dlpred",
     "pbd_fill", "pbd_clear", "fixnum", "sc", "price_up", "ml_pf",
+    # 인증/이미지/카메라/음성 입력은 Streamlit이 값을 소유하는 비-settable 위젯이다.
+    # 이 키를 _pin_sync가 session_state에 다시 쓰면 StreamlitValueAssignmentNotAllowedError가 난다.
+    "auth_login_btn", "auth_signup_btn", "auth_reset_btn", "auth_logout_sidebar",
+    "table_img_up", "table_cam", "img_parse_btn", "image_table_editor", "use_image_table",
+    "voice_data_audio", "voice_parse_btn", "voice_rows_editor", "voice_append",
+    "voice_new", "voice_clear",
+    # 경제성 분석 길잡이 초기화 버튼은 버튼 상태를 session_state로 복원하면 안 된다.
+    "econ_guide_reset", "econ_guide_home", "econ_switch_guide",
 }
 # 버튼뿐 아니라 st.data_editor 도 session_state 로 값을 써 넣을 수 없다.
 # 이 앱의 해당 위젯 전부:
@@ -3010,8 +4287,10 @@ _PIN_BUTTON_EXACT = {
 # (price_*, ai_*, kamis_*, kosis_*, dl_* 는 이미 전역 목록에서 걸러진다)
 _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
                       "list_models_", "rm_", "p_", "rank_",
-                      "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl",
-                      "hwx_", "dcx_", "csv_", "xls_", "gai_")
+                      "pb_gain_", "pb_loss_", "pbd_", "ml_predict", "ml_dl", "ms_plot_dl_",
+                      "econ_entry_", "econ_g_",
+                      "hwx_", "dcx_", "csv_", "xls_", "gai_",
+                      "svyhwp_", "svyxls_")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
@@ -3101,94 +4380,197 @@ if "df" not in st.session_state: st.session_state.df = None
 if "price_db" not in st.session_state: st.session_state["price_db"] = None
 if "report_items" not in st.session_state: st.session_state.report_items = []
 
+# Supabase가 설정되고 AUTH_REQUIRED=true이면 로그인한 사용자만 아래 앱을 렌더링합니다.
+render_auth_gate()
+
 # ================================================================ 사이드바
 st.sidebar.title("📊 스마트 통계 에이전트")
 st.sidebar.caption("실험 데이터 자동 통계 분석 시스템")
 
+# 로그인 사용자의 소속을 사이드바에 표시한다.
+_auth_u = _current_auth_user()
+if _auth_u:
+    _meta = _auth_u.get("user_metadata") or {}
+    _who = _meta.get("name") or str(_auth_u.get("email", "")).split("@")[0]
+    _org = _meta.get("organization") or "소속 미입력"
+    st.sidebar.markdown(f"**👤 {_who}**  \n🏢 {_org}")
+    if st.sidebar.button("로그아웃", width="stretch", key="auth_logout_sidebar"):
+        _auth_logout()
+
 with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
-    ups = st.file_uploader("Excel / CSV 업로드 (여러 개 가능)",
-                           type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-    hdr_rows = st.radio("↳ 머리글(변수명) 행 수", [1, 2], horizontal=True, key="hdr_rows",
-                        help="변수명이 두 줄로 되어 있으면 2를 선택하세요. 두 줄이 합쳐진 이름으로 만들어집니다.")
-    st.caption("엑셀에 시트가 여러 개면 시트별로 나뉘어 들어옵니다. "
-               "값을 바꾸면 올려둔 파일을 **자동으로 다시 읽습니다**(새로고침 불필요).")
-    # 머리글 행 수를 바꾸면 이미 올린 파일을 다시 읽어 화면에도 즉시 반영한다.
-    _hdr_changed = st.session_state.get("__hdr_prev") not in (None, hdr_rows)
-    st.session_state["__hdr_prev"] = hdr_rows
-    if ups:
-        head = [0, 1] if hdr_rows == 2 else 0
-        for uf in ups:
-            try:
-                if uf.name.endswith(".csv"):
-                    d = None
-                    for _enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
-                        try:
-                            uf.seek(0)
-                            d = pd.read_csv(uf, header=head, encoding=_enc)
-                            break
-                        except (UnicodeDecodeError, LookupError):
+    _input_mode = st.radio("입력 방식", ["📁 Excel/CSV", "📷 이미지/사진", "🎤 음성"],
+                           horizontal=False, key="data_input_mode")
+
+    if _input_mode == "📁 Excel/CSV":
+        ups = st.file_uploader("Excel / CSV 업로드 (여러 개 가능)",
+                               type=["xlsx", "xls", "csv"], accept_multiple_files=True)
+        hdr_rows = st.radio("↳ 머리글(변수명) 행 수", [1, 2], horizontal=True, key="hdr_rows",
+                            help="변수명이 두 줄로 되어 있으면 2를 선택하세요. 두 줄이 합쳐진 이름으로 만들어집니다.")
+        st.caption("엑셀에 시트가 여러 개면 시트별로 나뉘어 들어옵니다. "
+                   "값을 바꾸면 올려둔 파일을 **자동으로 다시 읽습니다**(새로고침 불필요).")
+        # 머리글 행 수를 바꾸면 이미 올린 파일을 다시 읽어 화면에도 즉시 반영한다.
+        _hdr_changed = st.session_state.get("__hdr_prev") not in (None, hdr_rows)
+        st.session_state["__hdr_prev"] = hdr_rows
+        if ups:
+            head = [0, 1] if hdr_rows == 2 else 0
+            for uf in ups:
+                try:
+                    if uf.name.endswith(".csv"):
+                        d = None
+                        for _enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+                            try:
+                                uf.seek(0)
+                                d = pd.read_csv(uf, header=head, encoding=_enc)
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                            except Exception:
+                                uf.seek(0)
+                                d = pd.read_csv(uf, header=head, encoding_errors="replace")
+                                break
+                        if d is None:
+                            st.error(f"'{uf.name}' 파일의 문자 인코딩을 읽지 못했습니다. "
+                                     "엑셀에서 'CSV UTF-8'로 다시 저장해 보세요.")
                             continue
-                        except Exception:
-                            uf.seek(0)
-                            d = pd.read_csv(uf, header=head, encoding_errors="replace")
-                            break
-                    if d is None:
-                        st.error(f"'{uf.name}' 파일의 문자 인코딩을 읽지 못했습니다. "
-                                 "엑셀에서 'CSV UTF-8'로 다시 저장해 보세요.")
-                        continue
-                    if hdr_rows == 2:
-                        d.columns = [" ".join([str(x) for x in c if "Unnamed" not in str(x)]).strip()
-                                     for c in d.columns]
-                    # 병합된 두 줄 헤더를 이어붙이면, 블록 사이의 빈 구분용 열까지 앞 헤더를
-                    # 그대로 물려받아 "가격" 같은 이름이 중복 생성될 수 있다. 데이터가 전혀
-                    # 없는(전부 결측) 열은 실제 문항이 아니라 이 구분용 유령 열이므로 제거한다.
-                    d = d.dropna(axis=1, how="all")
-                    st.session_state.files[uf.name] = clean_columns(d)
-                else:
-                    xls = pd.ExcelFile(uf)
-                    for sh in xls.sheet_names:      # 시트별로 저장
-                        d = pd.read_excel(xls, sheet_name=sh, header=head)
                         if hdr_rows == 2:
                             d.columns = [" ".join([str(x) for x in c if "Unnamed" not in str(x)]).strip()
                                          for c in d.columns]
-                        # 위와 동일한 이유로, 병합헤더가 물려준 빈 구분용 열(전부 결측)은 제거
+                        # 병합된 두 줄 헤더를 이어붙이면, 블록 사이의 빈 구분용 열까지 앞 헤더를
+                        # 그대로 물려받아 "가격" 같은 이름이 중복 생성될 수 있다. 데이터가 전혀
+                        # 없는(전부 결측) 열은 실제 문항이 아니라 이 구분용 유령 열이므로 제거한다.
                         d = d.dropna(axis=1, how="all")
-                        key = f"{uf.name} – {sh}" if len(xls.sheet_names) > 1 else uf.name
-                        st.session_state.files[key] = clean_columns(d)
-            except Exception as e:
-                st.error(f"{uf.name} 읽기 실패: {e}")
-        if _hdr_changed:
-            # 다시 읽은 결과를 현재 분석 화면에도 즉시 적용
-            _cur = st.session_state.get("cur_key")
-            if _cur in st.session_state.files:
-                st.session_state.df = st.session_state.files[_cur].copy()
-            st.success(f"머리글 {hdr_rows}행 기준으로 다시 읽었습니다.")
-    elif _hdr_changed:
-        st.info("머리글 행 수를 바꿨습니다. 파일을 다시 올리면 새 기준으로 읽습니다.")
+                        st.session_state.files[uf.name] = clean_columns(d)
+                    else:
+                        xls = pd.ExcelFile(uf)
+                        for sh in xls.sheet_names:      # 시트별로 저장
+                            d = pd.read_excel(xls, sheet_name=sh, header=head)
+                            if hdr_rows == 2:
+                                d.columns = [" ".join([str(x) for x in c if "Unnamed" not in str(x)]).strip()
+                                             for c in d.columns]
+                            # 위와 동일한 이유로, 병합헤더가 물려준 빈 구분용 열(전부 결측)은 제거
+                            d = d.dropna(axis=1, how="all")
+                            key = f"{uf.name} – {sh}" if len(xls.sheet_names) > 1 else uf.name
+                            st.session_state.files[key] = clean_columns(d)
+                except Exception as e:
+                    st.error(f"{uf.name} 읽기 실패: {e}")
+            if _hdr_changed:
+                # 다시 읽은 결과를 현재 분석 화면에도 즉시 적용
+                _cur = st.session_state.get("cur_key")
+                if _cur in st.session_state.files:
+                    st.session_state.df = st.session_state.files[_cur].copy()
+                st.success(f"머리글 {hdr_rows}행 기준으로 다시 읽었습니다.")
+        elif _hdr_changed:
+            st.info("머리글 행 수를 바꿨습니다. 파일을 다시 올리면 새 기준으로 읽습니다.")
 
-    st.markdown("---")
-    st.markdown("**🧪 샘플 데이터 (연습용)**")
-    st.caption("데이터가 없다면 아래 버튼을 눌러 체험해 보세요.")
-    c6, c7 = st.columns(2)
-    if c6.button("🔁 반복측정", width="stretch"):
-        st.session_state.files["샘플_반복측정"] = make_sample("반복측정")
-    if c7.button("🧪 프로빗", width="stretch"):
-        st.session_state.files["샘플_프로빗"] = make_sample("프로빗")
-    if st.button("🌾 분할구(Split-plot)", width="stretch"):
-        st.session_state.files["샘플_분할구"] = make_sample("분할구")
-    c1, c2, c3 = st.columns(3)
-    if c1.button("🌱 실험", width="stretch"):
-        st.session_state.files["샘플_실험데이터"] = make_sample("실험")
-    if c2.button("💰 경제성", width="stretch"):
-        st.session_state.files["샘플_경제성"] = make_sample("경제성")
-    if c3.button("📋 설문", width="stretch"):
-        st.session_state.files["샘플_설문"] = make_sample("설문")
+        st.markdown("---")
+        st.markdown("**🧪 샘플 데이터 (연습용)**")
+        st.caption("데이터가 없다면 아래 버튼을 눌러 체험해 보세요.")
+        c6, c7 = st.columns(2)
+        if c6.button("🔁 반복측정", width="stretch"):
+            st.session_state.files["샘플_반복측정"] = make_sample("반복측정")
+        if c7.button("🧪 프로빗", width="stretch"):
+            st.session_state.files["샘플_프로빗"] = make_sample("프로빗")
+        if st.button("🌾 분할구(Split-plot)", width="stretch"):
+            st.session_state.files["샘플_분할구"] = make_sample("분할구")
+        c1, c2, c3 = st.columns(3)
+        if c1.button("🌱 실험", width="stretch"):
+            st.session_state.files["샘플_실험데이터"] = make_sample("실험")
+        if c2.button("💰 경제성", width="stretch"):
+            st.session_state.files["샘플_경제성"] = make_sample("경제성")
+        if c3.button("📋 설문", width="stretch"):
+            st.session_state.files["샘플_설문"] = make_sample("설문")
+
+    elif _input_mode == "📷 이미지/사진":
+        st.caption("엑셀 화면 캡처·조사표 사진을 AI가 표 데이터로 바꿉니다. 분석 전 반드시 값을 확인하세요.")
+        _img = st.file_uploader("표 이미지 업로드", type=["png", "jpg", "jpeg", "webp"], key="table_img_up")
+        _cam = st.camera_input("또는 카메라로 촬영", key="table_cam")
+        _src = _cam or _img
+        if _src is not None:
+            st.image(_src, caption="인식할 이미지", width="stretch")
+            if st.button("✨ AI로 표 인식", width="stretch", key="img_parse_btn"):
+                with st.spinner("표의 행·열과 숫자를 읽는 중..."):
+                    _bytes = _src.getvalue()
+                    _mime = getattr(_src, "type", None) or ("image/png" if str(getattr(_src, "name", "")).lower().endswith("png") else "image/jpeg")
+                    _idf, _warn = image_to_dataframe(_bytes, _mime)
+                if _idf is None:
+                    st.error("표 인식에 실패했습니다.")
+                    for _w in _warn[:3]: st.caption(str(_w)[:180])
+                else:
+                    st.session_state["image_table_preview"] = _idf
+                    st.session_state["image_table_warn"] = _warn
+        if st.session_state.get("image_table_preview") is not None:
+            st.markdown("**✅ 인식 결과 확인/수정**")
+            _edited_img = st.data_editor(st.session_state["image_table_preview"], num_rows="dynamic",
+                                         width="stretch", key="image_table_editor", height=240)
+            for _w in st.session_state.get("image_table_warn", [])[:3]:
+                st.warning(f"확인 필요: {_w}")
+            if st.button("📌 이 표를 분석 데이터로 사용", type="primary", width="stretch", key="use_image_table"):
+                _key = "이미지_인식데이터"
+                st.session_state.files[_key] = clean_columns(_edited_img.copy())
+                st.session_state.cur_key = _key
+                st.session_state.df = st.session_state.files[_key].copy()
+                st.success("이미지에서 읽은 표를 분석 데이터로 적용했습니다.")
+                st.rerun()
+        if not st.session_state.get("api_key"):
+            st.info("이미지 표 인식은 아래 '🤖 AI 기능 켜기'에서 API 키를 설정한 뒤 사용할 수 있습니다.")
+
+    else:  # 음성
+        st.caption("예: '처리구 A, 반복 1, 초장 72.3, 수량 615.4'처럼 한 행씩 말해 주세요.")
+        _aud = st.audio_input("🎙️ 한 행 말하기", sample_rate=16000, key="voice_data_audio")
+        if _aud is not None:
+            st.audio(_aud)
+            if st.button("📝 음성을 데이터 한 행으로 변환", width="stretch", key="voice_parse_btn"):
+                with st.spinner("음성을 듣고 숫자와 변수명을 정리하는 중..."):
+                    _tr = ai_multimodal_text(_aud.getvalue(), getattr(_aud, "type", None) or "audio/wav",
+                                             "한국어 음성을 정확히 전사하세요.", kind="audio")
+                if str(_tr).startswith("⚠️"):
+                    st.error(_tr)
+                else:
+                    st.session_state["voice_transcript"] = _tr
+                    _cols = list(st.session_state.df.columns) if isinstance(st.session_state.get("df"), pd.DataFrame) else []
+                    _row, _warn = voice_text_to_row(_tr, _cols)
+                    if _row is not None:
+                        st.session_state.setdefault("voice_rows", [])
+                        st.session_state["voice_rows"].append(_row)
+                        st.session_state["voice_warn"] = _warn
+        if st.session_state.get("voice_transcript"):
+            st.caption("인식 문장: " + str(st.session_state["voice_transcript"]))
+        if st.session_state.get("voice_rows"):
+            _vdf = pd.DataFrame(st.session_state["voice_rows"])
+            _ved = st.data_editor(_vdf, num_rows="dynamic", width="stretch", key="voice_rows_editor", height=220)
+            for _w in st.session_state.get("voice_warn", [])[:3]: st.warning(f"확인 필요: {_w}")
+            cva, cvb = st.columns(2)
+            if cva.button("➕ 현재 데이터에 추가", width="stretch", key="voice_append"):
+                if isinstance(st.session_state.get("df"), pd.DataFrame) and len(st.session_state.df.columns):
+                    base = st.session_state.df.copy()
+                    add = _ved.reindex(columns=base.columns)
+                    st.session_state.df = pd.concat([base, add], ignore_index=True)
+                    ck = st.session_state.get("cur_key") or "음성_추가데이터"
+                    st.session_state.files[ck] = st.session_state.df.copy()
+                    st.success(f"{len(add)}행을 현재 데이터에 추가했습니다.")
+                else:
+                    st.warning("먼저 기존 데이터를 불러오거나 '새 데이터로 사용'을 눌러 주세요.")
+            if cvb.button("📌 새 데이터로 사용", width="stretch", key="voice_new"):
+                key = "음성_입력데이터"
+                st.session_state.files[key] = clean_columns(_ved.copy())
+                st.session_state.cur_key = key
+                st.session_state.df = st.session_state.files[key].copy()
+                st.success("음성 입력 데이터를 새 분석 데이터로 적용했습니다.")
+                st.rerun()
+            if st.button("🗑️ 음성 입력 목록 비우기", width="stretch", key="voice_clear"):
+                st.session_state["voice_rows"] = []
+                st.session_state.pop("voice_transcript", None)
+                st.rerun()
+        if not st.session_state.get("api_key"):
+            st.info("음성 인식은 ChatGPT 또는 Gemini API 키를 설정한 뒤 사용할 수 있습니다.")
 
 # 데이터 선택 + 삭제
 if st.session_state.files:
     names = list(st.session_state.files.keys())
     opts = names + (["🔗 모두 세로로 합치기"] if len(names) > 1 else [])
-    choice = st.sidebar.selectbox("📌 분석할 데이터 선택", opts)
+    _cur_for_select = st.session_state.get("cur_key")
+    _sel_idx = opts.index(_cur_for_select) if _cur_for_select in opts else 0
+    choice = st.sidebar.selectbox("📌 분석할 데이터 선택", opts, index=_sel_idx)
     # 선택이 바뀔 때만 새로 불러옴 (전처리 결과가 유지되도록)
     if choice != st.session_state.get("cur_key"):
         st.session_state.cur_key = choice
@@ -3233,13 +4615,109 @@ if st.session_state.files and st.sidebar.button(
     st.session_state.get("_pin_store", {}).pop(st.session_state.get("cur_key"), None)
     st.rerun()
 
-# 메뉴
-menu = st.sidebar.radio("📁 메뉴",
-                        ["⚡ 원클릭 보고서", "📊 통계분석", "🧠 AI 도우미", "💰 경제성분석",
-                         "📋 설문조사 분석", "📑 보고서", "📖 사용설명서"])
+# 메뉴 — 주요 분석 흐름을 크게, AI/설명서는 보조 기능으로 작게 분리한다.
+_MAIN_MENU_OPTIONS = [
+    "⚡ 원클릭 보고서",
+    "📊 통계분석",
+    "💰 경제성분석",
+    "📋 설문조사 분석",
+    "📑 보고서",
+]
+_SUPPORT_MENU_OPTIONS = ["🧠 AI 도우미", "📖 사용설명서"]
+if _is_admin_user():
+    _SUPPORT_MENU_OPTIONS.append("👑 관리자")
+
+# 현재 선택은 두 라디오 사이에서 하나만 유지한다.
+_all_menu_options = _MAIN_MENU_OPTIONS + _SUPPORT_MENU_OPTIONS
+if st.session_state.get("menu_choice") not in _all_menu_options:
+    st.session_state["menu_choice"] = _MAIN_MENU_OPTIONS[0]
+
+def _menu_from_main():
+    value = st.session_state.get("menu_main")
+    if value:
+        st.session_state["menu_choice"] = value
+
+def _menu_from_support():
+    value = st.session_state.get("menu_support")
+    if value:
+        st.session_state["menu_choice"] = value
+
+# key가 있는 container에는 st-key-* 클래스가 붙으므로 메뉴 영역만 안전하게 스타일링한다.
+st.sidebar.markdown("""
+<style>
+[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] div[role="radiogroup"] {
+    gap: 0.22rem;
+}
+[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label {
+    padding: 0.22rem 0.34rem;
+    border-radius: 8px;
+}
+[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label p {
+    font-size: 1.04rem !important;
+    font-weight: 750 !important;
+    line-height: 1.45 !important;
+}
+[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label:has(input:checked) {
+    background: #EAF3FA;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] div[role="radiogroup"] {
+    gap: 0.06rem;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label {
+    padding: 0.08rem 0.28rem;
+    border-radius: 7px;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label p {
+    font-size: 0.84rem !important;
+    font-weight: 500 !important;
+    color: #5F7285 !important;
+    line-height: 1.3 !important;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label:has(input:checked) {
+    background: #F3F7FA;
+}
+[data-testid="stSidebar"] .menu-support-title {
+    margin: 0.75rem 0 0.10rem 0.15rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #8A9AAA;
+    letter-spacing: 0.02em;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.sidebar.markdown("### 📁 주요 기능")
+_current_menu = st.session_state.get("menu_choice")
+with st.sidebar.container(key="main_menu_block"):
+    _main_idx = (_MAIN_MENU_OPTIONS.index(_current_menu)
+                 if _current_menu in _MAIN_MENU_OPTIONS else None)
+    st.radio(
+        "주요 기능", _MAIN_MENU_OPTIONS, index=_main_idx, key="menu_main",
+        label_visibility="collapsed", on_change=_menu_from_main,
+    )
+
+st.sidebar.markdown('<div class="menu-support-title">보조 기능</div>', unsafe_allow_html=True)
+_current_menu = st.session_state.get("menu_choice")
+with st.sidebar.container(key="support_menu_block"):
+    _support_idx = (_SUPPORT_MENU_OPTIONS.index(_current_menu)
+                    if _current_menu in _SUPPORT_MENU_OPTIONS else None)
+    st.radio(
+        "보조 기능", _SUPPORT_MENU_OPTIONS, index=_support_idx, key="menu_support",
+        label_visibility="collapsed", on_change=_menu_from_support,
+    )
+
+menu = st.session_state.get("menu_choice", _MAIN_MENU_OPTIONS[0])
 
 with st.sidebar.expander("⚙️ 한글 표 서식 설정"):
-    st.selectbox("글씨체", ["휴먼명조", "함초롬바탕", "바탕", "신명조", "맑은 고딕", "돋움"], key="hwp_font")
+    _HWP_FONTS = ["휴먼명조", "함초롬바탕", "함초롬돋움", "바탕", "신명조",
+                  "맑은 고딕", "나눔명조", "나눔고딕", "Noto Sans KR", "돋움", "굴림", "직접 입력…"]
+    st.selectbox("표·보고서 글씨체", _HWP_FONTS, key="hwp_font",
+                 help="한글(hwpx)로 내려받는 표와 보고서 본문에 적용됩니다.")
+    if st.session_state.get("hwp_font") == "직접 입력…":
+        st.text_input("사용할 글꼴 이름", key="hwp_font_custom",
+                      placeholder="예) KoPub바탕체 Medium",
+                      help="한글의 글꼴 목록에 표시되는 이름을 그대로 입력하세요.")
+    st.caption(f"현재 적용 글꼴: **{_selected_hwp_font()}**")
     c1, c2 = st.columns(2)
     with c1:
         st.selectbox("글자 크기(pt)", [8, 9, 10, 11, 12], index=2, key="hwp_size")
@@ -3274,8 +4752,9 @@ with st.sidebar.expander("📈 분석·그래프 설정"):
     c1.number_input("그래프 가로", 3.0, 16.0, 6.0, 0.5, key="fig_w")
     c2.number_input("그래프 세로", 2.0, 12.0, 4.0, 0.5, key="fig_h")
     st.checkbox("✨ 깔끔한 스타일 (그라데이션·값 표시)", value=True, key="fig_style",
-                help="막대에 옅은→진한 색을 입히고 값을 위에 적습니다. "
-                     "옅은 가로 격자선만 남기고 위·오른쪽 테두리를 없앱니다.")
+                help="막대에 옅은→진한 색을 입히고 값을 표시하며, 전체 그래프의 축·간격을 통일합니다.")
+    st.checkbox("⬛ 막대·원형 조각 검은 테두리", value=True, key="fig_border",
+                help="그래프 전체 외곽선이 아니라 막대와 원형/도넛 조각의 경계선에만 검은색을 적용합니다.")
     st.checkbox("막대 위에 값 표시", value=True, key="fig_vlabel")
     st.checkbox("격자선 표시", value=False, key="fig_grid",
                 help="'깔끔한 스타일'을 켜면 가로 격자선은 자동으로 들어갑니다.")
@@ -3343,41 +4822,85 @@ def bar_value_labels(ax, xs, values, errs=None, dec=None, offset=0.03):
     return span * offset * 2.2                      # 글자가 차지한 높이(윗여백 확보용)
 
 
+
+def bar_value_sig_labels(ax, xs, values, errs=None, sigs=None, dec=None, offset=0.03):
+    """막대 위에 '평균값 + 유의성 문자'를 한 번에 표시한다.
+
+    예: 105.7ᵃ
+    값과 a/b/c를 별도의 ax.text로 두 번 찍으면 겹치기 쉬우므로 절대 분리하지 않는다.
+    """
+    if not (pretty_on() and st.session_state.get("fig_vlabel", True)):
+        return 0.0
+    import numpy as _np
+    vals = _np.asarray(values, dtype=float)
+    e = _np.zeros_like(vals) if errs is None else _np.nan_to_num(_np.asarray(errs, dtype=float))
+    sigs = list(sigs or [""] * len(vals))
+    span = float(_np.nanmax(_np.abs(vals))) or 1.0
+    d = rnd() if dec is None else dec
+    finite = vals[_np.isfinite(vals)]
+    if len(finite) and _np.allclose(finite, _np.round(finite)):
+        d = 0
+    elif span >= 100:
+        d = min(d, 1)
+    ypad = span * offset
+    for i, (xi, v, ei) in enumerate(zip(xs, vals, e)):
+        if not _np.isfinite(v):
+            continue
+        sig = str(sigs[i] if i < len(sigs) else "").strip()
+        # 배포 서버의 한글 폰트에는 Unicode 위첨자(ᵃ, ᵇ...)가 없는 경우가 있어 □로 깨진다.
+        # Matplotlib mathtext의 영문 superscript를 사용하면 서버 폰트와 무관하게 안정적으로 보인다.
+        _sig = "".join(ch for ch in sig if ch.isalpha() or ch == "*")
+        label = f"{v:,.{d}f}" + (rf"$^{{{_sig}}}$" if _sig else "")
+        ax.text(xi, v + ei + ypad, label,
+                ha="center", va="bottom", fontsize=9,
+                fontweight="bold", color="#33383d")
+    return ypad * 2.6
+
 def pcolor(): return _PALETTE.get(st.session_state.get("plot_color", "파랑"), "#6c8ebf")
 def rnd(): return int(st.session_state.get("round_n", 3))
 def figsize(w=None, h=None):
     return (w or float(st.session_state.get("fig_w", 6.0)),
             h or float(st.session_state.get("fig_h", 4.0)))
 def deco(ax, title="", ylabel_top=True):
-    """그래프 공통 꾸미기. '깔끔한 스타일'을 켜면 참고 이미지처럼 정돈한다.
-
-    - 옅은 **가로** 격자선만 남기고 막대 뒤로 보낸다
-    - 위·오른쪽 테두리를 없애고 남은 선은 옅게
-    - y축 이름을 왼쪽 위에 가로로 눕혀 읽기 쉽게
-    """
+    """공통 그래프 마감: 전체 검은 프레임 없이 깔끔한 축/격자/제목만 적용."""
+    ax.set_facecolor("white")
+    ax.set_axisbelow(True)
     if pretty_on():
-        ax.set_axisbelow(True)
-        ax.grid(axis="y", color="#d9dde1", linewidth=.8, alpha=.9)
+        ax.grid(axis="y", color="#DCE7F0", linewidth=.8, alpha=.95)
         ax.grid(axis="x", visible=False)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color("#b9bfc5")
-            ax.spines[side].set_linewidth(.9)
-        ax.tick_params(colors="#4a5158", length=0, labelsize=9.5)
-        _has_ylab = bool(ylabel_top and ax.get_ylabel())
-        if _has_ylab:
-            ax.set_ylabel(ax.get_ylabel(), rotation=0, ha="left", va="bottom",
-                          fontsize=9.5, color="#4a5158")
-            ax.yaxis.set_label_coords(-0.02, 1.02)
-        if title and st.session_state.get("fig_title", True):
-            # y축 이름을 왼쪽 위에 눕혀 두면 제목과 겹칠 수 있다 → 제목을 한 줄 더 올린다.
-            ax.set_title(title, fontsize=11.5, fontweight="bold",
-                         color="#23282d", pad=26 if _has_ylab else 12)
-        return ax
-    if st.session_state.get("fig_grid", False): ax.grid(alpha=.3, linestyle="--")
-    if title and st.session_state.get("fig_title", True): ax.set_title(title)
+    elif st.session_state.get("fig_grid", False):
+        ax.grid(alpha=.3, linestyle="--")
+
+    # 전체 테두리는 사용하지 않는다. 논문형 좌·하단 축선만 옅게 유지한다.
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_visible(True)
+        ax.spines[side].set_color("#AEBECD")
+        ax.spines[side].set_linewidth(.8)
+
+    ax.tick_params(colors="#4B5F73", length=3, labelsize=9, direction="out")
+    ax.xaxis.label.set_color("#31485E")
+    ax.yaxis.label.set_color("#31485E")
+    _has_ylab = bool(ylabel_top and ax.get_ylabel())
+    if pretty_on() and _has_ylab:
+        ax.set_ylabel(ax.get_ylabel(), rotation=0, ha="left", va="bottom",
+                      fontsize=9.5, color="#31485E")
+        ax.yaxis.set_label_coords(-0.02, 1.025)
+    if title and st.session_state.get("fig_title", True):
+        ax.set_title(title, fontsize=11.5 if pretty_on() else None,
+                     fontweight="bold" if pretty_on() else None,
+                     color="#23394D" if pretty_on() else None,
+                     pad=24 if (pretty_on() and _has_ylab) else 12)
+    lg = ax.get_legend()
+    if lg is not None:
+        try:
+            lg.get_frame().set_linewidth(0)
+            lg.get_frame().set_facecolor("white")
+        except Exception:
+            pass
     return ax
+
 
 # 위첨자 변환기는 sup_text/sup_display(파일 위쪽) 하나로 통일한다.
 # (예전 _SUP 표는 a~h 까지만 있어서 처리구가 9개 이상이면 'i', 'j'가 '^i'로 그대로 보였다.)
@@ -3495,16 +5018,21 @@ def reorder_by_rank(items, key, label="↕️ 표시 순서 바꾸기"):
                                 column_config={"순서": st.column_config.NumberColumn(min_value=1, step=1)})
     return edited.sort_values("순서", kind="stable")["항목"].tolist()
 
-# 설문 그래프 공통 색상 — 채도를 낮춘 차분한 계열로 통일해 보고서에 어울리게
-_SURVEY_COLORS = ["#5B8C5A", "#7BA7BC", "#C9A227", "#B5715A", "#8A7CA8",
-                  "#6FA8A0", "#C08497", "#9AA66C", "#7E8CA0", "#BFA980"]
+# 설문 그래프도 원클릭 보고서와 같은 블루 계열로 통일한다.
+# 항목 수가 많아도 무지개색을 쓰지 않고 밝기 차이로만 구분해 전체 앱 분위기를 유지한다.
+_SURVEY_COLORS = ["#DCE9F5", "#C2D9EE", "#A3C4E2", "#82ACD3", "#6291C2",
+                  "#4576AB", "#2D5A8E", "#1F4569", "#7EA6C9", "#B5CEE3"]
 
 
 def _survey_palette(k):
+    if k <= 0:
+        return []
     if k <= len(_SURVEY_COLORS):
-        return _SURVEY_COLORS[:k]
-    cmap = plt.get_cmap("tab20")
-    return [cmap(i % 20) for i in range(k)]
+        # 너무 옅은 색부터 시작하면 흰 배경에서 흐려 보이므로 중간 톤부터 순환
+        base = _SURVEY_COLORS[2:] + _SURVEY_COLORS[:2]
+        return base[:k]
+    cmap = plt.get_cmap("Blues")
+    return [cmap(0.35 + 0.55 * (i / max(k - 1, 1))) for i in range(k)]
 
 
 def _autopct(vals, min_pct=5.0):
@@ -3519,12 +5047,17 @@ def pie_chart(counts, title, donut=False):
     many = k > 6
     fig, ax = plt.subplots(figsize=(figsize()[0] * (1.25 if many else 1.0), figsize()[1]))
     colors = _survey_palette(k)
-    w = dict(width=0.45, edgecolor="white", linewidth=1.4) if donut \
-        else dict(edgecolor="white", linewidth=1.4)
+    _pie_edge = "#111111" if st.session_state.get("fig_border", True) else "white"
+    w = dict(width=0.45, edgecolor=_pie_edge, linewidth=0.7) if donut \
+        else dict(edgecolor=_pie_edge, linewidth=0.7)
+    # 조각이 완전히 붙어 보이지 않도록 아주 조금씩 띄운다.
+    # (과한 explode는 보고서용 그래프에서 산만해 보이므로 2% 안팎만 적용)
+    _explode = [0.008 if k > 6 else 0.012] * k
     wedges, *_ = ax.pie(counts.values,
                         labels=None if many else counts.index.astype(str),
                         autopct=_autopct(counts.values), startangle=90,
                         counterclock=False, colors=colors, wedgeprops=w,
+                        explode=_explode,
                         pctdistance=0.72 if donut else 0.62,
                         textprops={"fontsize": 9, "color": "#2b2b2b"})
     if many:
@@ -3578,38 +5111,63 @@ def crosstab_bar_label(v, pv, ymax):
 
 
 def likert_diverging(summ_counts, cats, title):
-    """리커트 다이버징 누적 막대 (중립 기준 좌우 분리) - 논문에서 자주 쓰는 형태"""
-    import matplotlib.cm as cm
+    """현대적인 블루/레드 다이버징 리커트 차트.
+
+    부정은 부드러운 레드, 중립은 블루그레이, 긍정은 스마트 블루로 표시한다.
+    """
     qs = list(summ_counts.keys())
     n_cat = len(cats)
     mid = n_cat // 2
-    fig, ax = plt.subplots(figsize=(figsize()[0]*1.2, max(figsize()[1], len(qs)*0.5+1)))
-    reds = ["#c0504d", "#d99694", "#e6b8b7"][:mid][::-1]
-    neutral = ["#d9d9d9"] if n_cat % 2 == 1 else []
-    blues = ["#95b3d7", "#4f81bd", "#365f91"][:mid][::-1]
-    palette = reds + neutral + blues
-    if len(palette) < n_cat:
-        palette = [cm.RdYlBu(i/(n_cat-1)) for i in range(n_cat)]
+    h = max(4.2, len(qs) * 0.62 + 1.8)
+    w = max(8.8, figsize()[0] * 1.35)
+    fig, ax = plt.subplots(figsize=(w, h))
+
+    # 낮은 점수(부정) → 옅은~진한 레드 / 높은 점수(긍정) → 옅은~진한 블루
+    neg_full = ["#F3D8D8", "#E8AAAA", "#C96767", "#A94D4D"]
+    pos_full = ["#D6E7F4", "#9EC5E5", "#6291C2", "#2D5A8E"]
+    neg = neg_full[max(0, len(neg_full)-mid):]
+    pos = pos_full[max(0, len(pos_full)-mid):]
+    neutral = [_SMART_CHART_NEUTRAL] if n_cat % 2 == 1 else []
+    palette = neg + neutral + pos
+    if len(palette) != n_cat:
+        palette = [plt.get_cmap("RdBu")(0.18 + 0.64*i/max(n_cat-1,1)) for i in range(n_cat)]
+
     data = np.array([summ_counts[q] for q in qs], dtype=float)
-    pct = data / data.sum(axis=1, keepdims=True) * 100
-    if n_cat % 2 == 1:
-        base = pct[:, :mid].sum(axis=1) + pct[:, mid]/2
-    else:
-        base = pct[:, :mid].sum(axis=1)
+    den = data.sum(axis=1, keepdims=True)
+    den[den == 0] = 1
+    pct = data / den * 100
+    base = pct[:, :mid].sum(axis=1) + (pct[:, mid]/2 if n_cat % 2 == 1 else 0)
     starts = -base
     for i, cat in enumerate(cats):
-        ax.barh(qs, pct[:, i], left=starts, color=palette[i], label=str(cat),
-                edgecolor="white", height=.6)
+        left_now = starts.copy()
+        bars = ax.barh(qs, pct[:, i], left=left_now, color=palette[i], label=str(cat),
+                       edgecolor="white", linewidth=.9, height=.58)
+        for _b, _v, _l in zip(bars, pct[:, i], left_now):
+            if _v >= 8.0:
+                _is_dark = ((i < mid and i >= max(mid-1, 0)) or
+                            (i >= mid + (1 if n_cat % 2 else 0) + max(len(pos)-2, 0)))
+                # 홀수 척도의 중립 구간은 중심이 정확히 x=0이라 기준선과 글자가 겹친다.
+                # 중립 라벨만 0선 오른쪽의 구간 안쪽으로 살짝 옮긴다.
+                if n_cat % 2 == 1 and i == mid:
+                    _half = float(_v) / 2.0
+                    _x_text = min(max(3.5, float(_v) * 0.18), max(3.5, _half - 2.0))
+                else:
+                    _x_text = _l + _v/2
+                ax.text(_x_text, _b.get_y()+_b.get_height()/2, f"{_v:.0f}%",
+                        ha="center", va="center", fontsize=7.5, zorder=4,
+                        color="white" if _is_dark else "#31485E", fontweight="bold")
         starts = starts + pct[:, i]
-    ax.axvline(0, color="#555", lw=1)
-    ax.set_xlabel("응답 비율(%)"); ax.invert_yaxis()
+
+    ax.axvline(0, color="#71869A", lw=.65, zorder=1)
+    ax.set_xlabel("응답 비율(%)")
+    ax.invert_yaxis()
     ax.set_xlim(-105, 105)
-    # 제목·범례가 항목 수(그래프 높이)에 상관없이 항상 겹치지 않도록, 축 상대좌표(pad=..)가 아니라
-    # 그림(figure) 좌표에 둘 다 고정하고 위쪽 여백을 확보한다.
-    fig.suptitle(title, fontsize=11, y=0.98)
-    ax.legend(ncol=n_cat, fontsize=7, loc="upper center",
-              bbox_to_anchor=(0.5, 0.90), bbox_transform=fig.transFigure)
-    fig.tight_layout(rect=[0, 0, 1, 0.86])
+    deco(ax, title, ylabel_top=False)
+    ax.grid(axis="y", visible=False)
+    ax.grid(axis="x", color="#E4EDF5", linewidth=.8)
+    ax.legend(ncol=min(n_cat, 7), loc="upper center", bbox_to_anchor=(0.5, 1.14),
+              fontsize=8, frameon=False, columnspacing=1.2, handlelength=1.4)
+    fig.subplots_adjust(top=0.82, bottom=0.12, left=0.20 if len(qs) > 4 else 0.16, right=0.98)
     return fig
 
 def build_stat_method_text(logs, extra=None):
@@ -3872,11 +5430,180 @@ def _kamis_parse_unit(unit_text):
     return None, t          # 개·포·망 등은 kg 환산 불가
 
 
+def _kamis_ssl_context(verify=True, legacy=True):
+    """KAMIS(구형 국내 서버) 호환 SSLContext.
+
+    OpenSSL 3.x 는 기본적으로
+      - RFC5746 미지원 서버(레거시 재협상)
+      - SECLEVEL 2 미만의 약한 키/암호군
+      - TLS 1.0/1.1
+    을 모두 거부한다. 국내 공공기관 서버는 이 중 하나에 걸리는 경우가 많아
+    핸드셰이크 단계에서 SSLError 가 난다. 아래 컨텍스트는 검증(인증서 확인)은
+    그대로 유지한 채 호환성 옵션만 풀어 준다.
+    """
+    import ssl as _ssl
+    ctx = _ssl.create_default_context()
+    if legacy:
+        # OP_LEGACY_SERVER_CONNECT (0x4) : RFC5746 미지원 서버 허용
+        ctx.options |= getattr(_ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+        try:
+            import warnings as _w
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", DeprecationWarning)
+                ctx.minimum_version = _ssl.TLSVersion.TLSv1
+        except Exception:
+            pass
+        for _cipher in ("DEFAULT@SECLEVEL=1", "ALL:@SECLEVEL=1"):
+            try:
+                ctx.set_ciphers(_cipher)
+                break
+            except Exception:
+                continue
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    return ctx
+
+
+def _kamis_session(ssl_context=None):
+    """지정한 SSLContext 를 http/https 양쪽에 적용한 requests 세션."""
+    from requests.adapters import HTTPAdapter
+
+    class _KamisAdapter(HTTPAdapter):
+        def __init__(self, ssl_context=None, **kw):
+            self._kamis_ctx = ssl_context
+            super().__init__(**kw)
+
+        def init_poolmanager(self, *a, **kw):
+            if self._kamis_ctx is not None:
+                kw["ssl_context"] = self._kamis_ctx
+            return super().init_poolmanager(*a, **kw)
+
+        def proxy_manager_for(self, *a, **kw):
+            if self._kamis_ctx is not None:
+                kw["ssl_context"] = self._kamis_ctx
+            return super().proxy_manager_for(*a, **kw)
+
+    sess = _requests.Session()
+    adapter = _KamisAdapter(ssl_context=ssl_context, max_retries=0)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+
 def kamis_request(url, params, timeout=20):
-    """KAMIS HTTP 호출만 담당 (테스트에서 대체하기 쉽도록 분리)"""
+    """KAMIS 공식 Open-API 호출 (다단계 폴백).
+
+    공식 도메인은 ``www.kamis.or.kr`` 이고 공식 예제는 http/https 를 모두 쓴다.
+    KAMIS 서버는 구형 TLS 설정을 쓰는 경우가 있어 OpenSSL 3.x 환경
+    (Streamlit Cloud 등)에서 기본 설정만으로는 핸드셰이크가 실패할 수 있다.
+    아래 순서대로 시도하고, 성공한 방식을 ``r._smart_transport`` 에 기록한다.
+
+      1) https + 기본 설정                → 'https'
+      2) http  (리다이렉트 시 레거시 컨텍스트) → 'http-fallback'
+      3) https + 레거시 호환 컨텍스트(검증 유지) → 'https-legacy'
+      4) https + 레거시 + 인증서 검증 생략   → 'https-insecure' (경고 표시)
+
+    4단계는 인증서 검증을 끄므로 최후 수단이며, 성공해도 UI 에 경고를 띄운다.
+    """
     if not _HAS_REQUESTS:
         raise RuntimeError("requests 라이브러리가 없습니다. pip install requests")
-    return _requests.get(url, params=params, timeout=timeout)
+
+    raw_url = str(url).strip()
+    if raw_url.startswith("http://"):
+        https_url = "https://" + raw_url[len("http://"):]
+    elif raw_url.startswith("https://"):
+        https_url = raw_url
+    else:
+        https_url = "https://" + raw_url.lstrip("/")
+    http_url = "http://" + https_url[len("https://"):]
+
+    headers = {
+        'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/131.0 Safari/537.36'),
+        'Accept': 'application/json, application/xml, text/xml, */*',
+        'Connection': 'close',
+    }
+
+    attempts = []          # (라벨, 호출가능객체) 순서대로 시도
+    attempts.append(("https", lambda: _requests.get(
+        https_url, params=params, timeout=timeout, headers=headers)))
+
+    def _legacy_http():
+        sess = _kamis_session(_kamis_ssl_context(verify=True, legacy=True))
+        try:
+            return sess.get(http_url, params=params, timeout=timeout,
+                            headers=headers)
+        finally:
+            try: sess.close()
+            except Exception: pass
+    attempts.append(("http-fallback", _legacy_http))
+
+    def _legacy_https():
+        sess = _kamis_session(_kamis_ssl_context(verify=True, legacy=True))
+        try:
+            return sess.get(https_url, params=params, timeout=timeout,
+                            headers=headers)
+        finally:
+            try: sess.close()
+            except Exception: pass
+    attempts.append(("https-legacy", _legacy_https))
+
+    def _insecure_https():
+        try:
+            import urllib3 as _u3
+            _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+        sess = _kamis_session(_kamis_ssl_context(verify=False, legacy=True))
+        try:
+            return sess.get(https_url, params=params, timeout=timeout,
+                            headers=headers, verify=False)
+        finally:
+            try: sess.close()
+            except Exception: pass
+    attempts.append(("https-insecure", _insecure_https))
+
+    errors = []
+    for label, call in attempts:
+        try:
+            r = call()
+        except Exception as ex:
+            errors.append(f"{label}: {_kamis_err_text(ex)}")
+            continue
+        try:
+            r._smart_transport = label
+        except Exception:
+            pass
+        return r
+
+    raise RuntimeError(
+        "KAMIS 서버에 연결하지 못했습니다. 시도한 방식과 원인:\n- "
+        + "\n- ".join(errors))
+
+
+def _kamis_err_text(ex, limit=200):
+    """SSLError 등의 실제 원인(가장 안쪽 예외)까지 풀어서 문자열로 만든다."""
+    parts, seen, cur = [], set(), ex
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        txt = str(cur).strip()
+        if txt and txt not in parts:
+            parts.append(txt)
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    # urllib3 는 원인을 reason 속성에 담아 두기도 한다
+    reason = getattr(ex, "reason", None)
+    if reason is not None and str(reason).strip() not in parts:
+        parts.append(str(reason).strip())
+    msg = " / ".join(parts) if parts else type(ex).__name__
+    # 가장 유용한 [SSL: XXX] 코드가 있으면 앞으로 끌어올린다
+    import re as _re
+    m = _re.search(r"\[SSL:[^\]]+\][^\)\'\"]*", msg)
+    head = f"{type(ex).__name__}"
+    if m:
+        return f"{head} {m.group(0).strip()} | {msg[:limit]}"
+    return f"{head}: {msg[:limit]}"
 
 
 KAMIS_ITEM_CATEGORY_MAP = {
@@ -3930,7 +5657,10 @@ def kamis_fetch(cert_key, cert_id, item_code, kind_code, rank_code,
     import datetime as _dt
     end = _dt.date.today()
     start = end - _dt.timedelta(days=days)
-    action = "periodWholesaleProductList" if market_type == "도매" else "periodRetailProductList"
+    # KAMIS의 일별 품목별 도·소매 가격 API는 periodProductList 하나를 사용하고
+    # p_productclscode로 도매(02)/소매(01)를 구분한다.
+    action = "periodProductList"
+    product_cls = "02" if market_type == "도매" else "01"
     url = "https://www.kamis.or.kr/service/price/xml.do"
     params = {"action": action,
               "p_cert_key": str(cert_key).strip(), "p_cert_id": str(cert_id).strip(),
@@ -3945,13 +5675,36 @@ def kamis_fetch(cert_key, cert_id, item_code, kind_code, rank_code,
     except RuntimeError as ex:
         return None, str(ex)
     except Exception as ex:
-        return None, f"네트워크 오류({type(ex).__name__}) — 인터넷 연결을 확인해 주세요."
+        return None, f"KAMIS 연결 오류 - {_kamis_err_text(ex)}"
     if getattr(r, "status_code", 0) != 200:
         return None, f"KAMIS 서버 응답 오류(HTTP {getattr(r, 'status_code', '?')})"
+    # KAMIS는 xml.do 주소에서 p_returntype=json을 써도 환경/오류 종류에 따라
+    # XML을 돌려주는 경우가 있어 JSON과 XML을 모두 받을 수 있게 한다.
+    js = None
     try:
         js = r.json()
     except Exception:
-        return None, "응답을 해석하지 못했습니다. 인증키·아이디를 확인해 주세요."
+        try:
+            import xml.etree.ElementTree as _ETK
+            _root = _ETK.fromstring(getattr(r, "text", "") or "")
+            def _xml_dict(el):
+                children = list(el)
+                if not children:
+                    return (el.text or "").strip()
+                out = {}
+                for ch in children:
+                    val = _xml_dict(ch)
+                    if ch.tag in out:
+                        if not isinstance(out[ch.tag], list): out[ch.tag] = [out[ch.tag]]
+                        out[ch.tag].append(val)
+                    else:
+                        out[ch.tag] = val
+                return out
+            js = _xml_dict(_root)
+        except Exception:
+            _ct = str(getattr(r, "headers", {}).get("Content-Type", ""))[:80]
+            return None, ("KAMIS 응답 형식을 해석하지 못했습니다. "
+                          f"HTTP {getattr(r, 'status_code', '?')}, Content-Type={_ct or '미상'}")
 
     if isinstance(js, dict):
         condition = js.get("condition") or {}
@@ -3963,6 +5716,12 @@ def kamis_fetch(cert_key, cert_id, item_code, kind_code, rank_code,
         data = js.get("data", js)
     else:
         data = js
+    if isinstance(data, dict):
+        _dcode = (data.get("error_code") or data.get("errCode") or
+                  data.get("result_code") or data.get("resultCode"))
+        if _dcode and str(_dcode) not in ("000", "0"):
+            _dmsg = data.get("error_msg") or data.get("message") or data.get("result_msg") or ""
+            return None, f"KAMIS 오류({_dcode}): {_dmsg or '인증 정보 또는 조회 조건을 확인해 주세요.'}"
     items = data.get("item") if isinstance(data, dict) else (data if isinstance(data, list) else None)
     if not items:
         return None, "조회 결과가 없습니다. 품목·품종·등급·지역·기간을 확인해 주세요."
@@ -3988,7 +5747,12 @@ def kamis_fetch(cert_key, cert_id, item_code, kind_code, rank_code,
                      "품목코드": item_code, "출처": "KAMIS 농산물유통정보"})
     if not rows:
         return None, "조회 결과를 표로 만들지 못했습니다."
-    return pd.DataFrame(rows), None
+    _dfk = pd.DataFrame(rows)
+    try:
+        _dfk.attrs["kamis_transport"] = getattr(r, "_smart_transport", "https")
+    except Exception:
+        pass
+    return _dfk, None
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=30)
@@ -4164,13 +5928,9 @@ def run_autopilot_engine(df, ph="Tukey HSD", err_type=None, max_items=8,
                        edgecolor="none", width=.62 if pretty_on() else .8,
                        error_kw={"ecolor": "#5a6067", "elinewidth": 1.1})
                 top = float(mm["mean"].max())
-                _pad = bar_value_labels(ax, range(len(_xs)), mm["mean"].tolist(),
-                                        ee.tolist(), dec=rnd())
-                for bi, g in enumerate(order):
-                    if letters.get(g):
-                        ax.text(bi, mm.loc[g, "mean"] + ee.loc[g] + _pad + top * 0.02,
-                                letters[g], ha="center", fontweight="bold",
-                                color="#23282d")
+                _pad = bar_value_sig_labels(
+                    ax, range(len(_xs)), mm["mean"].tolist(), ee.tolist(),
+                    [letters.get(g, "") for g in order], dec=rnd())
                 ax.set_ylabel(yv)
                 ax.margins(y=.16 if pretty_on() else .05)
                 deco(ax, f"{trt}별 {yv} (평균±{'표준오차' if use_se else '표준편차'})")
@@ -4242,15 +6002,19 @@ def run_autopilot_engine(df, ph="Tukey HSD", err_type=None, max_items=8,
             "hwpx": hwpx, "docx": docx_data, "msgs": msgs, "ys": ys, "trt": trt, "blk": blk}
 
 def two_way_sensitivity(base_qty, base_price, mgmt_cost, byproduct=0,
-                        q_range=(-20, 20), p_range=(-20, 20), step=10):
-    """수량 변동율 × 단가 변동율 매트릭스로 소득을 계산 (위험관리 매트릭스)"""
+                        yield_variable_cost=0, q_range=(-20, 20), p_range=(-20, 20), step=10):
+    """수량×단가 위험 매트릭스. 수량비례비용은 수량 변화에 함께 연동한다."""
     q_rates = list(range(int(q_range[0]), int(q_range[1]) + 1, int(step)))
     p_rates = list(range(int(p_range[0]), int(p_range[1]) + 1, int(step)))
+    base_yvc = max(float(yield_variable_cost or 0), 0.0)
+    fixed_like_mgmt = max(float(mgmt_cost) - base_yvc, 0.0)
     mat = np.zeros((len(q_rates), len(p_rates)))
     for i, qr in enumerate(q_rates):
+        q_factor = 1 + qr/100
         for j, pr_ in enumerate(p_rates):
-            revenue = base_qty * (1 + qr/100) * base_price * (1 + pr_/100) + byproduct
-            mat[i, j] = revenue - mgmt_cost
+            revenue = base_qty * q_factor * base_price * (1 + pr_/100) + byproduct
+            adjusted_cost = fixed_like_mgmt + base_yvc * q_factor
+            mat[i, j] = revenue - adjusted_cost
     return pd.DataFrame(mat,
                         index=[f"{r:+d}%" for r in q_rates],
                         columns=[f"{r:+d}%" for r in p_rates])
@@ -4262,12 +6026,24 @@ def plot_sensitivity_heatmap(mat, title="수량·단가가 동시에 변할 때�
     w = max(5.5, 0.95 * len(mat.columns) + 2.2)
     fig, ax = plt.subplots(figsize=(w, h))
     disp = mat / 10000.0     # 만원 단위로 표시
-    sns.heatmap(disp, annot=True, fmt=".0f", cmap="RdYlGn", center=0,
-                linewidths=.6, linecolor="white", ax=ax,
-                cbar_kws={"label": "소득 (만원/10a)"})
-    ax.set_xlabel("단가 변동율"); ax.set_ylabel("수량 변동율")
-    ax.set_title(title + "  (단위: 만원/10a)", fontsize=11, pad=12)
-    plt.tight_layout()
+    from matplotlib.colors import LinearSegmentedColormap
+    _econ_cmap = LinearSegmentedColormap.from_list(
+        "smart_econ_div", ["#C96767", "#F5E2E2", "#FFFFFF", "#D9EAF7", "#3D6F9F"])
+    sns.heatmap(disp, annot=True, fmt=".0f", cmap=_econ_cmap, center=0,
+                linewidths=.8, linecolor="white", ax=ax,
+                cbar_kws={"label": "소득 (만원/10a)", "shrink": .82})
+    ax.set_xlabel("단가 변동률"); ax.set_ylabel("수량 변동률")
+    deco(ax, title + "  (단위: 만원/10a)", ylabel_top=False)
+    ax.grid(False)
+    for _sp in ax.spines.values():
+        _sp.set_visible(False)
+    try:
+        _cb = ax.collections[0].colorbar
+        if _cb is not None:
+            _cb.outline.set_visible(False)
+    except Exception:
+        pass
+    plt.tight_layout(pad=1.2)
     return fig
 
 LABOR_HINTS = ("노동시간", "노력시간", "작업시간", "소요시간", "노동(시간", "시간")
@@ -4406,7 +6182,7 @@ def money_table(df, dec_overrides=None):
             dec = dec_overrides[name]
         elif name.endswith("(%)"):
             dec = 1
-        elif name == "B/C":
+        elif name in ("B/C", "단년도 총수입/생산비", "할인 B/C"):
             dec = 2
         elif "수량" in name:
             dec = 1
@@ -4421,6 +6197,7 @@ def log_action(what):
     import datetime
     st.session_state.setdefault("log", []).append(
         {"시각": datetime.datetime.now().strftime("%H:%M:%S"), "작업": what})
+    _record_usage(what)
 
 with st.sidebar.expander("🤖 AI 기능 켜기 (API 키 입력)"):
     st.caption("여기는 **설정 칸**입니다. 키를 넣으면 각 분석 결과 아래에 "
@@ -4858,7 +6635,7 @@ if menu == "⚡ 원클릭 보고서":
                     + [b for b in ap["blocks"] if b.get("table") is not None],
                     "원클릭 분석 결과")
                 if _xl:
-                    st.download_button("📈 엑셀(xlsx) — 항목별 시트 + 편집 가능한 그래프",
+                    st.download_button("📈 엑셀(xlsx) — 스마트 블루 항목별 시트 + 편집 가능한 그래프",
                                        _xl, "통계분석_초안.xlsx", width="stretch",
                                        key="xls_autopilot",
                                        help="조사항목마다 시트가 하나씩 만들어지고, 각 시트에 "
@@ -4874,7 +6651,7 @@ if menu == "⚡ 원클릭 보고서":
             for m in ap.get("msgs", []): st.caption("• " + m)
 
             st.markdown("### 📋 분석 종합")
-            st.dataframe(ap["summary"], width="stretch", hide_index=True)
+            smart_table(ap["summary"], width="stretch", hide_index=True)
 
             st.markdown("### 📄 적요(초안)")
             st.code(ap["abstract"], language=None)
@@ -4886,9 +6663,9 @@ if menu == "⚡ 원클릭 보고서":
                 with st.expander(f"{blk['caption']}", expanded=(i == 0)):
                     if i < len(_texts):
                         st.code(_texts[i]["text"], language=None)
-                    st.dataframe(sup_display(blk["table"]), width="stretch", hide_index=True)
+                    smart_table(sup_display(blk["table"]), width="stretch", hide_index=True)
                     if blk.get("image"):
-                        st.image(blk["image"])
+                        st.image(blk["image"], width=640)
 
             st.markdown("### 🧾 통계 처리 문구")
             st.code(ap["stat_line"], language=None)
@@ -4919,7 +6696,7 @@ elif menu == "📊 통계분석":
 
     if tab_data.on:
         st.subheader("데이터 미리보기")
-        st.dataframe(df, width="stretch")
+        smart_table(df, width="stretch")
         c1, c2, c3 = st.columns(3)
         c1.metric("행 개수", df.shape[0]); c2.metric("열 개수", df.shape[1])
         c3.metric("결측치 개수", int(df.isna().sum().sum()))
@@ -4988,11 +6765,11 @@ elif menu == "📊 통계분석":
                                    "변환 실패(결측)": int(conv.isna().sum() - d2[c].isna().sum())})
                     d2[c] = conv
                 set_df(d2, "숫자 변환")
-                st.dataframe(pd.DataFrame(report), width="stretch")
+                smart_table(pd.DataFrame(report), width="stretch")
                 log_action(f"숫자 변환: {', '.join(fixcols)}")
                 st.success("변환했습니다!"); st.rerun()
 
-        st.write("**기술통계**"); st.dataframe(df.describe(), width="stretch")
+        st.write("**기술통계**"); smart_table(df.describe(), width="stretch")
 
     # ---------- 전처리 ----------
     if tab_prep.on:
@@ -5003,7 +6780,7 @@ elif menu == "📊 통계분석":
         pc1, pc2, pc3 = st.columns(3)
         pc1.metric("행", f"{len(df):,}"); pc2.metric("열", len(df.columns))
         pc3.metric("결측치", f"{int(df.isna().sum().sum()):,}")
-        st.dataframe(df.head(20), width="stretch")
+        smart_table(df.head(20), width="stretch")
         st.caption(f"열 목록: {', '.join(map(str, df.columns))}")
         _stack = st.session_state.get("undo_stack", [])
         u1, u2 = st.columns([1, 3])
@@ -5026,7 +6803,7 @@ elif menu == "📊 통계분석":
                 st.success("결측치가 없습니다.")
             else:
                 st.warning(f"결측치가 있는 행: 총 {len(miss)}개")
-                st.dataframe(miss.style.highlight_null(color="#FFF3B0"), width="stretch")
+                smart_table(miss.style.highlight_null(color="#FFF3B0"), width="stretch")
                 st.caption(f"행 번호: {list(miss.index)}")
             m = st.radio("처리 방법", ["행 삭제", "평균 대체", "중앙값 대체", "0으로 대체"], horizontal=True)
             if st.button("적용", key="p_miss"):
@@ -5039,7 +6816,7 @@ elif menu == "📊 통계분석":
                 else: d = d.fillna(0)
                 set_df(d, "전처리")
                 st.success(f"{len(aff)}개 행 처리 완료. 처리된 행 번호: {aff}")
-                st.dataframe(d, width="stretch")
+                smart_table(d, width="stretch")
 
         elif pmode == "이상값 처리":
             with st.expander("ℹ️ 이상값이 뭔가요?"):
@@ -5064,16 +6841,16 @@ elif menu == "📊 통계분석":
                         m_ = (s < lo) | (s > hi)
                         mask |= m_.fillna(False)
                         info.append({"변수": c, "하한": round(lo, 2), "상한": round(hi, 2), "이상값 수": int(m_.sum())})
-                    st.dataframe(pd.DataFrame(info), width="stretch")
+                    smart_table(pd.DataFrame(info), width="stretch")
                     out_rows = df[mask]
                     if len(out_rows) == 0:
                         st.success("이상값이 없습니다.")
                     else:
                         st.warning(f"이상값이 포함된 행: {len(out_rows)}개 (행 번호: {list(out_rows.index)})")
-                        st.dataframe(out_rows, width="stretch")
+                        smart_table(out_rows, width="stretch")
                     fig, ax = plt.subplots(figsize=(min(12, 1.5*len(ocols)+2), 4))
                     df[ocols].plot(kind="box", ax=ax); ax.set_title("상자그림(이상값 확인)")
-                    plt.xticks(rotation=30); st.pyplot(fig); plt.close(fig)
+                    plt.xticks(rotation=30); show_plot(fig); plt.close(fig)
                     act = st.radio("처리 방법", ["해당 행 삭제", "경계값으로 대체(윈저화)", "결측치로 변경"], horizontal=True)
                     if st.button("적용", key="p_out"):
                         d = st.session_state.df.copy()
@@ -5091,15 +6868,15 @@ elif menu == "📊 통계분석":
                                 else: d[c] = s.where((s >= lo) & (s <= hi))
                         set_df(d, "전처리")
                         st.success(f"이상값 처리 완료. (영향 행: {list(out_rows.index)})")
-                        st.dataframe(d, width="stretch")
+                        smart_table(d, width="stretch")
 
         elif pmode == "중복 행 제거":
             dup = df[df.duplicated(keep=False)]
             st.write(f"중복 행: {len(dup)}개")
-            if len(dup): st.dataframe(dup, width="stretch")
+            if len(dup): smart_table(dup, width="stretch")
             if st.button("중복 제거", key="p_dup"):
                 set_df(st.session_state.df.drop_duplicates().reset_index(drop=True), "중복 제거")
-                st.success("중복 행을 제거했습니다."); st.dataframe(st.session_state.df, width="stretch")
+                st.success("중복 행을 제거했습니다."); smart_table(st.session_state.df, width="stretch")
 
         elif pmode == "자료형 변환":
             c1, c2 = st.columns(2)
@@ -5113,7 +6890,7 @@ elif menu == "📊 통계분석":
                     st.info(f"변환 실패(결측 처리)된 값: {int(d[col].isna().sum() - df[col].isna().sum())}개")
                 else:
                     d[col] = d[col].astype(str)
-                set_df(d, "자료형 변환"); st.success("변환 완료"); st.dataframe(d.head(), width="stretch")
+                set_df(d, "자료형 변환"); st.success("변환 완료"); smart_table(d.head(), width="stretch")
 
         elif pmode == "열 삭제/이름변경":
             c1, c2 = st.columns(2)
@@ -5138,7 +6915,7 @@ elif menu == "📊 통계분석":
                 arr = (StandardScaler() if how.startswith("표준화") else MinMaxScaler()).fit_transform(d[sc])
                 suffix = "_표준화" if how.startswith("표준화") else "_정규화"
                 for i, c in enumerate(sc): d[c + suffix] = arr[:, i].round(4)
-                st.session_state.df = d; st.success("완료"); st.dataframe(d.head(), width="stretch")
+                st.session_state.df = d; st.success("완료"); smart_table(d.head(), width="stretch")
 
     # ---------- 파생변수 ----------
     if tab_derive.on:
@@ -5147,7 +6924,7 @@ elif menu == "📊 통계분석":
         st.markdown("###### 📋 현재 데이터 (새 열이 추가되면 바로 보입니다)")
         dc1, dc2 = st.columns(2)
         dc1.metric("행", f"{len(df):,}"); dc2.metric("열", len(df.columns))
-        st.dataframe(df.head(20), width="stretch")
+        smart_table(df.head(20), width="stretch")
         st.caption(f"열 목록: {', '.join(map(str, df.columns))}")
         kind = st.radio("만들 방식", ["두 열 사칙연산", "조건 열 (예: 기온≥33)", "그룹별 집계"])
         if kind == "두 열 사칙연산":
@@ -5162,7 +6939,7 @@ elif menu == "📊 통계분석":
                     d = st.session_state.df.copy()
                     d[nm] = {"+": d[a]+d[b], "-": d[a]-d[b], "×": d[a]*d[b],
                              "÷": d[a]/d[b].replace(0, np.nan)}[op]
-                    st.session_state.df = d; st.success(f"'{nm}' 생성"); st.dataframe(d.head(), width="stretch")
+                    st.session_state.df = d; st.success(f"'{nm}' 생성"); smart_table(d.head(), width="stretch")
         elif kind.startswith("조건"):
             if not num_cols: st.warning("숫자형 변수가 필요합니다.")
             else:
@@ -5176,7 +6953,7 @@ elif menu == "📊 통계분석":
                     d = st.session_state.df.copy(); s = d[col]
                     flag = {"≥": s >= thr, ">": s > thr, "≤": s <= thr, "<": s < thr, "=": s == thr}[cond]
                     d[nm] = flag.astype(int); st.session_state.df = d
-                    st.success(f"'{nm}' 생성 (1의 개수: {int(d[nm].sum())})"); st.dataframe(d.head(), width="stretch")
+                    st.success(f"'{nm}' 생성 (1의 개수: {int(d[nm].sum())})"); smart_table(d.head(), width="stretch")
         else:
             if not num_cols: st.warning("숫자형 값 열이 필요합니다.")
             else:
@@ -5188,7 +6965,7 @@ elif menu == "📊 통계분석":
                     fmap = {"합계": "sum", "평균": "mean", "최대": "max", "최소": "min", "개수": "count"}
                     agg = df.groupby(g)[v].agg(fmap[f]).round(3).reset_index()
                     agg.columns = [g, f"{v}_{f}"]
-                    st.dataframe(agg, width="stretch")
+                    smart_table(agg, width="stretch")
                     dl_table(agg, f"{g}별 {v} {f}", "aggregate1", "aggregate")
                     st.session_state.files[f"집계_{g}_{v}_{f}"] = agg
                     st.info("사이드바 '분석할 데이터 선택'에서 이 집계표를 고를 수 있어요.")
@@ -5205,7 +6982,7 @@ elif menu == "📊 통계분석":
                                    help="정규분포가 아니거나 순위·등급 자료면 Spearman을 쓰세요.")
             if len(sel) >= 2:
                 corr = df[sel].corr(method="pearson" if cmethod.startswith("Pearson") else "spearman")
-                st.dataframe(corr.round(3), width="stretch")
+                smart_table(corr.round(3), width="stretch")
                 # ---- 유의성 별표 표기 (논문 관행) ----
                 _meth = stats.pearsonr if cmethod.startswith("Pearson") else stats.spearmanr
                 star_tbl = pd.DataFrame(index=corr.index, columns=corr.columns, dtype=object)
@@ -5228,14 +7005,28 @@ elif menu == "📊 통계분석":
                             star_tbl.loc[a, b] = "-"
                 st.markdown("###### 📋 상관계수표 (유의성 별표 포함)")
                 star_out = star_tbl.reset_index().rename(columns={"index": "변수"})
-                st.dataframe(star_out, width="stretch")
+                smart_table(star_out, width="stretch")
                 st.caption("* p<0.05, ** p<0.01, *** p<0.001 "
                            f"／ 유의한 상관을 보인 변수쌍 {n_pairs}개")
                 dl_table(star_out, f"{'Pearson' if cmethod.startswith('Pearson') else 'Spearman'} 상관분석표",
                          "corrstar", "상관분석표")
                 txt = interpret_corr(corr, sel); st.info("💡 " + txt)
                 fig, ax = plt.subplots(figsize=(1.2*len(sel), 1.0*len(sel)))
-                sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
+                from matplotlib.colors import LinearSegmentedColormap
+                _corr_cmap = LinearSegmentedColormap.from_list(
+                    "smart_corr", ["#C96767", "#F5E2E2", "#FFFFFF", "#D9EAF7", "#3D6F9F"])
+                sns.heatmap(corr, annot=True, fmt=".2f", cmap=_corr_cmap, center=0, ax=ax,
+                            linewidths=.6, linecolor="white", square=True,
+                            cbar_kws={"shrink": .82})
+                deco(ax, "상관계수 히트맵", ylabel_top=False); ax.grid(False)
+                for _sp in ax.spines.values():
+                    _sp.set_visible(False)
+                try:
+                    _cb = ax.collections[0].colorbar
+                    if _cb is not None:
+                        _cb.outline.set_visible(False)
+                except Exception:
+                    pass
                 png = fig_to_png(fig)
                 st.download_button("🖼️ 히트맵 다운로드", png, "heatmap.png", "image/png")
                 out = corr.round(3).reset_index().rename(columns={"index": "변수"})
@@ -5271,6 +7062,9 @@ elif menu == "📊 통계분석":
                     rows, notes = [], []
                     groups_order = None
                     result = {}
+                    # 여러 형질 모드도 표만 만들고 끝내지 않고, 항목별 그래프를 함께 만든다.
+                    # 각 그래프에는 평균값 + SD/SE 오차막대 + 유의성 문자(a,b,c)를 표시한다.
+                    plot_records = []
                     for tr in traits:
                         data = df[[gc, tr]].dropna()
                         if data[gc].nunique() < 2: continue
@@ -5302,22 +7096,76 @@ elif menu == "📊 통계분석":
                         result[tr] = col
                         notes.append({"항목": tr, "p-value": ("-" if np.isnan(pval) else round(pval, 4)),
                                       "유의성": "-" if np.isnan(pval) else ("**" if pval < .01 else "*" if pval < .05 else "n.s.")})
+
+                        # ---- 여러 형질 모드: 항목별 화면 그래프 ----
+                        try:
+                            _stats = data.groupby(gc)[tr].agg(["mean", "std", "count"])
+                            _order = [g for g in groups_order if g in _stats.index]
+                            _use_se = st.session_state.get("err_type", "표준편차(SD)").startswith("표준오차")
+                            _err = (_stats["std"] / np.sqrt(_stats["count"])) if _use_se else _stats["std"]
+                            _elabel = "표준오차" if _use_se else "표준편차"
+                            _m = _stats.loc[_order]
+                            _e = _err.loc[_order].fillna(0)
+                            _fig, _ax = plt.subplots(figsize=(min(6.2, max(4.8, len(_order) * 0.90)),
+                                                             min(4.0, figsize()[1])))
+                            _ax.bar(_order, _m["mean"], yerr=_e, capsize=4,
+                                    color=bar_colors(values=_m["mean"].tolist()),
+                                    edgecolor="none", width=.62 if pretty_on() else .8,
+                                    error_kw={"ecolor": "#5a6067", "elinewidth": 1.1})
+                            bar_value_sig_labels(
+                                _ax, range(len(_order)), _m["mean"].tolist(), _e.tolist(),
+                                [letters.get(g, "") for g in _order], dec=dec)
+                            _ax.margins(y=.20 if pretty_on() else .10)
+                            _ax.set_ylabel(tr); _ax.set_xlabel(gc)
+                            deco(_ax, f"{gc}별 {tr} (평균±{_elabel}, {ph})")
+                            _png = fig_to_png(_fig, show=False)
+                            plot_records.append({"trait": tr, "png": _png, "error_label": _elabel})
+                        except Exception:
+                            # 표 계산은 정상인데 특정 그래프만 실패한 경우 전체 요약분석을 중단하지 않는다.
+                            pass
                     summary = pd.DataFrame(result)
                     summary.index.name = gc
                     summary = summary.reset_index()
                     st.markdown("#### 처리구별 형질 요약표")
-                    st.dataframe(sup_df(summary), width="stretch")
+                    smart_table(sup_df(summary), width="stretch")
                     st.markdown("#### 항목별 분산분석 유의성")
                     ndf = pd.DataFrame(notes)
-                    st.dataframe(ndf, width="stretch")
+                    smart_table(ndf, width="stretch")
+
+                    if plot_records:
+                        st.markdown("#### 📊 항목별 그래프")
+                        st.caption("막대는 처리 평균, 오차막대는 선택한 SD/SE이며, 숫자 뒤 a·b·c는 사후검정 유의성 그룹입니다. "
+                                   "ANOVA가 유의하지 않은 항목은 문자를 생략합니다.")
+                        _cols = st.columns(2)
+                        for _i, _pr in enumerate(plot_records):
+                            with _cols[_i % 2]:
+                                st.markdown(f"**{_pr['trait']}**")
+                                st.image(_pr["png"], width="stretch")
+                                st.download_button(
+                                    f"🖼️ {_pr['trait']} 그래프 PNG", _pr["png"],
+                                    f"anova_multi_{_i+1}.png", "image/png",
+                                    key=f"ms_plot_dl_{_i}", width="stretch")
+
                     txt = (f"{gc}에 따라 {len(traits)}개 형질을 {ph}로 분석했습니다. "
                            "같은 문자를 가진 처리구끼리는 통계적 차이가 없습니다. "
                            f"(유의: {(ndf['유의성'] != 'n.s.').sum()}개 항목)")
                     st.info("💡 " + txt)
                     dl_table(summary, f"{gc}별 생산력 검정 결과 ({ph})", "summary_table3", "summary_table")
                     log_action(f"요약표 생성: {gc} × {len(traits)}개 형질 ({ph})")
-                    ai_interpret_button("ms", f"{gc}별 여러 형질 요약표", summary, "각 수치 옆 a,b,c는 처리 간 유의성 그룹입니다.", capture_slot="cap_ms")
-                    report_capture("cap_ms", f"{gc}별 형질 요약표", txt, summary, None)
+
+                    _ms_blocks = [
+                        {"caption": "처리구별 형질 요약표", "table": summary},
+                        {"caption": "항목별 분산분석 유의성", "table": ndf},
+                    ]
+                    _ms_blocks += [
+                        {"caption": f"{_pr['trait']} 처리구별 평균±{_pr['error_label']}",
+                         "image": _pr["png"]}
+                        for _pr in plot_records
+                    ]
+                    report_capture("cap_ms", f"{gc}별 형질 요약표", text=txt, blocks=_ms_blocks)
+                    ai_interpret_button("ms", f"{gc}별 여러 형질 요약표", summary,
+                                        "각 수치 옆 a,b,c는 처리 간 유의성 그룹입니다.",
+                                        capture_slot="cap_ms")
                 report_button("cap_ms")
         elif mode.startswith("일원배치"):
             if not cat_cols or not num_cols: st.warning("그룹(범주형)과 측정(숫자형) 변수가 필요합니다.")
@@ -5353,96 +7201,64 @@ elif menu == "📊 통계분석":
                     if not ok_to_run:
                         st.stop()
                     st.markdown("#### 1) 가정 검정")
-                    # CRD는 처리별 원자료를, RCBD는 블록을 보정한 모형의 잔차를 확인하는 것이 타당하다.
-                    if use_blk:
-                        st.caption("난괴법(RCBD)은 처리별 원자료보다 **처리+블록 모형의 잔차**를 대상으로 "
-                                   "정규성·등분산을 확인합니다. 잔차 진단은 모형 적합 직후 표시됩니다.")
-                    else:
-                        nrows, nok = [], True
-                        for g in data[gc].unique():
-                            vv = data[data[gc] == g][vc]
-                            if 3 <= len(vv) <= 5000:
-                                try:
-                                    w, p = stats.shapiro(vv)
-                                    nrows.append({"그룹": g, "W": round(w, 3), "p": round(p, 3),
-                                                  "정규성": "만족" if p >= .05 else "위배"})
-                                    if p < .05: nok = False
-                                except Exception:
-                                    pass
+                    nrows, nok = [], True
+                    for g in data[gc].unique():
+                        v = data[data[gc] == g][vc]
+                        if len(v) >= 3:
+                            w, p = stats.shapiro(v)
+                            nrows.append({"그룹": g, "W": round(w, 3), "p": round(p, 3),
+                                          "정규성": "만족" if p >= .05 else "위배"})
+                            if p < .05: nok = False
+                    lp = np.nan
+                    try:
+                        samples = [data[data[gc] == g][vc] for g in data[gc].unique()]
+                        samples = [s for s in samples if len(s) >= 2]
+                        if len(samples) >= 2:
+                            ls, lp = stats.levene(*samples)
+                    except Exception:
                         lp = np.nan
+                    if nrows:
+                        smart_table(pd.DataFrame(nrows), width="stretch")
+                    else:
+                        st.caption("각 처리구의 반복이 3개 미만이라 정규성 검정을 생략했습니다.")
+                    if not np.isnan(lp):
+                        st.write(f"등분산(Levene): 통계량={ls:.3f}, p={lp:.3f} → {'만족' if lp >= .05 else '위배'}")
+                    else:
+                        st.caption("반복이 부족해 등분산 검정을 생략했습니다.")
+                    if nok and (np.isnan(lp) or lp >= .05):
+                        st.success("가정을 모두 만족합니다. ANOVA 결과를 신뢰할 수 있어요.")
+                    else:
+                        st.warning("가정이 일부 위배되었습니다. 아래 **비모수 검정 결과**를 함께 확인하세요.")
+                        # ---- 비모수 자동 전환 (원클릭) ----
                         try:
-                            samples = [data[data[gc] == g][vc] for g in data[gc].unique()]
-                            samples = [ss for ss in samples if len(ss) >= 2]
-                            if len(samples) >= 2:
-                                ls, lp = stats.levene(*samples)
+                            _grps = [g[vc].values for _, g in data.groupby(gc)]
+                            if len(_grps) == 2:
+                                _st, _p = stats.mannwhitneyu(*_grps)
+                                _nm = "Mann-Whitney U 검정"
+                            else:
+                                _st, _p = stats.kruskal(*_grps)
+                                _nm = "Kruskal-Wallis 검정"
+                            _med = data.groupby(gc)[vc].median().round(rnd())
+                            with st.expander(f"🧪 비모수 대안: {_nm} 결과 보기", expanded=True):
+                                k1, k2 = st.columns(2)
+                                k1.metric("검정 통계량", f"{_st:.3f}")
+                                k2.metric("p-value", f"{_p:.4f}",
+                                          "유의함" if _p < .05 else "유의하지 않음")
+                                smart_table(pd.DataFrame({gc: _med.index.astype(str),
+                                                           f"{vc} 중앙값": _med.values}),
+                                             width="stretch")
+                                st.caption("정규성·등분산 가정을 쓰지 않는 방법입니다. "
+                                           "평균 대신 **중앙값**으로 비교합니다. "
+                                           "아래 ANOVA 결과와 결론이 다르면 비모수 결과를 우선하세요.")
                         except Exception:
-                            lp = np.nan
-                        if nrows:
-                            st.dataframe(pd.DataFrame(nrows), width="stretch")
-                        else:
-                            st.caption("각 처리구의 반복이 3개 미만이라 정규성 검정을 생략했습니다.")
-                        if not np.isnan(lp):
-                            st.write(f"등분산(Levene): 통계량={ls:.3f}, p={lp:.3f} → {'만족' if lp >= .05 else '위배'}")
-                        else:
-                            st.caption("반복이 부족해 등분산 검정을 생략했습니다.")
-                        if nok and (np.isnan(lp) or lp >= .05):
-                            st.success("가정을 모두 만족합니다. ANOVA 결과를 신뢰할 수 있어요.")
-                        else:
-                            st.warning("가정이 일부 위배되었습니다. 아래 **비모수 검정 결과**를 함께 확인하세요.")
-                            try:
-                                _grps = [gg[vc].values for _, gg in data.groupby(gc)]
-                                if data[vc].nunique() <= 1:
-                                    raise ValueError("모든 측정값이 동일함")
-                                if len(_grps) == 2:
-                                    _st, _p = stats.mannwhitneyu(*_grps, alternative="two-sided")
-                                    _nm = "Mann-Whitney U 검정"
-                                else:
-                                    _st, _p = stats.kruskal(*_grps)
-                                    _nm = "Kruskal-Wallis 검정"
-                                _med = data.groupby(gc)[vc].median().round(rnd())
-                                with st.expander(f"🧪 비모수 대안: {_nm} 결과 보기", expanded=True):
-                                    k1, k2 = st.columns(2)
-                                    k1.metric("검정 통계량", f"{_st:.3f}")
-                                    k2.metric("p-value", f"{_p:.4f}" if np.isfinite(_p) else "계산 불가",
-                                              "유의함" if np.isfinite(_p) and _p < .05 else "유의하지 않음")
-                                    st.dataframe(pd.DataFrame({gc: _med.index.astype(str),
-                                                               f"{vc} 중앙값": _med.values}),
-                                                 width="stretch")
-                                    st.caption("정규성·등분산 가정을 쓰지 않는 방법입니다. "
-                                               "평균 대신 **중앙값**으로 비교합니다. "
-                                               "아래 ANOVA 결과와 결론이 다르면 비모수 결과를 함께 보고하세요.")
-                            except Exception:
-                                st.caption("비모수 검정을 자동 수행하지 못했습니다. '비모수검정' 탭을 이용하세요.")
+                            st.caption("비모수 검정을 자동 수행하지 못했습니다. '비모수검정' 탭을 이용하세요.")
                     st.markdown("#### 2) 분산분석 결과")
                     formula = safe_formula(vc, [gc] + ([blk] if use_blk else []))
                     model = ols(formula, data=data).fit()
                     aov = sm.stats.anova_lm(model, typ=2)
-                    st.dataframe(aov.round(4), width="stretch")
+                    smart_table(aov.round(4), width="stretch")
                     st.caption("설계: " + ("**난괴법(RCBD)** — 반복(블록) 효과를 모형에 포함했습니다."
                                           if use_blk else "**완전임의배치(CRD)** — 블록 없음"))
-                    if use_blk:
-                        try:
-                            _resid = pd.Series(model.resid, index=data.index).dropna()
-                            _rp = np.nan
-                            if 3 <= len(_resid) <= 5000 and _resid.nunique() > 1:
-                                _rw, _rp = stats.shapiro(_resid)
-                                st.caption(f"잔차 정규성(Shapiro-Wilk) p = {_rp:.4f} → "
-                                           + ("만족" if _rp >= .05 else "위배 가능"))
-                            _rdat = data.loc[_resid.index, [gc]].copy()
-                            _rdat["__resid"] = _resid
-                            _rs = [_g["__resid"].values for _, _g in _rdat.groupby(gc)
-                                   if len(_g) >= 2]
-                            _lp = np.nan
-                            if len(_rs) >= 2:
-                                _ls, _lp = stats.levene(*_rs)
-                                st.caption(f"잔차 등분산(Levene) p = {_lp:.4f} → "
-                                           + ("만족" if _lp >= .05 else "위배 가능"))
-                            if (np.isfinite(_rp) and _rp < .05) or (np.isfinite(_lp) and _lp < .05):
-                                st.warning("⚠️ RCBD 모형 잔차 가정이 일부 위배될 수 있습니다. "
-                                           "변환·이상값·혼합모형 등 대안을 검토하세요. 단순 Kruskal-Wallis는 블록을 무시하므로 "
-                                           "RCBD의 직접 대체법으로 자동 적용하지 않습니다.")
-                        except Exception:
-                            st.caption("RCBD 잔차 진단을 계산하지 못했습니다.")
                     tkey = f"C({q_ref(gc)})"
                     pval = aov.loc[tkey, "PR(>F)"] if tkey in aov.index else aov["PR(>F)"].iloc[0]
                     if use_blk:
@@ -5457,22 +7273,19 @@ elif menu == "📊 통계분석":
                     ns = _phres["not_sig"]
                     means = data.groupby(gc)[vc].agg(["mean", "std", "count"])
                     order = means.sort_values("mean", ascending=False).index.tolist()
-                    letters = compact_letter_display(order, ns)
+                    # 전체 ANOVA가 유의하지 않으면 모든 처리에 'a'를 붙이지 않는다.
+                    # 화면 메시지(유의차 없음)와 그래프/표가 서로 모순되어 보이는 것을 방지한다.
+                    letters = ({} if float(pval) >= 0.05 or ph.startswith("던넷")
+                               else compact_letter_display(order, ns))
                     # ---- CV% · LSD (시험연구보고서 필수 지표) ----
                     st.markdown("#### 3) 시험 정밀도 지표")
                     ci = calc_cv_lsd(model, data, gc, vc)
                     m1, m2, m3 = st.columns(3)
                     m1.metric("CV (변이계수)", f"{ci['CV']:.1f} %", cv_grade(ci["CV"]))
-                    m2.metric("LSD 근사 (p<0.05)" if ci.get("LSD_is_approx") else "LSD (p<0.05)",
-                              f"{ci['LSD']:.2f}")
+                    m2.metric("LSD (p<0.05)", f"{ci['LSD']:.2f}")
                     m3.metric("오차평균제곱(MSE)", f"{ci['MSE']:.2f}")
-                    if ci.get("LSD_is_approx"):
-                        st.caption("CV%는 시험의 정밀도를 나타냅니다. 반복수가 불균형하여 표시된 LSD는 "
-                                   "조화평균 반복수에 기반한 **참고용 근사값**입니다. 처리쌍의 유의성은 위 사후검정의 "
-                                   "모형 기반 p값/신뢰구간을 우선하세요.")
-                    else:
-                        st.caption("CV%는 시험의 정밀도를 나타냅니다(포장시험 10~20% 양호, 20% 초과 시 재검토). "
-                                   f"균형자료에서는 두 처리 평균의 차이가 LSD({ci['LSD']:.2f})보다 크면 유의한 차이로 볼 수 있습니다.")
+                    st.caption("CV%는 시험의 정밀도를 나타냅니다(포장시험 10~20% 양호, 20% 초과 시 재검토). "
+                               f"두 처리 평균의 차이가 LSD({ci['LSD']:.2f})보다 크면 유의한 차이로 봅니다.")
                     if ci["CV"] > 30:
                         st.warning("⚠️ CV%가 30%를 넘습니다. 포장 불균일·조사 오차·이상값을 점검해 보세요.")
                     if ph.startswith("던넷"):
@@ -5493,7 +7306,7 @@ elif menu == "📊 통계분석":
                                 if _cnum in dn_df.columns:
                                     dn_df[_cnum] = pd.to_numeric(dn_df[_cnum], errors="coerce").round(rnd())
                             st.markdown(f"###### 던넷 검정: '{_c}' 대비 모형 기반 비교")
-                            st.dataframe(dn_df, width="stretch", hide_index=True)
+                            smart_table(dn_df, width="stretch", hide_index=True)
                             st.caption("ANOVA와 같은 적합모형의 잔차·블록 보정을 사용한 동시비교입니다. "
                                        "95% 동시신뢰구간이 0을 포함하지 않으면 대조구와 유의한 차이가 있습니다.")
                             _sig = dn_df[dn_df["판정"].astype(str).str.startswith("유의")]["처리구"].tolist()
@@ -5513,24 +7326,20 @@ elif menu == "📊 통계분석":
                     res["평균±SE"] = [f"{means.loc[g,'mean']:.{rnd()}f}±{_se.loc[g]:.{rnd()}f}"
                                      + (letters.get(g, "") and f"^{letters.get(g,'')}")
                                      for g in res[gc]]
-                    st.dataframe(sup_display(res), width="stretch")
+                    smart_table(sup_display(res), width="stretch")
                     use_se = st.session_state.get("err_type", "표준편차(SD)").startswith("표준오차")
                     err = (means["std"] / np.sqrt(means["count"])) if use_se else means["std"]
                     elabel = "표준오차" if use_se else "표준편차"
-                    fig, ax = plt.subplots(figsize=figsize(max(5, len(order))))
+                    fig, ax = plt.subplots(figsize=(min(6.6, max(5.0, len(order)*0.92)), min(4.2, figsize()[1])))
                     m = means.loc[order]; e_ = err.loc[order]
                     ax.bar(order, m["mean"], yerr=e_, capsize=4,
                            color=bar_colors(values=m["mean"].tolist()),
                            edgecolor="none", width=.62 if pretty_on() else .8,
                            error_kw={"ecolor": "#5a6067", "elinewidth": 1.1})
-                    bar_value_labels(ax, range(len(order)), m["mean"].tolist(),
-                                     e_.tolist(), dec=rnd())
-                    ax.margins(y=.16 if pretty_on() else .05)
-                    for i, g in enumerate(order):
-                        _lb = letters.get(g, "")
-                        if _lb:
-                            ax.text(i, m.loc[g, "mean"]+e_.loc[g]+.02*m["mean"].max(), _lb,
-                                    ha="center", fontweight="bold")
+                    bar_value_sig_labels(
+                        ax, range(len(order)), m["mean"].tolist(), e_.tolist(),
+                        [letters.get(g, "") for g in order], dec=rnd())
+                    ax.margins(y=.20 if pretty_on() else .07)
                     ax.set_ylabel(vc); ax.set_xlabel(gc)
                     deco(ax, f"{gc}별 {vc} (평균±{elabel}, {ph})")
                     png = fig_to_png(fig)
@@ -5546,11 +7355,9 @@ elif menu == "📊 통계분석":
                                     f"* CV(%) = {ci['CV']:.1f}, 평균±{elabel} "
                                     f"(n = {int(means['count'].min())})")
                     else:
-                        _lsd_note = (f"LSD(0.05) 근사 = {ci['LSD']:.2f}" if ci.get("LSD_is_approx")
-                                     else f"LSD(0.05) = {ci['LSD']:.2f}")
                         footnote = (f"* 같은 열의 다른 문자는 {_phname}으로 5% 수준에서 "
                                     "유의차가 있음을 나타냄.\n"
-                                    f"* CV(%) = {ci['CV']:.1f}, {_lsd_note}, "
+                                    f"* CV(%) = {ci['CV']:.1f}, LSD(0.05) = {ci['LSD']:.2f}, "
                                     f"평균±{elabel} (n = {int(means['count'].min())})")
                     st.markdown("###### 📋 표 각주 (복사해서 표 아래에 붙이세요)")
                     st.code(footnote, language=None)
@@ -5584,76 +7391,28 @@ elif menu == "📊 통계분석":
                                            {"text": footnote}])
                 report_button("cap_anova")
         elif mode.startswith("이원배치"):
-            if len(cat_cols) < 2 or not num_cols:
-                st.warning("범주형 변수 2개와 측정값 1개가 필요합니다.")
+            if len(cat_cols) < 2 or not num_cols: st.warning("범주형 변수 2개와 측정값 1개가 필요합니다.")
             else:
                 c1, c2, c3 = st.columns(3)
                 f1 = c1.selectbox("요인 A", cat_cols, key="tw_a")
-                f2_opts = [c for c in cat_cols if c != f1]
-                f2 = c2.selectbox("요인 B", f2_opts, key="tw_b")
+                f2 = c2.selectbox("요인 B", [c for c in cat_cols if c != f1], key="tw_b")
                 yv = c3.selectbox("측정값", num_cols, key="tw_y")
-                blk_opts = ["(없음 · 완전임의 요인배치)"] + [c for c in cat_cols if c not in (f1, f2)]
-                blk = st.selectbox("반복(블록) 열 — 요인배치 난괴법이면 선택", blk_opts,
-                                   index=guess_idx(blk_opts, ["반복", "블록", "block", "rep"]),
-                                   key="tw_blk")
-                use_blk = not blk.startswith("(없음")
-                st.caption("포장시험에서 각 반복마다 요인 A×B 조합을 배치했다면 반복(블록)을 지정하세요. "
-                           "블록을 지정하면 Y ~ Block + A + B + A×B 모형으로 분석합니다.")
                 if keep_running("twoway", "이원배치 ANOVA 실행"):
-                    need = [f1, f2, yv] + ([blk] if use_blk else [])
-                    data = df[need].dropna().copy()
-                    if data.empty or data[f1].nunique() < 2 or data[f2].nunique() < 2:
-                        st.error("⚠️ 결측치를 제외한 뒤 각 요인이 2수준 이상 남아 있어야 합니다.")
-                        st.stop()
-                    _fb = validate_factorial_balance(data, f1, f2, blk if use_blk else None)
-                    if not _fb["ok"]:
-                        _ex = []
-                        for _b, _pairs in list(_fb["missing"].items())[:3]:
-                            _ex.append(f"{_b}: " + ", ".join(f"{a}×{b}" for a, b in _pairs[:5]))
-                        st.error("⚠️ 요인 조합이 빠져 있어 현재의 이원배치 ANOVA를 안전하게 수행할 수 없습니다. "
-                                 "누락 조합 예: " + " / ".join(_ex))
-                        st.stop()
-                    if use_blk and _fb["duplicates"]:
-                        _d = _fb["duplicates"][:5]
-                        st.warning("⚠️ 같은 블록 안의 동일 A×B 조합이 여러 행 있습니다. "
-                                   "독립 반복이 아니라 동일 시험구의 하위표본이라면 먼저 시험구 평균으로 집계해야 합니다. "
-                                   "예: " + ", ".join(f"{r}/{a}×{b}={n}행" for r, a, b, n in _d))
-                    factors = ([blk] if use_blk else []) + [f1, f2]
-                    formula = safe_formula(yv, factors, interactions=[(f1, f2)])
-                    try:
-                        model = ols(formula, data=data).fit()
-                        if model.df_resid <= 0:
-                            st.error("⚠️ 잔차 자유도가 0 이하입니다. 각 A×B 조합의 반복이 부족합니다. "
-                                     "반복(블록) 열을 지정하거나 조합별 반복 자료를 추가하세요.")
-                            st.stop()
-                        aov = sm.stats.anova_lm(model, typ=2)
-                    except Exception as ex:
-                        st.error(f"이원배치 ANOVA를 계산하지 못했습니다: {ex}")
-                        st.stop()
-                    out = aov.round(4)
-                    st.dataframe(out, width="stretch")
+                    data = df[[f1, f2, yv]].dropna()
+                    model = ols(safe_formula(yv, [f1, f2], interactions=[(f1, f2)]),
+                                data=data).fit()
+                    aov = sm.stats.anova_lm(model, typ=2); out = aov.round(4)
+                    smart_table(out, width="stretch")
                     terms = {f"C({q_ref(f1)})": f"요인A({f1})",
                              f"C({q_ref(f2)})": f"요인B({f2})",
                              f"C({q_ref(f1)}):C({q_ref(f2)})": "상호작용"}
-                    if use_blk:
-                        terms = {f"C({q_ref(blk)})": f"블록({blk})", **terms}
-                    pieces = []
-                    for k, lab in terms.items():
-                        if k not in aov.index:
-                            continue
-                        p_ = aov.loc[k, "PR(>F)"]
-                        if pd.isna(p_):
-                            pieces.append(f"**{lab}**: 검정불가")
-                        else:
-                            pieces.append(f"**{lab}**: {'유의' if p_ < .05 else '비유의'}(p={p_:.3f})")
-                    txt = " / ".join(pieces)
+                    txt = " / ".join(f"**{lab}**: {'유의' if aov.loc[k,'PR(>F)']<.05 else '비유의'}(p={aov.loc[k,'PR(>F)']:.3f})"
+                                     for k, lab in terms.items() if k in aov.index)
                     st.info("💡 " + txt)
-                    st.caption("설계: " + (f"**요인배치 난괴법** — 블록 '{blk}' 효과 포함"
-                                          if use_blk else "**완전임의 요인배치** — 블록 없음"))
                     fig, ax = plt.subplots(figsize=figsize())
                     for lv in data[f2].unique():
-                        ss = data[data[f2] == lv].groupby(f1)[yv].mean()
-                        ax.plot(ss.index.astype(str), ss.values, marker="o", label=f"{f2}={lv}")
+                        s = data[data[f2] == lv].groupby(f1)[yv].mean()
+                        ax.plot(s.index, s.values, marker="o", label=f"{f2}={lv}")
                     ax.set_xlabel(f1); ax.set_ylabel(yv); deco(ax, "상호작용 그래프"); ax.legend()
                     png = fig_to_png(fig)
                     out2 = out.reset_index().rename(columns={"index": "요인"})
@@ -5694,29 +7453,10 @@ elif menu == "📊 통계분석":
                 sub_c = c4.selectbox("세구(작은 구역) 요인", sub_opts,
                                      index=guess_idx(sub_opts, ["품종", "계통", "시비"]), key="sp_s")
                 if keep_running("splitplot", "분할구 분산분석 실행"):
-                    data = df[[rep_c, main_c, sub_c, yv]].dropna().copy()
+                    data = df[[rep_c, main_c, sub_c, yv]].dropna()
                     ok_sp, msgs = validate_anova_data(data, main_c, yv)
                     for m in msgs: st.warning(m)
-                    if not ok_sp:
-                        st.stop()
-                    _spbal = validate_split_plot_balance(data, rep_c, main_c, sub_c)
-                    if not _spbal["ok"]:
-                        details = []
-                        if _spbal["n_rep"] < 2 or _spbal["n_main"] < 2 or _spbal["n_sub"] < 2:
-                            details.append(f"수준 부족(반복 {_spbal['n_rep']}·주구 {_spbal['n_main']}·세구 {_spbal['n_sub']})")
-                        if _spbal["missing_main"]:
-                            details.append("일부 반복에서 주구 수준 누락")
-                        if _spbal["missing_sub"]:
-                            details.append("일부 반복×주구에서 세구 수준 누락")
-                        if _spbal["duplicate_cells"]:
-                            ex = _spbal["duplicate_cells"][:4]
-                            details.append("동일 반복×주구×세구 중복: " + ", ".join(
-                                f"{r}/{m}/{u}={n}행" for r, m, u, n in ex))
-                        st.error("⚠️ 현재 분할구 계산식은 균형 split-plot 설계를 전제로 합니다. "
-                                 + " / ".join(details)
-                                 + f" (기대 { _spbal['expected_n'] }행, 관측 { _spbal['observed_n'] }행). "
-                                   "누락 조합을 확인하고, 동일 subplot의 하위표본이 여러 행이면 먼저 시험구 평균으로 집계하세요.")
-                        st.stop()
+                    if not ok_sp: st.stop()
                     try:
                         f_full = safe_formula(yv, [rep_c, main_c, sub_c],
                                               interactions=[(rep_c, main_c),
@@ -5758,7 +7498,7 @@ elif menu == "📊 통계분석":
                         ]
                         sp_tbl = pd.DataFrame(rows)
                         st.markdown("#### 분할구 분산분석표")
-                        st.dataframe(sp_tbl, width="stretch")
+                        smart_table(sp_tbl, width="stretch")
                         st.caption("주구는 **주구오차(Ea)**로, 세구와 상호작용은 **세구오차(Eb)**로 검정합니다. "
                                    "일반 이원배치로 분석하면 주구 효과가 과대평가됩니다.")
                         cva = np.sqrt(ms(k_erra)) / data[yv].mean() * 100
@@ -5778,7 +7518,7 @@ elif menu == "📊 통계분석":
                         st.info("💡 " + txt)
                         piv = data.pivot_table(index=main_c, columns=sub_c, values=yv, aggfunc="mean").round(rnd())
                         st.markdown("#### 주구 × 세구 평균")
-                        st.dataframe(piv.reset_index(), width="stretch")
+                        smart_table(piv.reset_index(), width="stretch")
                         fig, ax = plt.subplots(figsize=figsize())
                         for sname in piv.columns:
                             ax.plot(piv.index.astype(str), piv[sname], marker="o", label=str(sname))
@@ -5858,7 +7598,7 @@ elif menu == "📊 통계분석":
                                             aggregate_func="mean" if (cnt > 1).any() else None).fit()
                             tbl = aovrm.anova_table.round(4)
                             st.markdown("#### 반복측정 분산분석표")
-                            st.dataframe(tbl, width="stretch")
+                            smart_table(tbl, width="stretch")
                             p = float(tbl["Pr > F"].iloc[0])
                             txt = ("조사 시기에 따라 " +
                                    (f"측정값이 **유의하게 변화**했습니다 (p = {p:.4f} < 0.05)."
@@ -5870,7 +7610,7 @@ elif menu == "📊 통계분석":
                             use_se = st.session_state.get("err_type", "표준편차(SD)").startswith("표준오차")
                             err = (g["std"]/np.sqrt(g["count"])) if use_se else g["std"]
                             res = g.rename(columns={"mean": "평균", "std": "표준편차", "count": "n"}).round(rnd()).reset_index()
-                            st.dataframe(res, width="stretch")
+                            smart_table(res, width="stretch")
                             fig, ax = plt.subplots(figsize=figsize())
                             ax.errorbar(g.index.astype(str), g["mean"], yerr=err, marker="o",
                                         capsize=4, color=pcolor(), lw=2)
@@ -5933,7 +7673,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                     model = ols(safe_formula(yv, [gc], covars=[cov]), data=data).fit()
                     aov = sm.stats.anova_lm(model, typ=2)
                     st.markdown("#### 공분산분석표")
-                    st.dataframe(aov.round(4), width="stretch")
+                    smart_table(aov.round(4), width="stretch")
                     tkey = f"C({q_ref(gc)})"
                     p = aov.loc[tkey, "PR(>F)"] if tkey in aov.index else aov["PR(>F)"].iloc[0]
                     grand = data[cov].mean()
@@ -5942,7 +7682,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                     raw = data.groupby(gc)[yv].mean().round(rnd()).rename("원평균").reset_index()
                     res = raw.merge(pred[[gc, "보정평균"]], on=gc)
                     st.markdown("#### 원평균 vs 보정평균")
-                    st.dataframe(res, width="stretch")
+                    smart_table(res, width="stretch")
                     st.caption(f"보정평균은 모든 처리구의 '{cov}'가 전체 평균({grand:.2f})으로 같다고 가정했을 때의 값입니다.")
                     txt = (f"'{cov}'를 보정한 결과 처리구 간 " +
                            (f"유의한 차이가 있습니다 (p = {p:.4f})." if p < .05
@@ -5972,42 +7712,20 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             if keep_running("nonparam", "비모수 검정 실행"):
                 data = df[[g, v]].dropna()
                 grp = [data[data[g] == x][v] for x in data[g].unique()]
-                txt = ""
-                if len(grp) < 2:
-                    st.error("⚠️ 비교할 그룹이 2개 이상 필요합니다.")
-                    st.stop()
-                if data[v].nunique() <= 1:
-                    st.warning("⚠️ 모든 측정값이 동일해 순위 기반 검정 통계량을 정의할 수 없습니다. "
-                               "그룹 차이 검정 대신 원자료 입력을 확인하세요.")
-                    txt = "모든 측정값이 동일하여 비모수 검정을 수행하지 못했습니다."
-                else:
-                    try:
-                        if len(grp) >= 3:
-                            h, p = stats.kruskal(*grp)
-                            st.write(f"**Kruskal-Wallis** (그룹 {len(grp)}개)")
-                            c1, c2 = st.columns(2)
-                            c1.metric("H", f"{h:.3f}")
-                            c2.metric("p", f"{p:.4f}" if np.isfinite(p) else "계산 불가")
-                            txt = ("Kruskal-Wallis 결과 " +
-                                   ("그룹 간 유의한 차이가 있습니다." if np.isfinite(p) and p < .05
-                                    else "그룹 간 유의한 차이가 확인되지 않았습니다." if np.isfinite(p)
-                                    else "검정 통계량을 계산할 수 없습니다."))
-                        else:
-                            u, p = stats.mannwhitneyu(grp[0], grp[1], alternative="two-sided")
-                            st.write("**Mann-Whitney U**")
-                            c1, c2 = st.columns(2)
-                            c1.metric("U", f"{u:.1f}")
-                            c2.metric("p", f"{p:.4f}" if np.isfinite(p) else "계산 불가")
-                            txt = ("Mann-Whitney U 결과 " +
-                                   ("두 그룹 간 유의한 차이가 있습니다." if np.isfinite(p) and p < .05
-                                    else "두 그룹 간 유의한 차이가 확인되지 않았습니다." if np.isfinite(p)
-                                    else "검정 통계량을 계산할 수 없습니다."))
-                    except ValueError as ex:
-                        st.warning(f"⚠️ 비모수 검정을 수행할 수 없습니다: {ex}")
-                        txt = "자료 구조 때문에 비모수 검정을 수행하지 못했습니다."
+                if len(grp) >= 3:
+                    h, p = stats.kruskal(*grp)
+                    st.write(f"**Kruskal-Wallis** (그룹 {len(grp)}개)")
+                    c1, c2 = st.columns(2); c1.metric("H", f"{h:.3f}"); c2.metric("p", f"{p:.4f}")
+                    txt = "Kruskal-Wallis 결과 " + ("그룹 간 유의한 차이가 있습니다." if p < .05 else "차이가 없습니다.")
+                elif len(grp) == 2:
+                    u, p = stats.mannwhitneyu(grp[0], grp[1])
+                    st.write("**Mann-Whitney U**")
+                    c1, c2 = st.columns(2); c1.metric("U", f"{u:.1f}"); c2.metric("p", f"{p:.4f}")
+                    txt = "Mann-Whitney U 결과 " + ("두 그룹 간 유의한 차이가 있습니다." if p < .05 else "차이가 없습니다.")
+                else: txt = ""
                 st.info("💡 " + txt)
                 med = data.groupby(g)[v].median().round(3).reset_index(); med.columns = [g, "중앙값"]
-                st.dataframe(med, width="stretch")
+                smart_table(med, width="stretch")
                 dl_table(med, f"{g}별 {v} 중앙값(비모수)", "np8", "np")
                 report_capture("cap_np", f"{g}별 {v} 비모수 검정", txt, med, None)
             report_button("cap_np")
@@ -6021,25 +7739,9 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             feats = st.multiselect("분석할 변수", num_cols, default=num_cols, key="pca_f")
             cby = st.selectbox("색상 구분(선택)", ["(없음)"] + cat_cols, key="pca_c")
             if len(feats) >= 3 and keep_running("pca", "PCA 실행"):
-                data = df[feats].apply(pd.to_numeric, errors="coerce").dropna()
-                if len(data) < 3:
-                    st.error("⚠️ 결측치를 제외한 완전자료 행이 3개 미만이라 PCA를 안정적으로 수행할 수 없습니다.")
-                    st.stop()
-                _var_ok = [c for c in feats if data[c].nunique(dropna=True) > 1]
-                _const = [c for c in feats if c not in _var_ok]
-                if _const:
-                    st.warning("⚠️ 값이 모두 같은 변수는 PCA에서 정보가 없어 제외했습니다: " + ", ".join(_const))
-                if len(_var_ok) < 2:
-                    st.error("⚠️ 변동이 있는 숫자형 변수가 2개 이상 필요합니다.")
-                    st.stop()
-                data = data[_var_ok]
+                data = df[feats].dropna()
                 Xs = StandardScaler().fit_transform(data)
-                pca = PCA(n_components=2).fit(Xs)
-                sc_ = pca.transform(Xs)
-                evr = pca.explained_variance_ratio_
-                if not np.all(np.isfinite(evr)):
-                    st.error("⚠️ PCA 설명분산을 계산할 수 없습니다. 상수열·중복열·자료 수를 확인하세요.")
-                    st.stop()
+                pca = PCA(n_components=2).fit(Xs); sc_ = pca.transform(Xs); evr = pca.explained_variance_ratio_
                 txt = f"주성분 2개가 원본 정보의 {evr.sum()*100:.1f}%를 설명합니다 (PC1 {evr[0]*100:.1f}%, PC2 {evr[1]*100:.1f}%)."
                 st.info("💡 " + txt)
                 fig, ax = plt.subplots(figsize=figsize(h=float(st.session_state.get("fig_h",4.0))+1))
@@ -6055,8 +7757,8 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                 deco(ax, "PCA 산점도"); ax.axhline(0, color="gray", lw=.5); ax.axvline(0, color="gray", lw=.5)
                 png = fig_to_png(fig)
                 st.download_button("🖼️ PCA 그래프", png, "pca.png", "image/png")
-                load = pd.DataFrame(pca.components_.T, columns=["PC1", "PC2"], index=_var_ok).round(3).reset_index().rename(columns={"index": "변수"})
-                st.dataframe(load, width="stretch")
+                load = pd.DataFrame(pca.components_.T, columns=["PC1", "PC2"], index=feats).round(3).reset_index().rename(columns={"index": "변수"})
+                smart_table(load, width="stretch")
                 dl_table(load, "PCA 로딩 결과", "pca9", "pca")
                 report_capture("cap_pca", "주성분분석(PCA)", txt, load, png)
             report_button("cap_pca")
@@ -6085,7 +7787,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                             vif = pd.DataFrame({"변수": xs,
                                 "VIF": [round(variance_inflation_factor(Xv.values, i+1), 2) for i in range(len(xs))]})
                             st.markdown("**다중공선성 진단 (VIF)**")
-                            st.dataframe(vif, width="stretch")
+                            smart_table(vif, width="stretch")
                             hi = vif[vif["VIF"] >= 10]["변수"].tolist()
                             if hi:
                                 st.warning(f"⚠️ VIF가 10 이상인 변수: {', '.join(hi)} — "
@@ -6114,7 +7816,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         deco(axs[0], "잔차 vs 예측값")
                         stats.probplot(resid, dist="norm", plot=axs[1])
                         axs[1].set_title("정규 Q-Q 도표", fontsize=11)
-                        plt.tight_layout(); st.pyplot(fg); plt.close(fg)
+                        plt.tight_layout(); show_plot(fg, max_width=920); plt.close(fg)
                         try:
                             _w, _p = stats.shapiro(resid)
                             st.caption(f"잔차 정규성(Shapiro-Wilk) p = {_p:.4f} → "
@@ -6141,7 +7843,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         clf = LogisticRegression(max_iter=1000).fit(data[xs], yb)
                         st.metric("정확도(훈련)", f"{accuracy_score(yb, clf.predict(data[xs])):.3f}")
                         coef = pd.DataFrame({"변수": xs, "계수": clf.coef_[0].round(4)})
-                        st.dataframe(coef, width="stretch")
+                        smart_table(coef, width="stretch")
                         dl_table(coef, f"{y} 로지스틱 회귀", "logit11", "logit")
 
         # ---------- 프로빗 (LC50 / LD50) ----------
@@ -6267,7 +7969,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                                              "기울기": "-", "비고": str(ex)[:30]})
                         res = pd.DataFrame(rows)
                         st.markdown("#### 프로빗 분석 결과")
-                        st.dataframe(res, width="stretch")
+                        smart_table(res, width="stretch")
                         st.caption("LC50이 작을수록 낮은 농도에서 효과가 나타남을 의미합니다. "
                                    "95% 신뢰구간이 서로 겹치지 않으면 두 계통·약제의 감수성이 다르다고 봅니다.")
                         if curves:
@@ -6316,7 +8018,34 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                 st.info(f"'{tgt}'은 문자(범주)형이므로 **분류**만 가능합니다.")
             elif n_uni <= 10:
                 st.caption(f"'{tgt}'의 값이 {n_uni}종류뿐이라 분류가 자연스럽습니다.")
-            algo = st.selectbox("알고리즘", ["랜덤포레스트", "의사결정나무", "그래디언트부스팅", "SVM"])
+            _reg_algos = [
+                "랜덤포레스트", "Extra Trees", "그래디언트부스팅", "히스토그램 부스팅",
+                "AdaBoost", "의사결정나무", "SVM(RBF)", "KNN", "Ridge", "Lasso", "ElasticNet"]
+            _clf_algos = [
+                "랜덤포레스트", "Extra Trees", "그래디언트부스팅", "히스토그램 부스팅",
+                "AdaBoost", "의사결정나무", "SVM(RBF)", "KNN", "로지스틱 회귀", "GaussianNB"]
+            _is_reg_choice = task.startswith("회귀")
+            _algo_options = _reg_algos if _is_reg_choice else _clf_algos
+            if st.session_state.get("ml_algo") not in _algo_options:
+                st.session_state["ml_algo"] = _algo_options[0]
+            algo = st.selectbox("알고리즘", _algo_options, key="ml_algo")
+            _algo_help = {
+                "랜덤포레스트": "여러 나무의 결과를 평균/투표합니다. 비선형 관계에 강하고 기본 선택으로 무난합니다.",
+                "Extra Trees": "랜덤포레스트보다 분할을 더 무작위화한 앙상블입니다. 빠르고 변수 관계가 복잡할 때 유용합니다.",
+                "그래디언트부스팅": "앞선 모형의 오차를 순차적으로 보완합니다. 중소형 표형 데이터에서 강한 편입니다.",
+                "히스토그램 부스팅": "연속값을 구간화해 빠르게 부스팅합니다. 관측치가 많은 표형 자료에 유리합니다.",
+                "AdaBoost": "틀린 관측치에 더 가중치를 주며 약한 모형을 결합합니다.",
+                "의사결정나무": "규칙을 나무 형태로 나눠 설명하기 쉽지만 과적합에 주의해야 합니다.",
+                "SVM(RBF)": "비선형 경계를 학습합니다. 변수 단위의 영향을 줄이기 위해 자동 표준화합니다.",
+                "KNN": "비슷한 관측치 주변의 값을 이용합니다. 자동 표준화하며 표본이 너무 적으면 불안정할 수 있습니다.",
+                "Ridge": "다중공선성이 있는 여러 연속형 변수의 회귀에 유용한 L2 규제 선형모형입니다.",
+                "Lasso": "덜 중요한 변수의 계수를 0으로 줄일 수 있는 L1 규제 회귀입니다.",
+                "ElasticNet": "Ridge와 Lasso를 함께 사용하는 규제 회귀입니다.",
+                "로지스틱 회귀": "분류확률을 추정하는 기본 선형 분류모형입니다. 자동 표준화합니다.",
+                "GaussianNB": "각 변수의 분포를 이용하는 매우 빠른 확률 분류모형입니다.",
+            }
+            st.caption("💡 " + _algo_help.get(algo, ""))
+
             if fts and keep_running("ml", "모델 학습"):
                 is_reg = task.startswith("회귀")
                 if is_reg and not y_is_num:
@@ -6324,76 +8053,112 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                              "문제 유형을 '분류(범주 예측)'로 바꾸거나 숫자형 열을 선택하세요.")
                     st.stop()
                 data = df[[tgt] + fts].dropna().copy()
-                if len(data) < 5:
-                    st.error("⚠️ 결측치를 제외한 자료가 5행 미만이라 학습/테스트 분할을 할 수 없습니다.")
+                if len(data) < 10:
+                    st.error("⚠️ 결측치를 제외한 학습자료가 10개 미만입니다. 머신러닝 결과를 신뢰하기 어렵습니다.")
                     st.stop()
                 if len(data) < 30:
-                    st.warning(f"⚠️ 현재 완전자료는 {len(data)}행입니다. 30행 미만의 머신러닝 성능은 "
-                               "분할에 따라 크게 흔들릴 수 있으므로 탐색용으로만 해석하세요.")
-                X = data[fts].apply(pd.to_numeric, errors="coerce")
-                if X.isna().any().any():
-                    st.error("⚠️ 입력 변수에 숫자로 변환할 수 없는 값이 있습니다. 데이터 탭에서 자료형을 확인하세요.")
-                    st.stop()
-                # SVM은 변수 단위에 매우 민감하므로 표준화를 파이프라인에 포함한다.
-                mreg = {"랜덤포레스트": RandomForestRegressor(n_estimators=200, random_state=0),
-                        "의사결정나무": DecisionTreeRegressor(random_state=0),
-                        "그래디언트부스팅": GradientBoostingRegressor(random_state=0),
-                        "SVM": make_pipeline(StandardScaler(), SVR())}
-                mclf = {"랜덤포레스트": RandomForestClassifier(n_estimators=200, random_state=0),
-                        "의사결정나무": DecisionTreeClassifier(random_state=0),
-                        "그래디언트부스팅": GradientBoostingClassifier(random_state=0),
-                        "SVM": make_pipeline(StandardScaler(), SVC())}
+                    st.warning(f"⚠️ 사용 가능한 자료가 {len(data)}개뿐입니다. 머신러닝 결과는 탐색적으로만 해석하세요.")
+                X = data[fts].astype(float)
+
                 if is_reg:
                     y = pd.to_numeric(data[tgt], errors="coerce")
-                    if y.isna().any():
-                        st.error("⚠️ 회귀의 예측 대상에 숫자로 변환할 수 없는 값이 있습니다.")
-                        st.stop()
                     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=.3, random_state=0)
-                    if len(yte) < 2:
-                        st.error("⚠️ 테스트 자료가 너무 적어 R²를 계산할 수 없습니다. 자료를 더 추가하세요.")
-                        st.stop()
+                    _kn = max(1, min(5, len(Xtr)))
+                    mreg = {
+                        "랜덤포레스트": RandomForestRegressor(n_estimators=300, random_state=0),
+                        "Extra Trees": ExtraTreesRegressor(n_estimators=300, random_state=0),
+                        "그래디언트부스팅": GradientBoostingRegressor(random_state=0),
+                        "히스토그램 부스팅": HistGradientBoostingRegressor(random_state=0),
+                        "AdaBoost": AdaBoostRegressor(n_estimators=200, random_state=0),
+                        "의사결정나무": DecisionTreeRegressor(random_state=0),
+                        "SVM(RBF)": Pipeline([("scale", StandardScaler()), ("model", SVR(kernel="rbf"))]),
+                        "KNN": Pipeline([("scale", StandardScaler()), ("model", KNeighborsRegressor(n_neighbors=_kn))]),
+                        "Ridge": Pipeline([("scale", StandardScaler()), ("model", Ridge(alpha=1.0))]),
+                        "Lasso": Pipeline([("scale", StandardScaler()), ("model", Lasso(alpha=0.01, max_iter=5000))]),
+                        "ElasticNet": Pipeline([("scale", StandardScaler()), ("model", ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=5000))]),
+                    }
                     model = mreg[algo].fit(Xtr, ytr)
-                    s_ = r2_score(yte, model.predict(Xte))
-                    st.metric("R² (테스트)", f"{s_:.3f}"); txt = f"[{algo}] 테스트 R²는 {s_:.3f}입니다."
-                    _classes = None
+                    pred = model.predict(Xte)
+                    s_ = r2_score(yte, pred)
+                    st.metric("R² (테스트)", f"{s_:.3f}")
+                    txt = f"[{algo}] 테스트 R²는 {s_:.3f}입니다."
+                    _saved_classes = None
                 else:
-                    y, _uniques = pd.factorize(data[tgt])
-                    _classes = list(_uniques)
-                    counts_y = pd.Series(y).value_counts()
-                    n_classes = len(counts_y)
-                    if n_classes < 2:
-                        st.error("⚠️ 분류 대상이 한 종류뿐이라 분류 모델을 학습할 수 없습니다.")
-                        st.stop()
-                    if counts_y.min() < 2:
-                        st.error("⚠️ 각 분류에는 최소 2개 이상의 자료가 필요합니다. "
-                                 "1개뿐인 분류가 있어 학습/테스트에 동시에 배치할 수 없습니다.")
-                        st.stop()
-                    n_test = max(int(np.ceil(len(data) * .3)), n_classes)
-                    if len(data) - n_test < n_classes:
-                        st.error("⚠️ 분류 수에 비해 자료가 너무 적어 각 분류를 학습·테스트에 나눌 수 없습니다.")
-                        st.stop()
-                    Xtr, Xte, ytr, yte = train_test_split(
-                        X, y, test_size=n_test, random_state=0, stratify=y)
+                    y_codes, y_levels = pd.factorize(data[tgt])
+                    y = pd.Series(y_codes, index=data.index)
+                    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=.3, random_state=0)
+                    _kn = max(1, min(5, len(Xtr)))
+                    mclf = {
+                        "랜덤포레스트": RandomForestClassifier(n_estimators=300, random_state=0),
+                        "Extra Trees": ExtraTreesClassifier(n_estimators=300, random_state=0),
+                        "그래디언트부스팅": GradientBoostingClassifier(random_state=0),
+                        "히스토그램 부스팅": HistGradientBoostingClassifier(random_state=0),
+                        "AdaBoost": AdaBoostClassifier(n_estimators=200, random_state=0),
+                        "의사결정나무": DecisionTreeClassifier(random_state=0),
+                        "SVM(RBF)": Pipeline([("scale", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, random_state=0))]),
+                        "KNN": Pipeline([("scale", StandardScaler()), ("model", KNeighborsClassifier(n_neighbors=_kn))]),
+                        "로지스틱 회귀": Pipeline([("scale", StandardScaler()), ("model", LogisticRegression(max_iter=3000, random_state=0))]),
+                        "GaussianNB": GaussianNB(),
+                    }
                     model = mclf[algo].fit(Xtr, ytr)
-                    s_ = accuracy_score(yte, model.predict(Xte))
-                    st.metric("정확도 (테스트)", f"{s_:.3f}"); txt = f"[{algo}] 테스트 정확도는 {s_:.3f}입니다."
+                    pred = model.predict(Xte)
+                    s_ = accuracy_score(yte, pred)
+                    st.metric("정확도 (테스트)", f"{s_:.3f}")
+                    txt = f"[{algo}] 테스트 정확도는 {s_:.3f}입니다."
+                    _saved_classes = list(y_levels)
+
+                # 모든 알고리즘에서 가능한 한 변수 중요도/영향도를 제공한다.
+                # 트리계열은 내장 중요도, 선형계열은 계수 절댓값, 그 외는 테스트셋 permutation importance를 사용한다.
                 png, imp = None, None
-                if hasattr(model, "feature_importances_"):
-                    imp = pd.DataFrame({"변수": fts, "중요도": model.feature_importances_.round(4)}).sort_values("중요도", ascending=False)
-                    st.info(f"💡 [{algo}] 가장 중요한 변수는 **'{imp.iloc[0]['변수']}'** 입니다.")
+                _base_model = model.named_steps.get("model") if isinstance(model, Pipeline) else model
+                _imp_vals = None
+                _imp_method = None
+                if hasattr(_base_model, "feature_importances_"):
+                    _imp_vals = np.asarray(_base_model.feature_importances_, dtype=float)
+                    _imp_method = "모형 내장 중요도"
+                elif hasattr(_base_model, "coef_"):
+                    _coef = np.asarray(_base_model.coef_, dtype=float)
+                    _imp_vals = np.abs(_coef).mean(axis=0) if _coef.ndim > 1 else np.abs(_coef)
+                    _imp_method = "표준화 계수 절댓값"
+                else:
+                    try:
+                        _perm = permutation_importance(model, Xte, yte, n_repeats=12, random_state=0,
+                                                       scoring=("r2" if is_reg else "accuracy"))
+                        _imp_vals = np.clip(np.asarray(_perm.importances_mean, dtype=float), 0, None)
+                        _imp_method = "순열 중요도"
+                    except Exception:
+                        _imp_vals = None
+
+                if _imp_vals is not None and len(_imp_vals) == len(fts):
+                    imp = (pd.DataFrame({"변수": fts, "중요도": np.round(_imp_vals, 4)})
+                           .sort_values("중요도", ascending=False).reset_index(drop=True))
+                    if len(imp) and float(imp["중요도"].max()) > 0:
+                        st.info(f"💡 [{algo}] {_imp_method} 기준 가장 영향이 큰 변수는 **'{imp.iloc[0]['변수']}'** 입니다.")
+                    else:
+                        st.info(f"💡 [{algo}] {_imp_method}를 계산했지만 변수 간 중요도 차이가 거의 없었습니다.")
                     fig, ax = plt.subplots(figsize=figsize())
-                    ax.barh(imp["변수"], imp["중요도"], color=pcolor()); ax.invert_yaxis()
-                    deco(ax, f"변수 중요도 ({algo})"); png = fig_to_png(fig)
+                    _vals = imp["중요도"].astype(float).to_numpy()
+                    _bars = ax.barh(imp["변수"], _vals, color=bar_colors(values=_vals.tolist()))
+                    ax.invert_yaxis()
+                    _vmax = float(np.nanmax(_vals)) if len(_vals) else 0.0
+                    _pad = (_vmax * 0.025) if _vmax > 0 else 0.01
+                    for _bar, _v in zip(_bars, _vals):
+                        ax.text(float(_v) + _pad, _bar.get_y() + _bar.get_height() / 2,
+                                f"{float(_v):.3f}", va="center", ha="left", fontsize=9,
+                                fontweight="bold", color="#33383d", clip_on=False)
+                    if _vmax > 0: ax.set_xlim(0, _vmax * 1.18)
+                    deco(ax, f"변수 중요도 ({algo})")
+                    png = fig_to_png(fig)
+                    st.caption(f"※ 중요도 산출 방식: {_imp_method}. 알고리즘 간 중요도 값의 절대크기를 직접 비교하지 마세요.")
                     dl_table(imp, f"{tgt} 예측 변수 중요도", "ml13", "ml")
                 else:
                     st.info("💡 " + txt)
+
                 report_capture("cap_ml", f"{tgt} 예측 머신러닝({algo})", txt, imp, png)
-                # 학습된 모델을 세션에 저장 (새 데이터 예측용)
                 st.session_state["ml_model"] = {
                     "model": model, "feats": fts, "target": tgt, "is_reg": is_reg,
-                    "algo": algo, "classes": _classes,
-                    "ranges": {f: (float(X[f].min()), float(X[f].max()), float(X[f].mean()))
-                               for f in fts}}
+                    "algo": algo, "classes": _saved_classes,
+                    "ranges": {f: (float(data[f].min()), float(data[f].max()), float(data[f].mean())) for f in fts}}
             report_button("cap_ml")
 
             # ---- 새 데이터로 실제 예측 ----
@@ -6428,7 +8193,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                                 proba = m.predict_proba(Xnew)[0]
                                 pr = pd.DataFrame({"분류": saved["classes"],
                                                    "확률(%)": (proba*100).round(1)}).sort_values("확률(%)", ascending=False)
-                                st.dataframe(pr, width="stretch")
+                                smart_table(pr, width="stretch")
                         if oob:
                             st.warning(f"⚠️ {', '.join(oob)} 값이 학습 데이터 범위를 벗어났습니다. "
                                        "범위 밖 예측은 신뢰도가 떨어질 수 있어요.")
@@ -6442,11 +8207,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         if miss:
                             st.error(f"필요한 열이 없습니다: {', '.join(miss)}")
                         elif st.button("일괄 예측 실행", key="ml_predict2"):
-                            Xnew = newdf[saved["feats"]].apply(pd.to_numeric, errors="coerce").dropna()
-                            if Xnew.empty:
-                                st.error("⚠️ 필요한 입력 열에서 유효한 숫자 행을 찾지 못했습니다. "
-                                         "결측치와 자료형을 확인하세요.")
-                                st.stop()
+                            Xnew = newdf[saved["feats"]].dropna()
                             preds = saved["model"].predict(Xnew)
                             out = newdf.loc[Xnew.index].copy()
                             if saved["is_reg"]:
@@ -6455,7 +8216,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                                 out[f"{saved['target']}_예측"] = [saved["classes"][int(p)]
                                                                 if saved["classes"] else p for p in preds]
                             st.success(f"{len(out)}건 예측 완료!")
-                            st.dataframe(out, width="stretch")
+                            smart_table(out, width="stretch")
                             csv = out.to_csv(index=False).encode("utf-8-sig")
                             st.download_button("📥 예측 결과 CSV 다운로드", csv, "예측결과.csv", key="ml_dlpred")
                             log_action(f"머신러닝 일괄 예측: {len(out)}건")
@@ -6549,28 +8310,307 @@ elif menu == "🧠 AI 도우미":
 # ================================================================ 경제성 분석
 elif menu == "💰 경제성분석":
     st.title("💰 경제성 분석")
-    st.info("**셋 중 하나만 고르면 됩니다.** 아래 길잡이를 먼저 보세요.")
-    with st.expander("🧭 나는 어떤 걸 써야 하나요? (처음이면 여기부터)", expanded=True):
-        st.markdown("""
-| 내 상황 | 고를 것 | 필요한 자료 |
-|---|---|---|
-| **"이 신기술 도입하면 이득인가?"** — 늘어난 비용과 늘어난 수익만 비교 | **📕 부분예산표** | 직접 입력 **또는** 올린 데이터에서 자동 계산 |
-| **"이 작목 농사지으면 얼마 남나?"** — 한 해 농사의 소득·순수익을 계산 | **📗 소득분석** | 처리구별 수량·단가·경영비 (엑셀) |
-| **"여러 처리 중 뭘 농가에 권하지?"** — 투자 대비 수익률까지 비교 | **📘 신기술 경제성(MRR)** | 처리구별 수량·단가·가변비용 (엑셀) |
+    st.info("**경제성 분석이 처음이면 길잡이로 시작하고, 분석방법을 알고 있다면 바로 분석할 수 있습니다.** 필요한 자료와 기준단가는 접어서 확인할 수 있습니다.")
+    st.caption("🧭 경제성 분석 UX v3.6 · 단계형 길잡이 + 간소화 화면 · 2026-08-18 적용")
 
-**우리 기관에서 가장 많이 쓰는 건 📕 부분예산표입니다.** 처음이라면 이것부터 보세요.
+    # ---------------------------------------------------------------- 경제성 분석 시작 화면 / 길잡이
+    # 기능을 한꺼번에 펼치지 않고, 처음에는 "길잡이"와 "바로 분석" 두 갈래만 보여준다.
+    # 길잡이는 STEP 1~5를 한 단계씩 진행해 초보자도 현재 질문에만 집중할 수 있게 한다.
+    def _render_econ_material_guide(expanded=False):
+        with st.expander("📚 경제성 분석에 어떤 자료를 준비해야 하나요?", expanded=expanded):
+            st.caption("모든 분석에 모든 비용이 필요한 것은 아닙니다. 연구목적에 맞는 자료만 준비하면 됩니다.")
+            _mt1, _mt2, _mt3, _mt4 = st.tabs(["공통자료", "비용 항목", "분석별 자료", "빈 서식"])
+            with _mt1:
+                _base_need = pd.DataFrame([
+                    ["처리구·품종·기술명", "무엇과 무엇을 비교했는지", "대조구, 신품종A, 신품종B", "비교 연구면 필수"],
+                    ["반복(블록)", "같은 처리를 몇 번 반복했는지", "1, 2, 3 또는 Block1~3", "반복시험이면 권장"],
+                    ["조사면적", "원자료가 몇 a 또는 ㎡ 기준인지", "5a, 10a, 1,000㎡", "10a 환산에 필요"],
+                    ["생산량", "실제로 생산·수확한 양", "kg/조사구, kg/10a", "대부분의 분석에 필수"],
+                    ["판매가격", "농가가 실제로 받는 가격", "원/kg, 원/상자", "수입 계산에 필수"],
+                    ["부산물 수입", "주산물 외 판매수입이 있으면 기록", "부산물 판매액", "해당 시"],
+                    ["상품등급별 수량·가격", "등급별 가격차가 크면 분리", "특·상·보통 수량과 단가", "원예작물에서 권장"],
+                ], columns=["자료", "무엇을 뜻하나요?", "예시", "언제 필요한가요?"])
+                smart_table(_base_need, width="stretch", hide_index=True)
+                st.info("💡 한 줄은 보통 **처리구 × 반복 한 조사구**로 적는 것이 가장 안전합니다. "
+                        "5a 자료라면 억지로 10a로 바꾸지 말고 5a 값을 그대로 넣은 뒤 기준면적을 5a로 지정하세요.")
 
-- 📕 부분예산표는 화면에서 직접 적어도 되고, **올린 데이터에서 자동으로 채울 수도** 있습니다.
-- 📗 소득분석은 한 해 농사 전체의 소득·순수익을 소득조사 방식으로 계산합니다.
-- 📘 MRR은 처리가 3개 이상이고 비용 차이가 뚜렷할 때만 의미가 있습니다.
+            with _mt2:
+                st.markdown("**소득분석에서는 실제로 발생한 비용만 기록합니다. 없는 항목은 만들 필요가 없습니다.**")
+                _cost_need = pd.DataFrame([
+                    ["종자·종묘비", "종자, 묘, 접목묘 등", "구입액 또는 사용량×단가"],
+                    ["비료비", "기비·추비·액비·엽면시비 등", "비료 종류별 사용액"],
+                    ["농약비", "살균제·살충제·제초제·생물농약 등", "약제별 사용액"],
+                    ["수도·광열비", "전기, 유류, 난방, 관수", "전기료·경유·등유·가스 등"],
+                    ["기타재료비", "멀칭필름, 상토, 트레이, 유인끈, 지주대, 포장재 등", "소모성 자재 사용액"],
+                    ["소농구비", "내용연수가 짧은 소형 농기구", "가위, 호미, 소형도구 등"],
+                    ["대농구상각비", "여러 해 쓰는 농기계의 연간 감가상각액", "트랙터, 관리기, 방제기 등"],
+                    ["영농시설상각비", "여러 해 쓰는 시설의 연간 감가상각액", "하우스, 관수시설, 건조시설 등"],
+                    ["수선비", "농기계·시설 수리 및 유지", "부품·수리비"],
+                    ["임차료", "실제로 지불한 토지·시설·농기계 임차비", "농지·시설·장비 임차료"],
+                    ["위탁영농비", "작업을 외부에 맡긴 비용", "경운·정지·수확·방제 위탁료"],
+                    ["고용노동비", "외부 인력에게 실제 지급한 임금", "정식·유인·수확 인건비"],
+                    ["조성비 상각", "과수·다년생 초기 조성비의 연간 배분", "과원 조성비의 연간 상각액"],
+                ], columns=["비용 항목", "쉽게 말하면", "무엇을 적나요?"])
+                smart_table(_cost_need, width="stretch", hide_index=True)
+                st.markdown("**순수익(생산비)까지 보려면 아래 경제적 비용도 추가합니다.**")
+                _full_cost = pd.DataFrame([
+                    ["자가노동시간", "본인·가족이 일한 시간", "시간으로 입력 → 프로그램이 시간당 노임을 곱함"],
+                    ["유동자본용역비", "재배기간 동안 투입자금이 묶인 비용", "이자율·재포기간으로 자동 계산"],
+                    ["고정자본용역비", "농기계·시설 자본 사용의 기회비용", "부분현재가·작목부담률·이자율로 계산"],
+                    ["토지용역비", "자가토지를 다른 용도로 쓸 수 있었던 가치", "자가토지 기회비용; 실제 임차료와 중복 금지"],
+                ], columns=["추가 항목", "의미", "입력 방법"])
+                smart_table(_full_cost, width="stretch", hide_index=True)
+                st.warning("⚠️ `경영비합계`, `비용합계`, `소득`, `순수익` 같은 계산결과 열을 다시 비용으로 선택하지 마세요. "
+                           "자가노동은 **원(비용)이 아니라 시간**으로 기록합니다.")
 
-> 💡 아래 **기준단가 관리**는 선택 사항입니다. 건너뛰어도 분석은 됩니다.
-""")
+            with _mt3:
+                _by_analysis = pd.DataFrame([
+                    ["📕 부분예산법", "대조구·신기술구, 수량/수입, 가격, **신기술 때문에 달라지는 비용만**", "관행과 똑같이 발생한 비용은 조사하지 않아도 됨"],
+                    ["📗 소득분석", "수량, 가격, 조사면적, 실제 발생한 항목별 경영비", "순수익까지 보면 자가노동·자본·토지도 추가"],
+                    ["📘 지배분석·MRR", "비용이 다른 여러 처리, 수량, 가격, 처리별 가변비용, 대조구", "처리 수준에 따라 실제로 달라지는 비용을 구분"],
+                    ["📙 시설·장기투자", "최초투자비, 내용연수, 연간 편익, 운영·유지비, 할인율, 잔존가치", "여러 해의 현금흐름을 평가"],
+                    ["손익분기·민감도", "기준 수량·가격·비용", "수확·선별·포장처럼 수량에 따라 변하는 비용을 구분하면 더 현실적"],
+                ], columns=["분석", "최소한 준비할 자료", "특히 주의할 점"])
+                smart_table(_by_analysis, width="stretch", hide_index=True)
+                st.markdown("**연구질문별 빠른 찾기**")
+                st.markdown("- 현재 작목 10a당 수익성 → **소득분석**\n"
+                            "- 신품종·신기술 vs 기존 방식 → **부분예산법**\n"
+                            "- 비용이 다른 여러 기술 중 최적 대안 → **지배분석·MRR**\n"
+                            "- 시설·농기계 투자 → **NPV·할인 B/C·IRR**\n"
+                            "- 어느 가격·수량부터 손해인지 → **손익분기점**\n"
+                            "- 가격·수량 변동에도 버티는지 → **민감도 분석**")
+
+            with _mt4:
+                _tmpl1 = pd.DataFrame(columns=["처리구", "반복", "조사면적(a)", "수량(kg)", "판매단가(원/kg)",
+                                                "종자종묘비", "비료비", "농약비", "수도광열비", "기타재료비",
+                                                "소농구비", "대농구상각비", "영농시설상각비", "수선비", "임차료",
+                                                "위탁영농비", "고용노동비", "자가노동시간"])
+                _tmpl2 = pd.DataFrame(columns=["처리구", "반복", "조사면적(a)", "수량(kg)", "판매단가(원/kg)",
+                                                "신기술추가비용", "절감비용", "추가노동시간"])
+                _tc1, _tc2 = st.columns(2)
+                _tc1.download_button("📥 소득분석 빈 서식 CSV", _tmpl1.to_csv(index=False).encode("utf-8-sig"),
+                                     "경제성_소득분석_빈서식.csv", mime="text/csv",
+                                     key="p_econ_guide_template_income", width="stretch")
+                _tc2.download_button("📥 신기술 비교 빈 서식 CSV", _tmpl2.to_csv(index=False).encode("utf-8-sig"),
+                                     "경제성_신기술비교_빈서식.csv", mime="text/csv",
+                                     key="p_econ_guide_template_partial", width="stretch")
+
+    _econ_entry = st.session_state.get("econ_entry_mode")
+    if _econ_entry not in ("guide", "direct"):
+        st.markdown("### 어떻게 시작할까요?")
+        _ec1, _ec2 = st.columns(2)
+        with _ec1:
+            with st.container(border=True):
+                st.markdown("### 🧭 경제성 분석이 처음이에요")
+                st.caption("연구내용에 맞는 분석법을 STEP 1~5로 한 단계씩 찾아드립니다.")
+                if st.button("길잡이 시작", type="primary", width="stretch", key="econ_entry_guide"):
+                    st.session_state["econ_entry_mode"] = "guide"
+                    st.session_state["econ_guide_step"] = 1
+                    st.rerun()
+        with _ec2:
+            with st.container(border=True):
+                st.markdown("### 📊 분석방법을 알고 있어요")
+                st.caption("부분예산 · 소득분석 · MRR · 시설투자 중 원하는 분석으로 바로 갑니다.")
+                if st.button("바로 분석하기", width="stretch", key="econ_entry_direct"):
+                    st.session_state["econ_entry_mode"] = "direct"
+                    st.rerun()
+        _render_econ_material_guide(expanded=False)
+        st.stop()
+
+    if _econ_entry == "guide":
+        _top1, _top2 = st.columns([5, 1])
+        with _top1:
+            st.markdown("## 🧭 경제성 분석 길잡이")
+            st.caption("한 번에 한 질문만 답하면 됩니다. 모르는 항목은 '잘 모르겠어요'를 선택해도 됩니다. AI/API 키는 필요하지 않습니다.")
+        with _top2:
+            if st.button("처음으로", width="stretch", key="econ_guide_home"):
+                st.session_state["econ_entry_mode"] = None
+                st.rerun()
+
+        _step = int(st.session_state.get("econ_guide_step", 1))
+        _step = min(max(_step, 1), 5)
+        st.caption(f"STEP {_step} / 5")
+        st.progress(_step / 5)
+
+        if _step == 1:
+            st.markdown("### STEP 1. 이번 연구에서 무엇을 확인하고 싶나요?")
+            _g_goal = st.radio(
+                "가장 가까운 상황을 하나 고르세요.",
+                ["🧪 새로운 품종·기술이 기존 방식보다 경제적인지 알고 싶어요",
+                 "🌱 현재 작목·처리의 한 해 수익성이 궁금해요",
+                 "🏆 여러 기술·처리 중 가장 경제적인 대안을 고르고 싶어요",
+                 "🏗️ 시설·농기계에 투자할 가치가 있는지 알고 싶어요",
+                 "💸 어느 가격·수량부터 손해인지 알고 싶어요",
+                 "📉 가격·수량이 변해도 경제성이 유지되는지 알고 싶어요",
+                 "🔄 여러 품종·작형·처리의 한 해 경영성과를 비교하고 싶어요",
+                 "🏛️ 정책·공공사업의 사회적 효과를 평가하고 싶어요",
+                 "🤔 잘 모르겠어요 — 쉬운 질문으로 찾아주세요"],
+                key="econ_guide_goal_v3", index=None)
+            if st.button("다음 →", type="primary", width="stretch", key="econ_g_next1",
+                         disabled=_g_goal is None):
+                st.session_state["econ_guide_step"] = 2; st.rerun()
+
+        elif _step == 2:
+            st.markdown("### STEP 2. 이번 연구에서 실제로 무엇이 달라지나요?")
+            _g_change = st.radio(
+                "가장 큰 변화 하나를 고르세요.",
+                ["품종·방제·재배법 등 기술이 바뀌어요",
+                 "비료량·농약량·노동량 등 투입수준과 비용이 달라져요",
+                 "시설·농기계를 새로 구입하거나 설치해요",
+                 "판매가격·상품수량·상품률 등이 달라져요",
+                 "특별한 기술변경 없이 현재 경영성과를 평가해요",
+                 "사회적·환경적 편익과 비용을 평가해요",
+                 "잘 모르겠어요"], key="econ_guide_change_v3", index=None)
+            _b1, _b2 = st.columns(2)
+            if _b1.button("← 이전", width="stretch", key="econ_g_prev2"):
+                st.session_state["econ_guide_step"] = 1; st.rerun()
+            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next2",
+                          disabled=_g_change is None):
+                st.session_state["econ_guide_step"] = 3; st.rerun()
+
+        elif _step == 3:
+            st.markdown("### STEP 3. 무엇과 무엇을 비교하나요?")
+            _g_compare = st.radio(
+                "비교 구조를 고르세요.",
+                ["대조구 1개와 신기술·신품종 1~2개를 비교해요",
+                 "비용이 서로 다른 3개 이상 대안을 비교해요",
+                 "여러 품종·작형·처리의 한 해 성과를 나란히 비교해요",
+                 "비교대상 없이 현재 상태 하나만 평가해요",
+                 "잘 모르겠어요"], key="econ_guide_compare_v3", index=None)
+            _b1, _b2 = st.columns(2)
+            if _b1.button("← 이전", width="stretch", key="econ_g_prev3"):
+                st.session_state["econ_guide_step"] = 2; st.rerun()
+            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next3",
+                          disabled=_g_compare is None):
+                st.session_state["econ_guide_step"] = 4; st.rerun()
+
+        elif _step == 4:
+            st.markdown("### STEP 4. 경제효과를 어느 기간까지 보나요?")
+            _g_period = st.radio(
+                "분석기간을 고르세요.",
+                ["한 작기 또는 1년 안에서 평가해요",
+                 "같은 기술의 효과와 비용이 2년 이상 이어져요",
+                 "시설·농기계의 내용연수(사용기간) 전체를 평가해요",
+                 "잘 모르겠어요"], key="econ_guide_period_v3", index=None)
+            _b1, _b2 = st.columns(2)
+            if _b1.button("← 이전", width="stretch", key="econ_g_prev4"):
+                st.session_state["econ_guide_step"] = 3; st.rerun()
+            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next4",
+                          disabled=_g_period is None):
+                st.session_state["econ_guide_step"] = 5; st.rerun()
+
+        else:
+            st.markdown("### STEP 5. 지금 어떤 자료가 준비되어 있나요?")
+            _g_df = st.session_state.get("df")
+            _cols = list(map(str, _g_df.columns)) if isinstance(_g_df, pd.DataFrame) and not _g_df.empty else []
+            def _g_find(keys):
+                return [c for c in _cols if any(k.lower() in c.lower() for k in keys)]
+            _cand_trt = _g_find(["처리", "품종", "계통", "작형", "구분", "시험구"])
+            _cand_qty = _g_find(["수량", "생산량", "수확량", "수확중", "상품수량"])
+            _cand_price = _g_find(["단가", "가격", "판매가", "판매액"])
+            _cand_cost = _g_find(["비용", "비료", "농약", "노력", "노동", "노임", "자재", "임차", "연료", "종묘"])
+            _cand_rep = _g_find(["반복", "블록", "rep", "block", "blk"])
+            _auto_data = []
+            if _cand_trt: _auto_data.append("처리구/대조구 구분")
+            if _cand_qty: _auto_data.append("수량·생산량")
+            if _cand_price: _auto_data.append("판매가격/판매액")
+            if _cand_cost: _auto_data.append("항목별 경영비")
+            if _cand_rep: _auto_data.append("반복(블록) 자료")
+            _g_data = st.multiselect(
+                "가지고 있는 자료를 모두 선택하세요. 업로드된 데이터에서 찾은 항목은 자동 체크됩니다.",
+                ["처리구/대조구 구분", "수량·생산량", "판매가격/판매액", "항목별 경영비",
+                 "신기술로 달라지는 비용만", "반복(블록) 자료", "최초 투자비",
+                 "연도별 편익·운영비", "분석기간·할인율·잔존가치",
+                 "아직 거의 준비되지 않았거나 자료가 어떤 것인지 잘 모르겠어요"],
+                default=_auto_data, key="econ_guide_data_v3")
+            _render_econ_material_guide(expanded=False)
+
+            _g_goal = st.session_state.get("econ_guide_goal_v3")
+            _g_change = st.session_state.get("econ_guide_change_v3")
+            _g_compare = st.session_state.get("econ_guide_compare_v3")
+            _g_period = st.session_state.get("econ_guide_period_v3")
+            _g_result = recommend_economic_guide(_g_goal, _g_change, _g_compare, _g_period, _g_data)
+            st.divider()
+            st.markdown("### 🎯 추천 결과")
+
+            if _g_result.get("ambiguous"):
+                st.warning(_g_result.get("title", "추천을 조금 더 좁혀야 합니다."))
+                for _r in _g_result.get("reasons", []): st.markdown(f"- {_r}")
+                st.info("💡 **기존 방식과 다른 처리·기술이 있는지**, 그리고 **효과가 1년인지 여러 해인지**를 다시 확인하면 추천을 좁힐 수 있습니다.")
+            elif _g_result.get("primary_mode") is None:
+                st.warning("현재 농가단위 분석 모듈로 억지 연결하지 않았습니다. 정책·공공사업의 사회적 효과는 별도의 비용편익분석(CBA)이 필요합니다.")
+            else:
+                _r1, _r2 = st.columns([3, 1])
+                _r1.markdown(f"### {_g_result['title']}")
+                _r2.metric("추천 확신도", _g_result.get("confidence", "-"))
+                st.markdown("**추천 이유**")
+                for _r in _g_result.get("reasons", []): st.markdown(f"- {_r}")
+                _gc1, _gc2 = st.columns(2)
+                with _gc1:
+                    st.markdown("**필요한 자료**")
+                    for _x in _g_result.get("needs", []): st.markdown(f"- {_x}")
+                with _gc2:
+                    st.markdown("**함께 보면 좋은 분석**")
+                    for _x in _g_result.get("together", []): st.markdown(f"- {_x}")
+                _missing = _g_result.get("missing_reported") or []
+                if _missing:
+                    st.warning("추가로 준비하면 좋은 자료: **" + ", ".join(_missing) + "**")
+                if _cols:
+                    with st.expander("📋 업로드한 데이터 열 후보", expanded=False):
+                        smart_table(pd.DataFrame([
+                            {"필요 항목":"처리구/비교대상", "현재 데이터 후보":", ".join(_cand_trt[:3]) if _cand_trt else "찾지 못함"},
+                            {"필요 항목":"수량", "현재 데이터 후보":", ".join(_cand_qty[:3]) if _cand_qty else "찾지 못함"},
+                            {"필요 항목":"단가/가격", "현재 데이터 후보":", ".join(_cand_price[:3]) if _cand_price else "찾지 못함"},
+                            {"필요 항목":"비용", "현재 데이터 후보":", ".join(_cand_cost[:4]) if _cand_cost else "찾지 못함"},
+                            {"필요 항목":"반복(선택)", "현재 데이터 후보":", ".join(_cand_rep[:2]) if _cand_rep else "찾지 못함"},
+                        ]), width="stretch", hide_index=True)
+                if st.button("🚀 추천 분석 바로 시작하기", type="primary", width="stretch", key="p_econ_guide_start_v4"):
+                    st.session_state["econ_mode"] = _g_result["primary_mode"]
+                    st.session_state["econ_entry_mode"] = "direct"
+                    st.session_state["_econ_guide_applied"] = {"title": _g_result["title"], "tags": _g_result.get("tags") or []}
+                    st.rerun()
+
+            if st.button("← STEP 4로 돌아가기", width="stretch", key="econ_g_prev5"):
+                st.session_state["econ_guide_step"] = 4; st.rerun()
+
+        st.stop()
+
+    # direct mode: 핵심 분석 화면만 보여주고, 도움말/설정은 접어서 필요할 때만 연다.
+    _direct_head1, _direct_head2 = st.columns([5, 1])
+    with _direct_head1:
+        st.caption("분석방법을 선택하고 필요한 값만 입력하세요. 자료 준비 방법과 기준단가는 필요할 때만 열어볼 수 있습니다.")
+    with _direct_head2:
+        if st.button("🧭 길잡이", width="stretch", key="econ_switch_guide"):
+            st.session_state["econ_entry_mode"] = "guide"
+            st.session_state["econ_guide_step"] = 1
+            st.rerun()
+    _render_econ_material_guide(expanded=False)
+
+    _guide_applied = st.session_state.pop("_econ_guide_applied", None)
+    if _guide_applied:
+        if isinstance(_guide_applied, dict):
+            _focus = " · ".join(_guide_applied.get("tags") or [])
+            _msg = f"✅ 길잡이가 추천한 **{_guide_applied.get('title', '분석')}**을 아래에서 자동 선택했습니다."
+            if _focus:
+                _msg += f" 결과에서 **{_focus}**도 함께 확인하세요."
+            st.success(_msg)
+        else:
+            st.success("✅ 길잡이가 추천한 분석을 아래에서 자동 선택했습니다. 필요한 입력값을 확인하고 분석을 진행하세요.")
+
+    st.markdown("### 분석방법")
+    emode = st.radio("분석 방식",
+                     ["📕 부분예산표 (손실적·이익적 요소)",
+                      "📗 소득분석",
+                      "📘 신기술 경제성 (부분예산·한계수익률)",
+                      "📙 시설·장기투자 경제성 (NPV·B/C·IRR)"],
+                     horizontal=True, key="econ_mode", label_visibility="collapsed")
+    st.caption("선택한 분석에 필요한 입력과 결과만 아래에 표시됩니다.")
+
     with st.expander("🧪 경제성 계산 자가진단 (개발·점검용)", expanded=False):
-        st.caption("면적 환산, 음수 차단, 산출근거 계산, 회계 반올림, 부분예산 역산을 즉시 점검합니다.")
+        st.caption("면적 환산, 입력 검증, 유동·고정자본 산식, 부분예산, 장기투자 NPV/B·C까지 즉시 점검합니다.")
         if st.button("자가진단 실행", key="econ_selftest"):
             _self = run_economic_self_test()
-            st.dataframe(_self, width="stretch", hide_index=True)
+            smart_table(_self, width="stretch", hide_index=True)
             _passed = int(_self["결과"].eq("PASS").sum())
             if _passed == len(_self):
                 st.success(f"✅ {_passed}/{len(_self)}개 핵심 테스트 통과")
@@ -6640,10 +8680,21 @@ elif menu == "💰 경제성분석":
                     st.caption("품목·등급 조합에 따라 자료가 없을 수 있습니다. "
                                "KAMIS 홈페이지에서 코드를 확인해 주세요.")
                 else:
+                    _tr = getattr(dfk, "attrs", {}).get("kamis_transport")
+                    if _tr == "http-fallback":
+                        st.warning("⚠️ HTTPS 연결이 실패하여 공식 HTTP 호환 endpoint로 조회했습니다. "
+                                   "KAMIS 서버의 SSL 상태가 정상화되면 자동으로 HTTPS를 다시 사용합니다.")
+                    elif _tr == "https-legacy":
+                        st.info("ℹ️ KAMIS 서버가 구형 TLS 설정을 사용하고 있어 호환 모드로 조회했습니다. "
+                                "인증서 검증은 정상적으로 수행되었습니다.")
+                    elif _tr == "https-insecure":
+                        st.warning("⚠️ KAMIS 서버 인증서를 검증할 수 없어 검증을 생략하고 조회했습니다. "
+                                   "가격 자료 확인 용도로만 사용하고, 인증키가 노출될 수 있는 환경에서는 "
+                                   "수동 입력을 권장합니다.")
                     st.session_state["kamis_result"] = dfk
         if st.session_state.get("kamis_result") is not None:
             _kres = st.session_state["kamis_result"]
-            st.dataframe(_kres, width="stretch", hide_index=True)
+            smart_table(_kres, width="stretch", hide_index=True)
             _valid = _kres.dropna(subset=["가격"])
             if len(_valid):
                 st.markdown("###### 📥 조회 결과를 기준단가에 반영")
@@ -6764,7 +8815,7 @@ elif menu == "💰 경제성분석":
 
         if st.session_state.get("kosis_result") is not None:
             _kr = st.session_state["kosis_result"]
-            st.dataframe(_kr, width="stretch", hide_index=True)
+            smart_table(_kr, width="stretch", hide_index=True)
             st.caption("조회된 값을 위 기준단가 표의 '단가' 칸에 입력해 사용하세요. "
                        "기준연도도 함께 적어두면 나중에 갱신할 때 편합니다.")
             if st.button("🗑️ 조회 결과 지우기", key="kosis_clear"):
@@ -6798,12 +8849,6 @@ elif menu == "💰 경제성분석":
 ⚠️ 이 프로그램은 외부 자료를 자동으로 받아오지 않습니다. 기관 공식 자료를 직접 확인해
 입력하셔야 정확한 결과가 나옵니다.
 """)
-
-    emode = st.radio("분석 방식",
-                     ["📕 부분예산표 (손실적·이익적 요소)",
-                      "📗 소득분석",
-                      "📘 신기술 경제성 (부분예산·한계수익률)"],
-                     horizontal=True, key="econ_mode")
 
     # ---------------- 부분예산표 (손실적/이익적 요소) ----------------
     if emode.startswith("📕"):
@@ -6936,7 +8981,7 @@ elif menu == "💰 경제성분석":
                         st.error(f"❌ {_ex}")
                 if st.session_state.get("pb_auto"):
                     st.markdown("###### 🔎 10a 환산 비교 (자동 채움 근거)")
-                    st.dataframe(st.session_state["pb_auto"]["detail"],
+                    smart_table(st.session_state["pb_auto"]["detail"],
                                  width="stretch", hide_index=True)
                     if st.button("↩️ 자동 채움 지우고 직접 입력", key="pbd_clear"):
                         st.session_state.pop("pb_auto", None)
@@ -7008,7 +9053,7 @@ elif menu == "💰 경제성분석":
                             _check_show[_c] = _check_show[_c].map(
                                 lambda v: "-" if pd.isna(v) else f"{round_half_up(v):,}")
                     st.markdown("##### 🔎 산출근거 자동 검산")
-                    st.dataframe(_check_show, width="stretch", hide_index=True)
+                    smart_table(_check_show, width="stretch", hide_index=True)
                     _mismatch = _checks["판정"].eq("확인 필요")
                     if _mismatch.any():
                         st.warning(f"⚠️ 산출근거와 입력 금액이 다른 항목이 {_mismatch.sum()}개 있습니다. "
@@ -7041,7 +9086,7 @@ elif menu == "💰 경제성분석":
                 left += [""] * (n - len(left)); right += [""] * (n - len(right))
                 pb_tbl = pd.DataFrame({"손실적 요소(A)": left, "이익적 요소(B)": right})
                 st.markdown("##### ③ 부분예산표 (보고서용)")
-                st.dataframe(pb_tbl, width="stretch", hide_index=True)
+                smart_table(pb_tbl, width="stretch", hide_index=True)
                 concl = f"○ 추정수익액(B-A) : {tot_b_show:,} - {tot_a_show:,} = {profit_show:,}원"
                 st.code(concl, language=None)
 
@@ -7106,6 +9151,8 @@ elif menu == "💰 경제성분석":
 - **총수입(조수입)** = 주산물가액(수량×단가) + **부산물가액**
 - **경영비** = 종묘비·비료비·농약비·광열동력비·수리비·제재료비·소농구비·상각비·임차료·위탁영농비·고용노력비 등 **직접 지출 비용**
 - **생산비** = 경영비 + 자가노력비 + 유동자본용역비 + 고정자본용역비 + 토지용역비
+- **유동자본용역비** = (경영비 − 감가상각성 비용) × 이자율 × 1/2 × 재포기간(월/12)
+- **고정자본용역비** = 고정자산 부분현재가 × 해당 작목 부담률 × 이자율
 - **소득 = 총수입 − 경영비** ／ **순수익 = 총수입 − 생산비**
 - **소득률(%) = (소득 ÷ 총수입) × 100** ／ 순수익률(%) = (순수익 ÷ 총수입) × 100
 - 모든 지표는 **10a(1,000㎡) 기준**으로 환산합니다.
@@ -7134,7 +9181,7 @@ elif menu == "💰 경제성분석":
                 "농약비": [400000, 400000, 250000, 250000],
                 "고용노력비": [600000, 600000, 640000, 640000],
                 "자가노동시간": [95, 98, 105, 104]})
-            st.dataframe(_samp_inc, width="stretch", hide_index=True)
+            smart_table(_samp_inc, width="stretch", hide_index=True)
             st.markdown("""
 - **수량 열** → `수량(kg/10a)`, **단가 열** → `단가(원/kg)` 로 고릅니다.
 - **경영비 열** → `종묘비`·`비료비`·`농약비`·`고용노력비` 를 모두 고릅니다.
@@ -7268,42 +9315,82 @@ elif menu == "💰 경제성분석":
                                    key="e_wage",
                                    help="자가노력비 = 자가노동시간 × 농촌임료금. 연도·지역별 실제 임료금을 입력하세요.")
             c8, c9 = st.columns(2)
-            fixed_asset = c8.number_input("고정자산 평가액 (원/10a)", 0, 500000000, 0, 100000,
-                                          key="e_fixedasset",
-                                          help="대농구·영농시설 등의 평가액. 고정자본용역비 = 평가액 × 이자율")
             rate = c9.number_input("자본 이자율 (%)", 0.0, 20.0,
                                    float(get_price("자본이자율", 5.0)), 0.1, key="e_rate")
-            months = st.slider("재배기간 (개월)", 1, 12, 6, key="e_months",
-                               help="유동자본은 실제 투하된 기간만큼만 이자를 계산합니다. "
-                                    "예: 6개월 재배면 연이자의 절반만 반영됩니다.")
+            _fa_mode = c8.radio("고정자산 입력", ["부분현재가 직접 입력", "신조가에서 자동 계산"],
+                                horizontal=False, key="e_fixed_mode")
+            _fixed_input_error = None
+            if _fa_mode == "부분현재가 직접 입력":
+                _fa1, _fa2 = st.columns(2)
+                fixed_asset = _fa1.number_input(
+                    "고정자산 부분현재가/평가액 (원/10a)", 0, 500000000, 0, 100000,
+                    key="e_fixedasset",
+                    help="대농구·영농시설의 현재 가치(부분현재가)를 해당 자산의 10a 기준으로 입력하세요.")
+                fixed_asset_use_rate = _fa2.number_input(
+                    "해당 작목 부담률 (%)", 0.0, 100.0, 100.0, 5.0, key="e_fixed_use",
+                    help="이 자산을 여러 작목에 함께 쓰면 해당 작목이 부담할 비율만 입력합니다.")
+            else:
+                _fa1, _fa2, _fa3, _fa4 = st.columns(4)
+                _new_value = _fa1.number_input("신조가 (원/10a)", 0, 1000000000, 0, 100000,
+                                              key="e_fixed_new")
+                _residual = _fa2.number_input("잔존가치 (원/10a)", 0, 1000000000, 0, 100000,
+                                             key="e_fixed_residual")
+                _life = _fa3.number_input("내용연수(년)", 1, 50, 10, 1, key="e_fixed_life")
+                _used = _fa4.number_input("사용연수(년)", 0, 50, 0, 1, key="e_fixed_used")
+                _fixed_input_error = None
+                if _residual > _new_value:
+                    _fixed_input_error = "잔존가치는 신조가보다 클 수 없습니다."
+                    st.error("❌ " + _fixed_input_error)
+                    fixed_asset = 0.0
+                elif _used > _life:
+                    _fixed_input_error = "사용연수는 내용연수보다 클 수 없습니다."
+                    st.error("❌ " + _fixed_input_error)
+                    fixed_asset = 0.0
+                else:
+                    _annual_dep = ((_new_value - _residual) / float(_life)) if _life else 0.0
+                    fixed_asset = max(float(_new_value) - _annual_dep * float(_used), float(_residual))
+                    st.caption(f"부분현재가 = 신조가 − (연간 감가상각비 × 사용연수) = **{fixed_asset:,.0f}원/10a**")
+                fixed_asset_use_rate = st.number_input(
+                    "해당 작목 부담률 (%)", 0.0, 100.0, 100.0, 5.0, key="e_fixed_use_auto",
+                    help="이 자산을 여러 작목에 함께 쓰면 해당 작목이 부담할 비율만 입력합니다.")
+            months = st.slider("재포기간 (개월)", 1, 12, 6, key="e_months",
+                               help="유동자본용역비 = 유동자본 기준액 × 연이자율 × 1/2 × 재포기간(월/12). "
+                                    "감가상각비와 조성비상각은 유동자본 기준액에서 제외합니다.")
+            st.caption("유동자본은 경영비 전액에 이자를 붙이지 않습니다. 감가상각성 비용을 제외하고 "
+                       "농촌진흥청 방식의 산출계수 1/2와 재포기간을 적용합니다.")
             # ⑧ 토지 이용 형태에 따라 토지비 산정 방식을 나눔
             st.markdown("**토지 이용 형태**")
             land_type = st.radio("토지 이용", ["자가 소유", "임차", "자가·임차 혼합", "토지비 제외"],
                                  horizontal=True, key="e_landtype", label_visibility="collapsed")
             _base_land = int(get_price("토지용역비(밭)", 260) * 1000)
             if land_type == "토지비 제외":
-                land = 0
-                st.caption("토지용역비를 0원으로 두고 계산합니다(순수익이 그만큼 높게 나옵니다).")
+                land_opp = 0
+                land_cash = 0
+                st.caption("토지 관련 비용을 별도로 추가하지 않습니다.")
             elif land_type == "자가 소유":
-                land = st.number_input("토지 기회비용 (원/10a)", 0, 20000000,
-                                       _base_land, 10000, key="e_land_own",
-                                       help="자가토지를 빌려줬다면 받았을 임차료 수준으로 입력하세요.")
+                land_opp = st.number_input("자가토지 기회비용 (원/10a)", 0, 20000000,
+                                           _base_land, 10000, key="e_land_own",
+                                           help="자가토지를 빌려줬다면 받을 수 있는 임차료 수준. 생산비에만 반영합니다.")
+                land_cash = 0
             elif land_type == "임차":
-                land = st.number_input("실제 임차료 (원/10a)", 0, 20000000,
-                                       _base_land, 10000, key="e_land_rent",
-                                       help="실제로 지급한 임차료를 입력하세요.")
-                st.warning("⚠️ 경영비 항목에 **임차료가 이미 포함**되어 있다면 여기서는 0으로 두세요. "
+                land_cash = st.number_input("실제 토지 임차료 (원/10a)", 0, 20000000,
+                                            _base_land, 10000, key="e_land_rent",
+                                            help="실제로 지급한 임차료이므로 경영비에 반영합니다.")
+                land_opp = 0
+                st.warning("⚠️ 경영비 항목에 **토지 임차료 열이 이미 포함**되어 있다면 여기서는 0으로 두세요. "
                            "그렇지 않으면 임차료가 두 번 계산됩니다.")
             else:   # 혼합
                 _lc1, _lc2 = st.columns(2)
                 _own_ratio = _lc1.slider("자가 비율(%)", 0, 100, 50, 5, key="e_ownratio")
-                _own_cost = _lc2.number_input("자가 기회비용 (원/10a)", 0, 20000000,
+                _own_cost = _lc2.number_input("자가 기회비용 (원/10a, 자가 100% 가정)", 0, 20000000,
                                               _base_land, 10000, key="e_owncost")
-                _rent_cost = st.number_input("임차료 (원/10a)", 0, 20000000,
+                _rent_cost = st.number_input("임차료 (원/10a, 임차 100% 가정)", 0, 20000000,
                                              _base_land, 10000, key="e_rentcost")
-                land = round_half_up(_own_cost * _own_ratio / 100 + _rent_cost * (100 - _own_ratio) / 100)
-                st.caption(f"자가 {_own_ratio}% × {_own_cost:,}원 + 임차 {100-_own_ratio}% × "
-                           f"{_rent_cost:,}원 = **{land:,}원/10a**")
+                land_opp = round_half_up(_own_cost * _own_ratio / 100)
+                land_cash = round_half_up(_rent_cost * (100 - _own_ratio) / 100)
+                st.caption(f"자가토지 용역비 **{land_opp:,}원/10a**(생산비에만 반영) + "
+                           f"실제 임차료 **{land_cash:,}원/10a**(경영비에 반영)")
+            land = land_opp
 
         # 작목별 특수 항목
         estab_amort = 0
@@ -7336,8 +9423,12 @@ elif menu == "💰 경제성분석":
             labor_col=(None if labor_col == "(없음)" else labor_col),
             byproduct_col=(None if byp == "(없음)" else byp),
             wage_per_hour=wage, interest_rate=rate, capital_months=months,
-            fixed_asset_per_10a=fixed_asset, establishment_amort_per_10a=estab_amort,
-            land_cost_per_10a=land, land_type=land_type, source_area_a=area_val)
+            fixed_asset_per_10a=fixed_asset, fixed_asset_use_rate_percent=fixed_asset_use_rate,
+            establishment_amort_per_10a=estab_amort, depreciation_cost_cols=dep_col,
+            land_cost_per_10a=land_opp, land_cash_rent_per_10a=land_cash,
+            land_type=land_type, source_area_a=area_val)
+        if _fixed_input_error:
+            _econ_errors.append(_fixed_input_error)
         if not _unit_confirm:
             _econ_errors.append("입력 열의 단위를 확인해야 계산할 수 있습니다.")
         _econ_errors = list(dict.fromkeys(_econ_errors))
@@ -7347,14 +9438,15 @@ elif menu == "💰 경제성분석":
         # 지정한 열**이 있을 때만 진짜 중복이므로, 그 기준으로 다시 판정한다.
         _kept = []
         for _err in _econ_errors:
-            if "토지용역비" in _err and ("임차" in _err or "임대" in _err):
+            if (("토지용역비" in _err and ("임차" in _err or "임대" in _err))
+                    or ("토지 임차료" in _err and "경영비" in _err)):
                 _listed = [t.strip() for t in _err.split(":")[-1].split(",") if t.strip()]
                 _hit = [t for t in _listed if t in rent_col]
                 if not _hit:
                     continue                     # 기계·장비 임차료였다 → 중복 아님
                 _err = ("경영비에 토지 임차료(" + ", ".join(_hit) + ")가 들어 있어 "
-                        "별도 토지용역비와 중복 계산됩니다. 토지 이용 형태를 "
-                        "'토지비 제외'로 두거나, 해당 열을 경영비에서 빼 주세요.")
+                        "별도 입력한 토지 임차료와 중복 계산됩니다. 별도 토지 임차료를 0으로 두거나, "
+                        "해당 열을 경영비에서 빼 주세요.")
             _kept.append(_err)
         _econ_errors = _kept
         for _err in _econ_errors:
@@ -7371,8 +9463,10 @@ elif menu == "💰 경제성분석":
                     byproduct_col=(None if byp == "(없음)" else byp),
                     labor_col=(None if labor_col == "(없음)" else labor_col),
                     wage_per_hour=wage, interest_rate=rate, capital_months=months,
-                    fixed_asset_per_10a=fixed_asset, land_cost_per_10a=land,
-                    establishment_amort_per_10a=estab_amort, source_area_a=area_val)
+                    fixed_asset_per_10a=fixed_asset, fixed_asset_use_rate_percent=fixed_asset_use_rate,
+                    land_cost_per_10a=land_opp, land_cash_rent_per_10a=land_cash,
+                    establishment_amort_per_10a=estab_amort,
+                    source_area_a=area_val, depreciation_cost_cols=dep_col)
             except ValueError as _ex:
                 st.error(f"경제성 계산을 중단했습니다: {_ex}")
                 st.stop()
@@ -7398,13 +9492,15 @@ elif menu == "💰 경제성분석":
             _rename = {
                 "_수량10a": yq, "_주산물가액": "주산물가액",
                 "_부산물가액": "부산물가액", "_경영비": "경영비",
-                "_자가노력비": "자가노력비", "_유동자본용역비": "유동자본용역비",
+                "_조성비상각": "조성비상각", "_토지임차료": "토지임차료(별도입력)",
+                "_자가노력비": "자가노력비", "_유동자본기준액": "유동자본기준액",
+                "_유동자본용역비": "유동자본용역비", "_고정자본기준액": "고정자본기준액",
                 "_고정자본용역비": "고정자본용역비", "_토지용역비": "토지용역비",
                 "_총수입": "총수입", "_생산비": "생산비",
                 "_소득": "소득", "_순수익": "순수익",
             }
             e = _summary.rename(columns=_rename).reset_index(drop=True)
-            if estab_amort:
+            if estab_amort and "조성비상각" not in e.columns:
                 e["조성비상각"] = float(estab_amort)
 
             # ---------- 통계 유의성 연동 (수량 ANOVA, 블록 지정 가능) ----------
@@ -7484,11 +9580,16 @@ elif menu == "💰 경제성분석":
             _va_excl = list(dict.fromkeys(rent_col + hire_col + mach_col + trust_col + dep_col))
             _va_excl = [c for c in _va_excl if c in e.columns]
             # 선택한 비용 열은 계산 엔진에서 이미 10a 기준으로 환산되어 있다.
-            inter = e["경영비"] - (e[_va_excl].sum(axis=1) if _va_excl else 0)
+            _non_intermediate = (e[_va_excl].sum(axis=1) if _va_excl else pd.Series(0.0, index=e.index))
+            if "토지임차료(별도입력)" in e.columns:
+                _non_intermediate = _non_intermediate + e["토지임차료(별도입력)"]
+            if "조성비상각" in e.columns:
+                _non_intermediate = _non_intermediate + e["조성비상각"]
+            inter = (e["경영비"] - _non_intermediate).clip(lower=0)
             e["부가가치"] = e["총수입"] - inter
             e["가족노동보수"] = (e["총수입"] - e["경영비"] - e["유동자본용역비"]
                             - e["고정자본용역비"] - e["토지용역비"])
-            e["B/C"] = (e["총수입"] / e["생산비"].where(e["생산비"] != 0)).round(2)
+            e["단년도 총수입/생산비"] = (e["총수입"] / e["생산비"].where(e["생산비"] != 0)).round(2)
             e["kg당 생산비"] = (e["생산비"] / e[yq].where(e[yq] != 0)).round(0)
             # 손익분기수량 — CVP 공식 Q* = 고정비 ÷ (단가 − 단위당 변동비).
             # 핵심은 '무엇이 변동비인가'다. 변동비는 **산출량(수량)에 비례하는** 비용만
@@ -7505,6 +9606,8 @@ elif menu == "💰 경제성분석":
             # 부산물가액은 주산물 수량과 무관하게 들어오는 수입이므로 회수 대상에서 뺀다.
             _fc = (e["생산비"] - _vc_total - e["부산물가액"]).clip(lower=0)
             e["손익분기수량"] = break_even_qty(_fc, _vc_total, e[yq], e[pr]).round(1)
+            e["손익분기가격"] = ((e["생산비"] - e["부산물가액"])
+                                / e[yq].where(e[yq] != 0)).round(0)
             e["손익분기수량 계산불가"] = (e[pr] - _vc_total / e[yq].where(e[yq] != 0)) <= 0
             if labor_col != "(없음)":
                 e["시간당 소득"] = (e["소득"] / e[labor_col].where(e[labor_col] != 0)).round(0)
@@ -7588,17 +9691,23 @@ elif menu == "💰 경제성분석":
 
             st.markdown("#### 1) 소득 · 순수익")
             m1 = [trt, "총수입", "경영비", "생산비", "소득", "순수익", "소득률(%)", "순수익률(%)"]
-            st.dataframe(money_table(e[m1]), width="stretch", hide_index=True)
+            smart_table(money_table(e[m1]), width="stretch", hide_index=True)
 
             st.markdown("#### 2) 생산비 구성")
             m2 = [trt, "경영비", "자가노력비", "유동자본용역비", "고정자본용역비", "토지용역비", "생산비"]
-            st.dataframe(money_table(e[m2]), width="stretch", hide_index=True)
+            smart_table(money_table(e[m2]), width="stretch", hide_index=True)
+            _dep_txt = ", ".join(map(str, dep_col)) if dep_col else "지정 없음(열 이름으로 자동 판별)"
+            st.caption(f"유동자본용역비는 감가상각비({ _dep_txt })와 조성비상각을 제외한 유동자본 기준액에 "
+                       f"이자율 {rate:g}% × 1/2 × 재포기간 {months}/12를 적용했습니다. "
+                       f"고정자본용역비는 부분현재가 {fixed_asset:,.0f}원/10a × 작목부담률 "
+                       f"{fixed_asset_use_rate:g}% × 이자율 {rate:g}%로 계산했습니다.")
 
             st.markdown("#### 3) 경영 지표")
-            m3 = [trt, "부가가치", "가족노동보수", "B/C", "kg당 생산비", "손익분기수량"]
+            m3 = [trt, "부가가치", "가족노동보수", "단년도 총수입/생산비",
+                  "kg당 생산비", "손익분기수량", "손익분기가격"]
             if "시간당 소득" in e.columns: m3.append("시간당 소득")
             if "대조구대비 소득(%)" in e.columns: m3.append("대조구대비 소득(%)")
-            st.dataframe(money_table(e[m3]), width="stretch", hide_index=True)
+            smart_table(money_table(e[m3]), width="stretch", hide_index=True)
             if e["손익분기수량 계산불가"].any():
                 _bad = ", ".join(str(g) for g in e.loc[e["손익분기수량 계산불가"], trt])
                 st.warning(f"⚠️ {_bad}: 단위당 수량비례비가 판매단가 이상이라 "
@@ -7614,10 +9723,12 @@ elif menu == "💰 경제성분석":
                        "**(생산비 − 부산물가액) ÷ 단가**가 되어 '그해 들어간 비용을 "
                        "회수하려면 몇 kg을 수확해야 하는가'를 뜻합니다. "
                        "실제 수량이 이보다 많으면 이익입니다. "
-                       "**B/C = 총수입 ÷ 생산비**(자가노력비·용역비 포함)입니다. "
-                       "B/C가 1을 넘는 것은 입력한 가격·수량·비용 조건에서 편익이 비용보다 크다는 뜻이며, "
-                       "통계적 유의성이나 가격 변동 위험을 별도로 확인해야 합니다. "
-                       f"처리 평균값 기준 경영비 B/C는 {_mgmt_bc_txt}입니다.")
+                       "**손익분기가격 = (생산비 − 부산물가액) ÷ 실제 수량**으로, 현재 수량에서 최소 얼마를 받아야 하는지 보여줍니다. "
+                       "**단년도 총수입/생산비 = 총수입 ÷ 생산비**(자가노력비·용역비 포함)입니다. "
+                       "1을 넘으면 해당 연도의 입력 가격·수량·비용 조건에서 총수입이 생산비보다 큰 상태입니다. "
+                       "이 값은 여러 해의 현금흐름을 할인하는 시설투자용 B/C와는 다릅니다. "
+                       "통계적 유의성이나 가격 변동 위험도 별도로 확인해야 합니다. "
+                       f"참고로 처리 평균값 기준 총수입/경영비는 {_mgmt_bc_txt}입니다.")
 
             # ---------- ⑩ 반복별 소득·순수익 통계 검정 (선택) ----------
             _rowlv = st.session_state.get("_econ_rowlevel")
@@ -7647,7 +9758,7 @@ elif menu == "💰 경제성분석":
                                 st.metric(f"{_label} ANOVA p", f"{_p:.4f}",
                                           "유의함" if _p < .05 else "유의하지 않음")
                             if _res.get("dunnett") is not None:
-                                st.dataframe(_res["dunnett"], width="stretch", hide_index=True)
+                                smart_table(_res["dunnett"], width="stretch", hide_index=True)
                                 st.caption("95% 구간이 0을 포함하지 않으면 대조구와 유의한 차이가 있습니다.")
                             if _res.get("bootstrap"):
                                 _br = pd.DataFrame([
@@ -7656,7 +9767,7 @@ elif menu == "💰 경제성분석":
                                      "95% 상한": round(v["high"], 1)}
                                     for k, v in _res["bootstrap"].items()])
                                 st.markdown("부트스트랩 신뢰구간 (소표본·비정규 대비)")
-                                st.dataframe(_br, width="stretch", hide_index=True)
+                                smart_table(_br, width="stretch", hide_index=True)
                             st.session_state[f"_econ_test_{_label}"] = {
                                 "anova_p": _p,
                                 "dunnett": (_res["dunnett"].to_dict("records")
@@ -7679,7 +9790,7 @@ elif menu == "💰 경제성분석":
                 mi = [c for c in mi if c in e.columns]
                 if "투자효율" in e.columns: mi.append("투자효율")
                 inc_df = e[mi].copy()
-                st.dataframe(money_table(inc_df), width="stretch", hide_index=True)
+                smart_table(money_table(inc_df), width="stretch", hide_index=True)
                 if not qty_effect_ok:
                     st.info("ℹ️ 처리별 가격 또는 부산물 수입이 달라 "
                             "**수량 효과만을 이용한 순증가수익은 계산하지 않았습니다.** "
@@ -7718,10 +9829,16 @@ elif menu == "💰 경제성분석":
                 dl_table(money_table(inc_df), f"{ctrl} 대비 증수 및 경제성 분석", "econinc", "증수분석")
 
             st.markdown("#### 5) 경영비 비목 구성")
-            comp = e.groupby(trt)[cost_cols].mean()
+            _cost_component_cols = list(cost_cols)
+            if "토지임차료(별도입력)" in e.columns and float(land_cash) > 0:
+                _cost_component_cols.append("토지임차료(별도입력)")
+            if "조성비상각" in e.columns and float(estab_amort) > 0:
+                _cost_component_cols.append("조성비상각")
+            _cost_component_cols = list(dict.fromkeys(_cost_component_cols))
+            comp = e.groupby(trt)[_cost_component_cols].mean()
             _comp_total = comp.sum(axis=1)
             _comp_share = comp.div(_comp_total.where(_comp_total != 0), axis=0) * 100
-            st.dataframe(_comp_share.round(1).reset_index(), width="stretch")
+            smart_table(_comp_share.round(1).reset_index(), width="stretch")
             _comp_means = comp.mean(axis=0)
             if not _comp_means.empty and _comp_means.notna().any() and float(_comp_means.fillna(0).sum()) > 0:
                 st.caption(f"평균적으로 '{_comp_means.idxmax()}'가 경영비에서 가장 큰 비중을 차지합니다.")
@@ -7733,7 +9850,7 @@ elif menu == "💰 경제성분석":
             sens = pd.DataFrame({trt: e[trt].astype(str)})
             for r in rates:
                 sens[f"{r:+d}%"] = ((e["주산물가액"]*(1+r/100) + e["부산물가액"]) - e["경영비"]).round(0).values
-            st.dataframe(sens, width="stretch")
+            smart_table(sens, width="stretch")
 
             # ⑪ 같은 행에서 처리구·소득·소득률을 가져와야 함(다른 행 값이 섞이면 안 됨)
             _bi = e["소득"].idxmax()
@@ -7744,7 +9861,7 @@ elif menu == "💰 경제성분석":
             _ni = e["순수익"].idxmax()
             bestn = e.loc[_ni, trt]
             bestn_profit = float(e.loc[_ni, "순수익"])
-            _valid_bc = pd.to_numeric(e["B/C"], errors="coerce").dropna()
+            _valid_bc = pd.to_numeric(e["단년도 총수입/생산비"], errors="coerce").dropna()
             _bc_count = int((_valid_bc > 1).sum())
             _sig_note = ("\n  - " + sig_warn.replace("⚠️ ", "")) if sig_warn else ""
             txt = ("○ 처리구별 경제성 분석 결과\n"
@@ -7752,34 +9869,150 @@ elif menu == "💰 경제성분석":
                    f"(소득률 {_best_rate_txt})였으며, "
                    f"순수익이 가장 높은 처리구는 '{bestn}'({bestn_profit:,.0f}원/10a)이었다.\n"
                    f"  - 입력한 가격·수량·비용 조건에서 전체 {len(e)}개 처리구 중 "
-                   f"{_bc_count}개가 B/C 1을 초과하였다. "
+                   f"{_bc_count}개가 단년도 총수입/생산비 1을 초과하였다. "
                    "최종 보급 판단에는 통계적 유의성·가격 변동·현장 적용성을 함께 검토해야 한다."
                    + _sig_note)
             st.markdown("###### 📋 보고서용 문장")
             st.code(txt, language=None)
 
             fw, fh = figsize()
-            fig, axes = plt.subplots(1, 3, figsize=(fw*2.2, fh))
-            x = e[trt].astype(str)
-            _ramp = _RAMP.get(st.session_state.get("plot_color", "파랑"), _RAMP["파랑"])
-            axes[0].bar(x, e["소득"], label="소득", edgecolor="none",
-                        color=_ramp[3] if pretty_on() else pcolor())
-            axes[0].bar(x, e["순수익"], color="#b85450", alpha=.8, width=.5,
-                        label="순수익", edgecolor="none")
-            if pretty_on():
-                bar_value_labels(axes[0], range(len(x)), e["소득"].tolist(), dec=0)
-            axes[0].set_ylabel("원/10a"); axes[0].legend(fontsize=7); deco(axes[0], "소득 · 순수익")
-            comp.plot(kind="bar", stacked=True, ax=axes[1])
-            axes[1].set_ylabel("원/10a"); axes[1].legend(fontsize=6); deco(axes[1], "경영비 구성")
-            for i in range(len(e)):
-                axes[2].plot(rates, [sens.iloc[i][f"{r:+d}%"] for r in rates], marker="o", label=str(x.iloc[i]))
-            axes[2].axhline(0, color="gray", lw=.8, linestyle="--")
-            axes[2].set_xlabel("단가 변동(%)"); axes[2].set_ylabel("소득(원)")
-            axes[2].legend(fontsize=6); deco(axes[2], "가격 민감도")
-            for a in axes: a.tick_params(axis="x", rotation=20)
-            plt.tight_layout(); png = fig_to_png(fig)
+            x = e[trt].astype(str).reset_index(drop=True)
+            _xp = np.arange(len(x), dtype=float)
+            _bw = 0.36
 
-            st.download_button("🖼️ 그래프 다운로드", png, "econ.png", "image/png")
+            # ① 소득·순수익: 겹치지 않는 그룹 막대
+            fig_income, ax0 = plt.subplots(figsize=(max(9.5, fw*1.6), max(4.4, fh*1.05)))
+            _income_plot = e["소득"].astype(float).values / 10000.0
+            _profit_plot = e["순수익"].astype(float).values / 10000.0
+            b1 = ax0.bar(_xp - _bw/2, _income_plot, width=_bw,
+                         label="소득", color="#3D6F9F", edgecolor="#000000", linewidth=.55)
+            b2 = ax0.bar(_xp + _bw/2, _profit_plot, width=_bw,
+                         label="순수익", color="#A3C4E2", edgecolor="#000000", linewidth=.55)
+            ax0.set_xticks(_xp, x.tolist())
+            ax0.set_ylabel("만원/10a")
+            deco(ax0, "처리구별 소득 · 순수익")
+            ax0.tick_params(axis="x", rotation=0 if len(x) <= 6 else 18)
+            ax0.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=2,
+                       frameon=False, borderaxespad=0)
+            if len(x) <= 10:
+                for bars in (b1, b2):
+                    for _b in bars:
+                        _v = float(_b.get_height())
+                        _va, _off = ("bottom", 5) if _v >= 0 else ("top", -5)
+                        ax0.annotate(f"{_v:,.0f}", (_b.get_x()+_b.get_width()/2, _v),
+                                     xytext=(0, _off), textcoords="offset points", ha="center",
+                                     va=_va, fontsize=8, color="#23394D", fontweight="bold")
+                ax0.margins(y=.17)
+            fig_income.subplots_adjust(bottom=.23, top=.88, left=.10, right=.98)
+            png_income = fig_to_png(fig_income)
+
+            st.markdown("##### 비용 구조와 가격 위험")
+            _ec1, _ec2 = st.columns(2)
+            with _ec1:
+                fig_cost, ax1 = plt.subplots(figsize=(max(5.8, fw), max(4.5, fh)))
+                # 경영비 구성: 오래된 Office식 다색 조합 대신, 서로 구분되면서도
+                # 한 화면에서 튀지 않는 차분한 cool-tone 팔레트로 통일한다.
+                _cost_palette = ["#25577A", "#3F7FA6", "#62A1C1", "#7DBBC9",
+                                 "#8FC8BF", "#B8D3DE", "#6F94AA", "#4D728E"]
+                _comp_plot = comp.astype(float) / 10000.0
+                _comp_plot.plot(kind="bar", stacked=True, ax=ax1,
+                          color=[_cost_palette[i % len(_cost_palette)] for i in range(len(comp.columns))],
+                          width=.62, edgecolor="white", linewidth=.7)
+                # 충분히 큰 구간에는 금액(만원/10a)과 구성비를 함께 표시한다.
+                # 너무 작은 구간은 억지로 글자를 넣지 않아 가독성을 지킨다.
+                _bottom = np.zeros(len(_comp_plot), dtype=float)
+                for _ci, _cname in enumerate(_comp_plot.columns):
+                    _vals = _comp_plot[_cname].to_numpy(dtype=float)
+                    _shares = _comp_share[_cname].to_numpy(dtype=float)
+                    _rgb = _cost_palette[_ci % len(_cost_palette)].lstrip('#')
+                    _r, _g, _b = [int(_rgb[k:k+2], 16) for k in (0,2,4)]
+                    _lum = 0.2126*_r + 0.7152*_g + 0.0722*_b
+                    _tc = "white" if _lum < 145 else "#20384D"
+                    for _xi, (_vv, _ss, _bb) in enumerate(zip(_vals, _shares, _bottom)):
+                        if np.isfinite(_vv) and np.isfinite(_ss) and _vv > 0 and _ss >= 5.5:
+                            ax1.text(_xi, _bb + _vv/2, f"{_vv:,.0f}\n({_ss:.0f}%)",
+                                     ha="center", va="center", fontsize=6.9,
+                                     color=_tc, fontweight="bold")
+                    _bottom += np.nan_to_num(_vals, nan=0.0)
+                ax1.set_ylabel("만원/10a")
+                ax1.set_xlabel("")
+                deco(ax1, "경영비 구성")
+                ax1.tick_params(axis="x", rotation=0 if len(comp.index) <= 5 else 18)
+                # 범례는 그래프 아래 한 줄/두 줄로 정돈해 막대와 겹치지 않게 한다.
+                ax1.legend(fontsize=7.3, ncol=min(3, max(1, len(comp.columns))),
+                           loc="upper center", bbox_to_anchor=(0.5, -0.15),
+                           frameon=False, borderaxespad=0, columnspacing=1.1,
+                           handlelength=1.5, handletextpad=.45)
+                # 상단/우측 축선은 숨기고, 왼쪽·아래쪽만 옅게 유지한다.
+                ax1.spines["top"].set_visible(False)
+                ax1.spines["right"].set_visible(False)
+                ax1.spines["left"].set_color("#B9C7D3")
+                ax1.spines["bottom"].set_color("#B9C7D3")
+                fig_cost.subplots_adjust(bottom=.27, top=.86, left=.14, right=.98)
+                png_cost = fig_to_png(fig_cost)
+
+            with _ec2:
+                fig_sens, ax2 = plt.subplots(figsize=(max(5.8, fw), max(4.5, fh)))
+                _line_palette = ["#274C77", "#4F83B6", "#79A9D1", "#4F8A8B",
+                                 "#8D6E63", "#7D6AA5", "#5D8A66", "#B07D4F"]
+                _sens_raw = np.array([
+                    [float(sens.iloc[i][f"{r:+d}%"]) for r in rates]
+                    for i in range(len(e))], dtype=float)
+                _sens_plot = _sens_raw / 10000.0
+                for i in range(len(e)):
+                    _col = _line_palette[i % len(_line_palette)]
+                    ax2.plot(rates, _sens_plot[i], marker="o", markersize=5, linewidth=2.0,
+                             color=_col, label=str(x.iloc[i]))
+                # 각 x지점(-20,-10,0,+10,+20)마다 숫자끼리 실제로 겹치는지 계산해
+                # y좌표를 최소 간격만큼 벌린다. 처리별 고정 오프셋 방식보다 훨씬 자연스럽다.
+                _all_y = _sens_plot[np.isfinite(_sens_plot)]
+                _yr = float(np.nanmax(_all_y) - np.nanmin(_all_y)) if _all_y.size else 1.0
+                _min_gap = max(_yr * 0.030, 5.0)
+                _base_gap = max(_yr * 0.010, 2.5)
+                for _j, _rx in enumerate(rates):
+                    _ys = [(float(_sens_plot[_i, _j]), _i) for _i in range(len(e))
+                           if np.isfinite(_sens_plot[_i, _j])]
+                    _ys.sort(key=lambda z: z[0])
+                    _placed = []
+                    for _yv, _i in _ys:
+                        _ly = _yv + _base_gap
+                        if _placed and _ly - _placed[-1][0] < _min_gap:
+                            _ly = _placed[-1][0] + _min_gap
+                        _placed.append((_ly, _i, _yv))
+                    for _ly, _i, _yv in _placed:
+                        _col = _line_palette[_i % len(_line_palette)]
+                        # 점과 숫자가 멀어진 경우에만 아주 얇은 연결선을 보여준다.
+                        if abs(_ly - _yv) > _base_gap * 1.7:
+                            ax2.plot([_rx, _rx], [_yv, _ly - _base_gap*0.25],
+                                     color=_col, lw=.45, alpha=.55, zorder=2)
+                        ax2.text(_rx, _ly, f"{_yv:,.0f}",
+                                 ha="center", va="bottom", fontsize=7.2,
+                                 color=_col, fontweight="bold",
+                                 bbox=dict(facecolor="white", edgecolor="none",
+                                           alpha=.78, pad=.35), zorder=5)
+                ax2.margins(y=.16)
+                ax2.axhline(0, color="#000000", lw=.8, linestyle="--")
+                ax2.set_xlabel("단가 변동(%)")
+                ax2.set_ylabel("소득(만원/10a)")
+                deco(ax2, "가격 민감도")
+                ax2.set_xticks(rates)
+                ax2.spines["top"].set_visible(False)
+                ax2.spines["right"].set_visible(False)
+                ax2.spines["left"].set_color("#B9C7D3")
+                ax2.spines["bottom"].set_color("#B9C7D3")
+                ax2.legend(fontsize=7.5, ncol=min(4, max(1, len(e))),
+                           loc="lower center", bbox_to_anchor=(0.5, 1.19),
+                           frameon=False, borderaxespad=0, columnspacing=.9)
+                fig_sens.subplots_adjust(top=.74, bottom=.16, left=.15, right=.98)
+                png_sens = fig_to_png(fig_sens)
+
+            _gd1, _gd2, _gd3 = st.columns(3)
+            _gd1.download_button("🖼️ 소득·순수익 그래프", png_income, "econ_income.png", "image/png",
+                                 key="dl_econ_income", width="stretch")
+            _gd2.download_button("🖼️ 경영비 구성 그래프", png_cost, "econ_cost.png", "image/png",
+                                 key="dl_econ_cost", width="stretch")
+            _gd3.download_button("🖼️ 가격 민감도 그래프", png_sens, "econ_sensitivity.png", "image/png",
+                                 key="dl_econ_sens", width="stretch")
 
             # ---------- 7) 수량·단가 동시 변동 ----------
             st.markdown("#### 7) 수량과 단가가 함께 변하면 소득은?")
@@ -7788,15 +10021,17 @@ elif menu == "💰 경제성분석":
                        "'최악의 경우에도 적자가 아닌지'를 확인할 수 있습니다. "
                        "초록색이면 흑자, 빨간색이면 적자입니다.")
             st.caption("수량과 단가가 **동시에** 변할 때 소득이 어떻게 달라지는지 봅니다. "
-                       "붉을수록 위험(소득 낮음), 푸를수록 안전(소득 높음)입니다.")
+                       "앞에서 지정한 수확·선별·포장·운송 등 **수량비례비용은 수량 변동률에 맞춰 함께 변동**시키고, "
+                       "나머지 경영비는 고정한 상태로 계산합니다. 붉을수록 위험, 푸를수록 안전입니다.")
             tw1, tw2 = st.columns(2)
             _tsel = tw1.selectbox("기준 처리구", e[trt].astype(str).tolist(), key="tw_trt")
             _tstep = tw2.selectbox("변동 간격", [5, 10], index=1, key="tw_step")
             _row = e[e[trt].astype(str) == _tsel].iloc[0]
+            _row_yvc = float(_row[_yv].sum()) if _yv else 0.0
             hm = two_way_sensitivity(float(_row[yq]), float(_row[pr]),
                                      float(_row["경영비"]),
                                      float(_row["부산물가액"]) if "부산물가액" in e.columns else 0,
-                                     step=int(_tstep))
+                                     yield_variable_cost=_row_yvc, step=int(_tstep))
             fig_h = plot_sensitivity_heatmap(hm, f"'{_tsel}' — 수량·단가 변동에 따른 소득")
             png_h = fig_to_png(fig_h)
             _neg = int((hm < 0).sum().sum()); _tot = hm.size
@@ -7821,16 +10056,23 @@ elif menu == "💰 경제성분석":
             for _c in _hm_show.columns:
                 if pd.api.types.is_numeric_dtype(_hm_show[_c]):
                     _hm_show[_c] = _hm_show[_c].map(lambda v: f"{v:,.0f}")
-            dl_table(_hm_show, f"{_tsel} 수량·단가 변동별 소득", "twoway", "소득변동표")
-
-            dl_table(money_table(e[m1]), "처리구별 소득 분석", "econ114", "econ1")
-            dl_table(money_table(e[m2]), "처리구별 생산비 구성", "econ215", "econ2")
             log_action("소득분석(소득조사 방식) 실행")
-            _econ_blocks = [{"text": txt},
-                            {"caption": "처리구별 소득·순수익", "table": money_table(e[m1]), "image": png},
-                            {"text": _tw_txt},
-                            {"caption": f"{_tsel} 수량·단가 변동별 소득", "table": _hm_show,
-                             "image": png_h}]
+            _econ_blocks = [
+                {"text": txt},
+                {"caption": "처리구별 소득·순수익",
+                 "table": money_table(e[m1]), "image": png_income},
+                {"caption": "처리구별 생산비 구성",
+                 "table": money_table(e[m2])},
+                {"caption": "경영비 구성 금액(만원/10a)",
+                 "table": _comp_plot.round(2).reset_index(), "image": png_cost},
+                {"caption": "경영비 구성 비율(%)",
+                 "table": _comp_share.round(1).reset_index()},
+                {"caption": "가격 민감도",
+                 "table": sens, "image": png_sens},
+                {"text": _tw_txt},
+                {"caption": f"{_tsel} 수량·단가 변동별 소득",
+                 "table": _hm_show, "image": png_h},
+            ]
             report_capture("cap_econ", "경제성 분석", None, blocks=_econ_blocks)
             _ctx_cols = list(dict.fromkeys(
                 m1 + m3 + [yq, pr, "주산물가액", "부산물가액", "소득증가액",
@@ -7841,8 +10083,11 @@ elif menu == "💰 경제성분석":
                 base_area="10a", control=(None if ctrl == "(없음)" else ctrl),
                 treatments=e[_ctx_cols],
                 prices={"농촌임료금(원/시간)": wage, "자본이자율(%)": rate,
-                        "고정자산평가액(원/10a)": fixed_asset,
-                        "토지이용형태": land_type, "토지용역비(원/10a)": land,
+                        "고정자산 부분현재가(원/10a)": fixed_asset,
+                        "고정자산 작목부담률(%)": fixed_asset_use_rate,
+                        "토지이용형태": land_type,
+                        "자가토지 용역비(원/10a)": land_opp,
+                        "토지 임차료 별도입력(원/10a)": land_cash,
                         "재배기간(개월)": months,
                         "사용 기준단가 DB": _used_price_db},
                 cost_cols=list(cost_cols), excluded_cols=list(_blocked),
@@ -7857,10 +10102,38 @@ elif menu == "💰 경제성분석":
             ai_interpret_advanced("econ", "경제성(소득) 분석", e[m1],
                                   "소득증가액이 경제성 판단의 기본 지표입니다.",
                                   context=_econ_ctx, capture_slot="cap_econ")
+
+            # 경제성분석의 한글/Excel은 중간중간 흩어 놓지 않고 분석의 맨 아래에서
+            # 현재 화면의 모든 표·그래프를 한 번에 내려받게 한다.
+            st.markdown("---")
+            st.markdown("### 📥 경제성 분석 전체 결과 다운로드")
+            st.caption("처리구별 소득·순수익, 생산비 구성, 경영비 금액·비율, "
+                       "가격 민감도, 수량×단가 민감도까지 한 파일에 모두 담습니다.")
+            _ed1, _ed2 = st.columns(2)
+            try:
+                _econ_hwp = build_report_hwpx(
+                    [{"heading": "경제성 분석", "blocks": _econ_blocks}],
+                    doc_title="경제성 분석 결과")
+                _ed1.download_button(
+                    "📘 한글 전체 보고서(hwpx)", _econ_hwp,
+                    "경제성분석_전체결과.hwpx",
+                    key="dl_econ_all_hwp", width="stretch")
+            except Exception as _ex:
+                _ed1.caption(f"한글 파일 생성 실패 ({type(_ex).__name__})")
+            try:
+                _econ_xls = make_xlsx_multi(_econ_blocks, doc_title="경제성 분석 결과")
+                _ed2.download_button(
+                    "📈 Excel 전체 결과(xlsx)", _econ_xls,
+                    "경제성분석_전체결과.xlsx",
+                    key="dl_econ_all_xlsx", width="stretch",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except Exception as _ex:
+                _ed2.caption(f"Excel 파일 생성 실패 ({type(_ex).__name__})")
+
         report_button("cap_econ")
 
     # ---------------- 부분예산 · MRR ----------------
-    else:
+    elif emode.startswith("📘"):
         with st.expander("ℹ️ 부분예산분석이란? (CIMMYT 방식)"):
             st.markdown("""
 새 기술(신품종·신자재 등)을 **농가에 권장할 만한가**를 판단하는 국제 표준 방법입니다.
@@ -7868,7 +10141,7 @@ elif menu == "💰 경제성분석":
 2. **순편익** = 조정 조수입 − 가변비용(처리마다 달라지는 비용만)
 3. **지배분석** — 비용이 더 드는데 순편익이 낮은 처리는 탈락(D 표시)
 4. **한계수익률(MRR)** = 순편익 증가분 ÷ 비용 증가분 × 100
-5. **판정** — MRR이 기준치(보통 100%, 즉 1원 더 써서 1원 더 버는 수준) 이상이면 권장
+5. **판정** — MRR을 사용자가 정한 최소수용기준과 비교합니다. 100%는 보수적으로 쓸 수 있는 기본값일 뿐 절대 기준은 아닙니다.
 """)
         allc = df.columns.tolist()
         c1, c2, c3 = st.columns(3)
@@ -7886,7 +10159,8 @@ elif menu == "💰 경제성분석":
         c4, c5 = st.columns(2)
         adj = c4.slider("수량 조정률(%)", 0, 30, 10, 5, key="pb_adj",
                        help="시험포장→농가 조건 보정. 보통 10%")
-        minmrr = c5.number_input("권장 기준 MRR(%)", 0, 500, 100, 10, key="pb_minmrr")
+        minmrr = c5.number_input("최소수용 MRR 기준(%)", 0, 500, 100, 10, key="pb_minmrr",
+                                 help="기본값 100%는 보수적인 출발점입니다. 기술의 위험도·추가자본·농가 여건에 따라 조정하세요.")
         _pb_unit_confirm = st.checkbox(
             "수량=kg/입력 기준면적, 단가=원/kg, 가변비용·부산물=원/입력 기준면적임을 확인했습니다.",
             key="pb_unit_confirm")
@@ -7950,7 +10224,7 @@ elif menu == "💰 경제성분석":
                 und["MRR(%)"] = pd.to_numeric(und["MRR(%)"], errors="coerce").round(1)
 
             st.markdown("#### 1) 부분예산표 (지배분석 포함)")
-            st.dataframe(money_table(b[[trt, "기준 처리", "조정 전 수량", "조정수량",
+            smart_table(money_table(b[[trt, "기준 처리", "조정 전 수량", "조정수량",
                                        "주산물 편익", "부산물 편익", "총편익",
                                        "가변비용", "순편익", "지배"]],
                                      dec_overrides={"조정 전 수량": 1, "조정수량": 1}),
@@ -7961,10 +10235,10 @@ elif menu == "💰 경제성분석":
             _mcols = [trt, "가변비용", "순편익", "비용 증가액", "순편익 증가액",
                       "MRR(%)", "권장 여부 및 근거"]
             _mcols = [c for c in _mcols if c in und.columns]
-            st.dataframe(money_table(und[_mcols]), width="stretch", hide_index=True)
+            smart_table(money_table(und[_mcols]), width="stretch", hide_index=True)
             st.caption("**MRR(%) = 순편익 증가액 ÷ 비용 증가액 × 100** — "
                        "비용을 1원 더 썼을 때 순편익이 몇 % 늘어나는지를 뜻합니다.\n\n"
-                       f"현재 권장 기준: **{minmrr}%**. 기준을 넘더라도 "
+                       f"현재 사용자가 설정한 최소수용 기준: **{minmrr}%**. 이 값은 절대 기준이 아니며, 기준을 넘더라도 "
                        "① 반복수·자료 신뢰도 ② 가격·수량 변동 시에도 유지되는지 "
                        f"③ 조정수량 가정({adj}% 감액)의 타당성을 함께 확인하세요.")
 
@@ -7992,8 +10266,8 @@ elif menu == "💰 경제성분석":
             st.info("💡 " + txt)
 
             fig, ax = plt.subplots(figsize=figsize())
-            ax.plot(b_raw["가변비용"], b_raw["순편익"], "o--", color="#999", label="전체")
-            ax.plot(und_raw["가변비용"], und_raw["순편익"], "o-", color=pcolor(), lw=2, label="비지배(효율경계)")
+            ax.plot(b_raw["가변비용"], b_raw["순편익"], "o--", color="#9AAABB", label="전체", linewidth=1.4, markersize=5)
+            ax.plot(und_raw["가변비용"], und_raw["순편익"], "o-", color="#3D6F9F", lw=2.2, markersize=6, label="비지배(효율경계)")
             for _, r in b_raw.iterrows():
                 ax.annotate(str(r[trt]), (r["가변비용"], r["순편익"]), fontsize=8,
                             xytext=(3, 4), textcoords="offset points")
@@ -8011,6 +10285,120 @@ elif menu == "💰 경제성분석":
             report_capture("cap_pb", "신기술 경제성(부분예산·MRR)", txt, out_show, png)
         report_button("cap_pb")
 
+    # ---------------- 시설·장기투자 ----------------
+    else:
+        st.markdown("### 📙 시설·장기투자 경제성")
+        st.caption("비가림시설·하우스·건조기·선별기·스마트팜 장비처럼 여러 해 사용하는 투자는 "
+                   "단년도 소득분석이 아니라 미래 편익과 비용을 현재가치로 환산해 판단합니다.")
+        with st.expander("ℹ️ 지표 읽는 법", expanded=True):
+            st.markdown("""
+- **NPV(순현재가치)** = 할인된 편익 − 할인된 비용. **0보다 크면** 입력한 할인율 기준 경제성이 있습니다.
+- **할인 B/C** = 편익 현재가 ÷ 비용 현재가. **1보다 크면** 할인된 편익이 할인된 비용보다 큽니다.
+- **IRR(내부수익률)** = NPV를 0으로 만드는 수익률. 기준 할인율보다 높을수록 유리합니다.
+- **회수기간** = 누적 순현금흐름으로 최초투자비를 회수하는 데 걸리는 기간입니다.
+
+※ 이 화면의 **할인 B/C**가 시설투자에서 사용하는 정식 B/C입니다. 📗 소득분석의 `단년도 총수입/생산비`와 구분합니다.
+""")
+        _iv1, _iv2, _iv3 = st.columns(3)
+        _initial = _iv1.number_input("최초 투자비 (원)", 0, 5000000000, 50000000, 1000000,
+                                    key="inv_initial")
+        _life = _iv2.number_input("내용연수 (년)", 1, 50, 10, 1, key="inv_life")
+        _disc = _iv3.number_input("할인율 (%)", 0.0, 30.0, 5.0, 0.1, key="inv_disc")
+        _iv4, _iv5, _iv6 = st.columns(3)
+        _annual_b = _iv4.number_input("연간 추가 편익/수입 (원/년)", 0, 5000000000, 10000000, 100000,
+                                     key="inv_benefit",
+                                     help="시설 도입으로 매년 추가되는 판매수입·비용절감 등 금전 편익")
+        _annual_c = _iv5.number_input("연간 추가 운영비 (원/년)", 0, 5000000000, 2000000, 100000,
+                                     key="inv_cost",
+                                     help="유지보수·전기·소모품·추가노동비 등 매년 추가로 발생하는 비용")
+        _salvage = _iv6.number_input("내용연수 말 잔존가치 (원)", 0, 5000000000, 0, 100000,
+                                    key="inv_salvage")
+        with st.expander("📈 연도별 증가율을 반영하려면"):
+            _ig1, _ig2 = st.columns(2)
+            _bg = _ig1.number_input("연간 편익 증가율 (%)", -50.0, 50.0, 0.0, 0.5, key="inv_bg")
+            _cg = _ig2.number_input("연간 운영비 증가율 (%)", -50.0, 50.0, 0.0, 0.5, key="inv_cg")
+            st.caption("가격상승·생산성 변화·운영비 상승을 가정할 때만 입력하세요. 모르면 0%로 두는 것이 안전합니다.")
+
+        if keep_running("investment", "장기투자 경제성 분석 실행"):
+            try:
+                _inv_table, _inv = calculate_investment_analysis(
+                    _initial, _life, _disc, _annual_b, _annual_c,
+                    salvage_value=_salvage,
+                    annual_benefit_growth_percent=_bg,
+                    annual_cost_growth_percent=_cg)
+            except ValueError as _ex:
+                st.error(f"장기투자 계산을 중단했습니다: {_ex}")
+                st.stop()
+
+            _npv = float(_inv["NPV"])
+            _bcr = _inv["할인 B/C"]
+            _irr = _inv["IRR(%)"]
+            _dpb = _inv["할인 회수기간(년)"]
+            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+            _mc1.metric("NPV", f"{_npv:,.0f}원")
+            _mc2.metric("할인 B/C", f"{_bcr:.2f}" if pd.notna(_bcr) else "계산 불가")
+            _mc3.metric("IRR", f"{_irr:.1f}%" if pd.notna(_irr) else "계산 불가")
+            _mc4.metric("할인 회수기간", f"{_dpb:.1f}년" if pd.notna(_dpb) else "내용연수 내 미회수")
+            if _npv > 0 and (pd.isna(_bcr) or _bcr > 1):
+                st.success(f"✅ 할인율 {_disc:g}% 기준 NPV가 양수여서 입력 조건에서는 경제성이 있습니다.")
+            elif _npv < 0:
+                st.warning(f"⚠️ 할인율 {_disc:g}% 기준 NPV가 음수여서 입력 조건에서는 경제성이 없습니다.")
+            else:
+                st.info("NPV가 0에 가까워 경제성 판단이 경계에 있습니다.")
+
+            _show_inv = _inv_table.copy()
+            for _c in ["편익", "비용", "순현금흐름", "편익현재가", "비용현재가", "순현재가"]:
+                _show_inv[_c] = _show_inv[_c].map(lambda v: round_half_up(v))
+            _show_inv["할인계수"] = _show_inv["할인계수"].round(4)
+            st.markdown("#### 연도별 할인 현금흐름")
+            smart_table(money_table(_show_inv), width="stretch", hide_index=True)
+
+            st.markdown("#### 민감도 — 편익·운영비가 달라지면 NPV는?")
+            _inv_sens = investment_sensitivity_table(
+                _initial, _life, _disc, _annual_b, _annual_c, _salvage,
+                change_rates=(-20, -10, 0, 10, 20))
+            _inv_sens_show = _inv_sens.copy()
+            for _c in _inv_sens_show.columns[1:]:
+                _inv_sens_show[_c] = _inv_sens_show[_c].map(lambda v: round_half_up(v))
+            smart_table(money_table(_inv_sens_show), width="stretch", hide_index=True)
+
+            _inv_txt = ("○ 시설·장기투자 경제성 분석 결과\n"
+                        f"  - 최초투자비 {_initial:,.0f}원, 내용연수 {_life}년, 할인율 {_disc:g}%를 적용하였다.\n"
+                        f"  - NPV는 {_npv:,.0f}원, 할인 B/C는 "
+                        f"{(_bcr if pd.notna(_bcr) else float('nan')):.2f}로 산출되었다.\n"
+                        + (f"  - IRR은 {_irr:.1f}%로 산출되었다.\n" if pd.notna(_irr)
+                           else "  - 현금흐름 구조상 IRR은 계산되지 않았다.\n")
+                        + (f"  - 할인 회수기간은 {_dpb:.1f}년이었다.\n" if pd.notna(_dpb)
+                           else "  - 내용연수 안에는 할인 기준 투자비를 회수하지 못하였다.\n")
+                        + ("  - 입력한 가정에서는 경제성이 있는 것으로 판단된다."
+                           if _npv > 0 else "  - 입력한 가정에서는 경제성이 없는 것으로 판단된다."))
+            st.markdown("###### 📋 보고서용 문장")
+            st.code(_inv_txt, language=None)
+            _inv_blocks = [
+                {"text": _inv_txt},
+                {"caption": "장기투자 연도별 할인 현금흐름", "table": _show_inv},
+                {"caption": "장기투자 NPV 민감도", "table": _inv_sens_show},
+            ]
+            report_capture("cap_inv", "시설·장기투자 경제성", None, blocks=_inv_blocks)
+            log_action("시설·장기투자 경제성 분석 실행")
+            st.markdown("### 📥 장기투자 결과 다운로드")
+            _id1, _id2 = st.columns(2)
+            try:
+                _h = build_report_hwpx([{"heading":"시설·장기투자 경제성", "blocks":_inv_blocks}],
+                                       doc_title="시설·장기투자 경제성 분석 결과")
+                _id1.download_button("📘 한글 보고서(hwpx)", _h, "장기투자_경제성분석.hwpx",
+                                     key="dl_inv_hwp", width="stretch")
+            except Exception as _ex:
+                _id1.caption(f"한글 파일 생성 실패 ({type(_ex).__name__})")
+            try:
+                _x = make_xlsx_multi(_inv_blocks, doc_title="시설·장기투자 경제성 분석 결과")
+                _id2.download_button("📈 Excel 결과(xlsx)", _x, "장기투자_경제성분석.xlsx",
+                                     key="dl_inv_xlsx", width="stretch",
+                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except Exception as _ex:
+                _id2.caption(f"Excel 파일 생성 실패 ({type(_ex).__name__})")
+        report_button("cap_inv")
+
 # ================================================================ 설문 분석
 elif menu == "📋 설문조사 분석":
     st.title("📋 설문조사 분석")
@@ -8025,7 +10413,7 @@ elif menu == "📋 설문조사 분석":
         st.caption("각 열의 값을 보고 문항 유형을 자동으로 판별한 뒤, 유형에 맞는 그래프와 분석을 한 번에 만듭니다.")
         det = detect_question_types(df)
         st.markdown("#### 📋 문항 유형 자동 판별 결과")
-        st.dataframe(det, width="stretch", hide_index=True)
+        smart_table(det, width="stretch", hide_index=True)
         likert = det[det["추정 유형"] == "리커트 척도"]["열 이름"].tolist()
         single = det[det["추정 유형"] == "객관식(단일선택)"]["열 이름"].tolist()
         multi = det[det["추정 유형"] == "다중응답"]["열 이름"].tolist()
@@ -8080,50 +10468,11 @@ elif menu == "📋 설문조사 분석":
         c1.metric("📊 리커트", len(likert)); c2.metric("👥 응답자 특성", len(demo_q))
         c3.metric("🔘 객관식 문항", len(single_q))
         c4.metric("☑️ 다중응답", len(multi)); c5.metric("✍️ 주관식", len(openq))
-        auto_scale_min = auto_scale_max = auto_negative_max = auto_positive_min = None
-        if likert:
-            _lk_vals = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in likert], ignore_index=True).dropna()
-            _obs_min = int(np.floor(_lk_vals.min())) if len(_lk_vals) else 1
-            _obs_max = int(np.ceil(_lk_vals.max())) if len(_lk_vals) else 5
-            _default_min = 1 if _obs_min >= 1 else max(0, _obs_min)
-            _default_max = min(10, max(_default_min + 1, _obs_max))
-            with st.expander("🎚️ 리커트 척도 설정 (자동분석)", expanded=False):
-                st.caption("자동분석에서 선택된 리커트 문항은 같은 척도를 쓴다고 가정합니다. "
-                           "실제 설문 척도와 다르면 여기서 수정하세요.")
-                _a1, _a2 = st.columns(2)
-                auto_scale_min = int(_a1.number_input("척도 최소값", 0, 9, _default_min,
-                                                       key="auto_lk_min"))
-                auto_scale_max = int(_a2.number_input("척도 최대값", 1, 10, _default_max,
-                                                       key="auto_lk_max"))
-                _ar = (likert_scale_rules(auto_scale_min, auto_scale_max)
-                       if auto_scale_max > auto_scale_min
-                       else {"negative_max": auto_scale_min,
-                             "positive_min": min(auto_scale_min + 1, 10)})
-                _a3, _a4 = st.columns(2)
-                auto_negative_max = int(_a3.number_input("부정 기준 (이 점수 이하)", 0, 10,
-                                                          _ar["negative_max"], key="auto_lk_neg"))
-                auto_positive_min = int(_a4.number_input("긍정 기준 (이 점수 이상)", 0, 10,
-                                                          _ar["positive_min"], key="auto_lk_pos"))
-                _auto_lk_rule_ok = (auto_scale_max > auto_scale_min and
-                                    auto_scale_min <= auto_negative_max < auto_positive_min <= auto_scale_max)
-                if not _auto_lk_rule_ok:
-                    st.warning("⚠️ 척도/기준 설정을 확인하세요. 최소값 < 최대값이고, "
-                               "최소값 ≤ 부정 기준 < 긍정 기준 ≤ 최대값이어야 합니다.")
         chart_style = st.radio("응답자 특성 그래프", ["도넛", "원형", "막대"],
                                horizontal=True, key="svy_chart")
         st.caption("판별이 잘못되었으면 위 탭에서 유형을 직접 골라 분석하세요.")
 
         if keep_running("autoan", "🚀 자동 분석 실행"):
-            if likert:
-                _lk_problems = validate_likert_frame(df, likert, auto_scale_min, auto_scale_max)
-                if _lk_problems:
-                    st.error("⚠️ 자동분류된 리커트 문항에 척도 범위를 벗어난 값이 있습니다. "
-                             "척도 설정을 고치거나 문항 유형을 다시 지정하세요.\n\n- "
-                             + "\n- ".join(_lk_problems[:12]))
-                    st.stop()
-                if not _auto_lk_rule_ok:
-                    st.error("⚠️ 리커트 척도/부정·긍정 기준 설정이 올바르지 않아 분석할 수 없습니다.")
-                    st.stop()
             rep_blocks = []
 
             # 1) 응답자 특성 · 객관식 문항 (원형/도넛) — 같은 그리기 방식을 나눠서 쓴다
@@ -8159,10 +10508,10 @@ elif menu == "📋 설문조사 분석":
                             plt.tight_layout()
                         else:
                             fig = pie_chart(vc, c, donut=(chart_style == "도넛"))
-                        st.pyplot(fig); plt.close(fig)
+                        show_plot(fig); plt.close(fig)
                         _t = pd.DataFrame({c: vc.index.astype(str), "빈도(명)": vc.values,
                                            "비율(%)": (vc.values/vc.sum()*100).round(1)})
-                        st.dataframe(_t, width="stretch", hide_index=True)
+                        smart_table(_t, width="stretch", hide_index=True)
                         rep_blocks.append({"caption": f"{cap_prefix} - {c}",
                                            "table": _t,
                                            "image": fig_to_png(fig, show=False)})
@@ -8173,48 +10522,71 @@ elif menu == "📋 설문조사 분석":
             # 2) 리커트 (요약 + 다이버징 + 평균 막대)
             if likert:
                 st.markdown("## 📊 리커트 문항 분석")
-                sdat = df[likert].apply(pd.to_numeric, errors="coerce")
+                sdat = df[likert]  # 문항별 기술통계는 문항 각자의 결측만 제외 (교집합 아님)
                 cc = sdat.dropna()  # 크론바흐 α는 문항 간 상관을 봐야 하므로 전 문항 응답한 사람만
+                smax = int(sdat.max().max())
+                _pos_cut, _neg_cut = likert_cutoffs(smax)
+                _pos_col = f"긍정({_pos_cut}점↑)%"
+                _neg_col = f"부정({_neg_cut}점↓)%"
                 summ = pd.DataFrame({
                     "문항": likert,
                     "응답자(명)": [int(sdat[q].notna().sum()) for q in likert],
                     "평균": [round(sdat[q].dropna().mean(), 2) for q in likert],
                     "표준편차": [round(sdat[q].dropna().std(), 2) for q in likert],
-                    "긍정 응답(명)": [int((sdat[q].dropna() >= auto_positive_min).sum()) for q in likert],
-                    f"긍정({auto_positive_min}점↑)%": [round((sdat[q].dropna() >= auto_positive_min).mean()*100, 1) for q in likert],
-                    "부정 응답(명)": [int((sdat[q].dropna() <= auto_negative_max).sum()) for q in likert],
-                    f"부정({auto_negative_max}점↓)%": [round((sdat[q].dropna() <= auto_negative_max).mean()*100, 1) for q in likert]})
+                    "긍정 응답(명)": [int((sdat[q].dropna() >= _pos_cut).sum()) for q in likert],
+                    _pos_col: [round((sdat[q].dropna() >= _pos_cut).mean()*100, 1) for q in likert],
+                    "부정 응답(명)": [int((sdat[q].dropna() <= _neg_cut).sum()) for q in likert],
+                    _neg_col: [round((sdat[q].dropna() <= _neg_cut).mean()*100, 1) for q in likert]})
                 a_ = cronbach_alpha(cc)
-                lvl = cronbach_level(a_)
+                lvl = (("매우 높음" if a_ >= .9 else "높음" if a_ >= .8 else "양호" if a_ >= .7 else "낮음")
+                       if np.isfinite(a_) else "산출 불가")
                 m1, m2, m3 = st.columns(3)
                 m1.metric("문항 수", len(likert))
-                _all_lk = pd.concat([sdat[q].dropna() for q in likert])
-                m2.metric("평균 만족도", f"{_all_lk.mean():.2f}" if len(_all_lk) else "계산 불가")
-                m3.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "계산 불가", lvl)
+                m2.metric("평균 만족도", f"{pd.concat([sdat[q].dropna() for q in likert]).mean():.2f}")
+                m3.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "-", lvl)
                 if len(cc) < len(df):
                     st.caption(f"※ 크론바흐 α는 {len(likert)}개 문항에 모두 응답한 {len(cc)}명 기준입니다. "
                                f"(문항별 응답자 수는 위 표의 '응답자(명)' 참고)")
-                counts = {q: [int((sdat[q].dropna() == v).sum()) for v in range(auto_scale_min, auto_scale_max+1)] for q in likert}
+                counts = {q: [int((sdat[q].dropna() == v).sum()) for v in range(1, smax+1)] for q in likert}
                 st.markdown("##### 응답 분포 (다이버징 차트)")
-                figd = likert_diverging(counts, [f"{v}점" for v in range(auto_scale_min, auto_scale_max+1)], "문항별 응답 분포")
+                figd = likert_diverging(counts, [f"{v}점" for v in range(1, smax+1)], "문항별 응답 분포")
                 dv_png = fig_to_png(figd)
                 col_a, col_b = st.columns(2)
+                _sv_h = max(3.8, len(likert) * 0.48 + 1.4)
                 with col_a:
-                    fig, ax = plt.subplots(figsize=figsize())
+                    fig, ax = plt.subplots(figsize=(max(5.2, figsize()[0]), _sv_h))
                     order = summ.sort_values("평균")
-                    bars = ax.barh(order["문항"], order["평균"], color=pcolor())
-                    ax.set_xlim(auto_scale_min, auto_scale_max); ax.set_xlabel("평균 점수"); deco(ax, "문항별 평균")
+                    _vals = order["평균"].astype(float).tolist()
+                    bars = ax.barh(order["문항"], order["평균"],
+                                   color=bar_colors(values=_vals), height=.58, edgecolor="none")
+                    ax.set_xlim(0, smax); ax.set_xlabel("평균 점수"); deco(ax, "문항별 평균", ylabel_top=False)
+                    ax.grid(axis="y", visible=False)
                     for bar, v in zip(bars, order["평균"]):
-                        ax.text(v+0.05, bar.get_y()+bar.get_height()/2, f"{v}", va="center", fontsize=8)
-                    st.pyplot(fig); plt.close(fig)
+                        ax.text(min(float(v)+0.05, smax-0.02), bar.get_y()+bar.get_height()/2,
+                                f"{v:.2f}", va="center", fontsize=8.5, color="#33495C")
+                    show_plot(fig); plt.close(fig)
                 with col_b:
-                    fig, ax = plt.subplots(figsize=figsize())
-                    ax.barh(summ["문항"], summ[f"긍정({auto_positive_min}점↑)%"], color="#4f81bd", label="긍정")
-                    ax.barh(summ["문항"], -summ[f"부정({auto_negative_max}점↓)%"], color="#c0504d", label="부정")
-                    ax.axvline(0, color="#555", lw=1); ax.set_xlabel("← 부정 %    긍정 % →")
-                    ax.invert_yaxis(); ax.legend(fontsize=8); deco(ax, "긍정·부정 응답률")
-                    st.pyplot(fig); plt.close(fig)
-                st.dataframe(summ, width="stretch")
+                    fig, ax = plt.subplots(figsize=(max(5.2, figsize()[0]), _sv_h))
+                    _bp = ax.barh(summ["문항"], summ[_pos_col], color="#4576AB",
+                                      label="긍정", height=.58)
+                    _bn = ax.barh(summ["문항"], -summ[_neg_col], color="#C96767",
+                                      label="부정", height=.58)
+                    _lim = max(25.0, float(max(summ[_pos_col].max(), summ[_neg_col].max()))) * 1.30
+                    ax.set_xlim(-_lim, _lim)
+                    ax.axvline(0, color="#000000", lw=.9); ax.set_xlabel("← 부정 응답률(%)     긍정 응답률(%) →")
+                    ax.invert_yaxis(); deco(ax, "긍정·부정 응답률", ylabel_top=False)
+                    ax.grid(axis="y", visible=False)
+                    for _b, _v in zip(_bp, summ[_pos_col]):
+                        ax.text(float(_v)+_lim*.025, _b.get_y()+_b.get_height()/2, f"{float(_v):.1f}%",
+                                va="center", ha="left", fontsize=8, color="#31485E")
+                    for _b, _v in zip(_bn, summ[_neg_col]):
+                        ax.text(-float(_v)-_lim*.025, _b.get_y()+_b.get_height()/2, f"{float(_v):.1f}%",
+                                va="center", ha="right", fontsize=8, color="#7A3F3F")
+                    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16),
+                              ncol=2, frameon=False, borderaxespad=0)
+                    fig.subplots_adjust(bottom=.23, top=.88, left=.27, right=.97)
+                    show_plot(fig); plt.close(fig)
+                smart_table(summ, width="stretch")
                 rep_blocks.append({"caption": "리커트 문항 요약", "table": summ, "image": dv_png})
 
             # 3) 다중응답 (가로 막대)
@@ -8232,16 +10604,18 @@ elif menu == "📋 설문조사 분석":
                     cc1, cc2 = st.columns([1, 1])
                     with cc1:
                         st.write(f"**{c}** (응답자 {len(ser)}명)")
-                        st.dataframe(t, width="stretch")
+                        smart_table(t, width="stretch")
                     with cc2:
                         fig, ax = plt.subplots(figsize=figsize())
-                        _bars = ax.barh(t["응답 항목"][::-1], t["응답률(%)"][::-1], color=pcolor())
+                        _vals = t["응답률(%)"][::-1].tolist()
+                        _bars = ax.barh(t["응답 항목"][::-1], t["응답률(%)"][::-1],
+                                        color=bar_colors(values=_vals))
                         for _b, _v, _n in zip(_bars, t["응답률(%)"][::-1], t["응답 수"][::-1]):
                             ax.text(_v + 1, _b.get_y() + _b.get_height()/2,
                                     f"{_v}% ({int(_n)}명)", va="center", fontsize=8)
                         ax.set_xlim(0, max(t["응답률(%)"]) * 1.25)
                         ax.set_xlabel("응답률(%)"); deco(ax, c)
-                        st.pyplot(fig); plt.close(fig)
+                        show_plot(fig); plt.close(fig)
                     rep_blocks.append({"caption": f"다중응답 - {c}", "table": t,
                                        "image": fig_to_png(fig, show=False)})
 
@@ -8253,7 +10627,7 @@ elif menu == "📋 설문조사 분석":
                     st.write(f"**{c}** — 응답 {len(ser)}건 "
                              f"(전체 {len(df)}명 중 {len(ser)/max(len(df),1)*100:.1f}%)")
                     op_tbl = pd.DataFrame({"번호": range(1, len(ser)+1), "의견": ser.values})
-                    st.dataframe(op_tbl, width="stretch", hide_index=True, height=260)
+                    smart_table(op_tbl, width="stretch", hide_index=True, height=260)
                     _lim = st.number_input(
                         f"보고서에 담을 '{c}' 의견 수", 1, max(len(ser), 1), max(len(ser), 1),
                         key=f"svy_openlim_{c}",
@@ -8280,6 +10654,7 @@ elif menu == "📋 설문조사 분석":
                                         "'유의하다'는 표현은 쓰지 마세요.",
                                         capture_slot="cap_auto")
         report_button("cap_auto")
+        survey_download_panel("cap_auto", "auto", "설문_자동분석")
 
     # ---------- 리커트 ----------
     # ---------- 리커트 ----------
@@ -8291,37 +10666,19 @@ elif menu == "📋 설문조사 분석":
                             default=[c for c in num_cols if not _looks_like_nominal_code(c)], key="s_q")
         demo = reorder_by_rank(demo, "s_d", "↕️ 응답자 특성 표시 순서 바꾸기")
         qs = reorder_by_rank(qs, "s_q", "↕️ 문항 표시 순서 바꾸기")
-        sc1, sc2 = st.columns(2)
-        scale_min = int(sc1.number_input("척도 최소값", 0, 9, 1, key="sv_scale_min"))
-        scale_max = int(sc2.number_input("척도 최대값", 1, 10, 5, key="sv_scale_max"))
-        _rules = (likert_scale_rules(scale_min, scale_max) if scale_max > scale_min
-                  else {"negative_max": scale_min, "positive_min": min(scale_min + 1, 10)})
-        th1, th2 = st.columns(2)
-        negative_max = int(th1.number_input("부정 응답 기준 (이 점수 이하)", 0, 10,
-                                             _rules["negative_max"], key="sv_neg_max"))
-        positive_min = int(th2.number_input("긍정 응답 기준 (이 점수 이상)", 0, 10,
-                                             _rules["positive_min"], key="sv_pos_min"))
-        _lk_rule_ok = scale_max > scale_min and scale_min <= negative_max < positive_min <= scale_max
-        if not _lk_rule_ok:
-            st.warning("⚠️ 척도/기준 설정을 확인하세요. 최소값 < 최대값이고, "
-                       "최소값 ≤ 부정 기준 < 긍정 기준 ≤ 최대값이어야 합니다.")
+        scale_max = st.number_input("척도 최대값 (5점 척도면 5)", 2, 10, 5)
+        _pos_cut, _neg_cut = likert_cutoffs(scale_max)
+        _pos_col = f"긍정({_pos_cut}점↑)%"
+        _neg_col = f"부정({_neg_cut}점↓)%"
         if qs and keep_running("svlikert", "리커트 분석 실행"):
-            _lk_problems = validate_likert_frame(df, qs, scale_min, scale_max)
-            if _lk_problems:
-                st.error("⚠️ 리커트 척도 범위와 맞지 않는 응답이 있습니다. 분석 전에 수정하세요.\n\n- "
-                         + "\n- ".join(_lk_problems[:12]))
-                st.stop()
-            if not _lk_rule_ok:
-                st.error("⚠️ 리커트 척도/부정·긍정 기준 설정이 올바르지 않아 분석할 수 없습니다.")
-                st.stop()
-            s = df[qs].apply(pd.to_numeric, errors="coerce")  # 검증 후 숫자형으로 통일
+            s = df[qs]  # 문항별 기술통계는 문항 각자의 결측만 제외 (교집합으로 자르지 않음)
             cc = s.dropna()  # 크론바흐 α·문항 제외 α는 전 문항 응답자만 필요
             st.markdown("#### 1) 응답자 특성")
             if demo:
                 for d_ in demo:
                     vc = df[d_].value_counts()
                     st.write(f"**{d_}** (n={int(vc.sum())})")
-                    st.dataframe(pd.DataFrame({d_: vc.index.astype(str), "빈도": vc.values,
+                    smart_table(pd.DataFrame({d_: vc.index.astype(str), "빈도": vc.values,
                                                "비율(%)": (vc.values/vc.sum()*100).round(1)}),
                                  width="stretch")
             else:
@@ -8334,52 +10691,76 @@ elif menu == "📋 설문조사 분석":
                 "평균": [round(s[q].dropna().mean(), 2) for q in qs],
                 "표준편차": [round(s[q].dropna().std(), 2) for q in qs],
                 "중앙값": [round(s[q].dropna().median(), 1) for q in qs],
-                "긍정 응답(명)": [int((s[q].dropna() >= positive_min).sum()) for q in qs],
-                f"긍정({positive_min}점↑)%": [round((s[q].dropna() >= positive_min).mean()*100, 1) for q in qs],
-                "부정 응답(명)": [int((s[q].dropna() <= negative_max).sum()) for q in qs],
-                f"부정({negative_max}점↓)%": [round((s[q].dropna() <= negative_max).mean()*100, 1) for q in qs]})
-            st.dataframe(summ, width="stretch")
+                "긍정 응답(명)": [int((s[q].dropna() >= _pos_cut).sum()) for q in qs],
+                _pos_col: [round((s[q].dropna() >= _pos_cut).mean()*100, 1) for q in qs],
+                "부정 응답(명)": [int((s[q].dropna() <= _neg_cut).sum()) for q in qs],
+                _neg_col: [round((s[q].dropna() <= _neg_cut).mean()*100, 1) for q in qs]})
+            smart_table(summ, width="stretch")
 
             st.markdown("#### 3) 신뢰도 분석")
             a_ = cronbach_alpha(cc)
-            lvl = cronbach_level(a_)
+            lvl = (("매우 높음" if a_ >= .9 else "높음" if a_ >= .8 else "양호" if a_ >= .7 else "낮음")
+                   if np.isfinite(a_) else "산출 불가")
             c1, c2 = st.columns(2)
-            c1.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "계산 불가")
-            c2.metric("신뢰도 수준", lvl)
+            c1.metric("크론바흐 α", f"{a_:.3f}" if np.isfinite(a_) else "-"); c2.metric("신뢰도 수준", lvl)
             if len(cc) < len(df):
                 st.caption(f"※ 크론바흐 α는 {len(qs)}개 문항에 모두 응답한 {len(cc)}명 기준입니다.")
             drop = pd.DataFrame({"제외 문항": qs,
                                  "제외 시 α": [round(cronbach_alpha(cc.drop(columns=[q])), 3) for q in qs]})
             st.write("**문항 제외 시 신뢰도** (α가 크게 올라가면 그 문항은 재검토 대상)")
-            st.dataframe(drop, width="stretch")
+            smart_table(drop, width="stretch")
 
             st.markdown("#### 4) 응답 분포")
-            dist = pd.DataFrame({q: [int((s[q].dropna() == v).sum()) for v in range(scale_min, scale_max+1)] for q in qs},
-                                index=[f"{v}점" for v in range(scale_min, scale_max+1)]).T
+            dist = pd.DataFrame({q: [int((s[q].dropna() == v).sum()) for v in range(1, scale_max+1)] for q in qs},
+                                index=[f"{v}점" for v in range(1, scale_max+1)]).T
             # 인원과 비율을 함께 보여준다 (예: 12명 (20.0%))
             _dist_show = dist.copy().astype(object)
             for q in qs:
                 _tot = max(int(dist.loc[q].sum()), 1)
-                for v in range(scale_min, scale_max+1):
+                for v in range(1, scale_max+1):
                     _cnt = int(dist.loc[q, f"{v}점"])
                     _dist_show.loc[q, f"{v}점"] = f"{_cnt}명 ({_cnt/_tot*100:.1f}%)"
             _dist_show["합계"] = [f"{int(dist.loc[q].sum())}명 (100.0%)" for q in qs]
-            st.dataframe(_dist_show.reset_index().rename(columns={"index": "문항"}),
+            smart_table(_dist_show.reset_index().rename(columns={"index": "문항"}),
                          width="stretch")
             st.caption("각 칸은 **응답 인원(명)과 비율(%)** 입니다.")
             st.markdown("##### 다이버징 차트 (중립 기준 좌우 분리)")
-            counts_d = {q: [int((s[q].dropna() == v).sum()) for v in range(scale_min, scale_max+1)] for q in qs}
-            figd = likert_diverging(counts_d, [f"{v}점" for v in range(scale_min, scale_max+1)], "문항별 응답 분포")
+            counts_d = {q: [int((s[q].dropna() == v).sum()) for v in range(1, scale_max+1)] for q in qs}
+            figd = likert_diverging(counts_d, [f"{v}점" for v in range(1, scale_max+1)], "문항별 응답 분포")
             png = fig_to_png(figd)
-            fig, axes = plt.subplots(1, 2, figsize=(figsize()[0]*2, figsize()[1]))
-            axes[0].barh(summ["문항"], summ["평균"], color=pcolor()); axes[0].invert_yaxis()
-            axes[0].set_xlim(scale_min, scale_max); axes[0].set_xlabel("평균"); deco(axes[0], "문항별 평균")
+            _lk_h = max(4.2, len(qs) * 0.55 + 1.5)
+            fig, axes = plt.subplots(1, 2, figsize=(max(11.5, figsize()[0]*2), _lk_h))
+            _avg_vals = summ["평균"].astype(float).tolist()
+            axes[0].barh(summ["문항"], summ["평균"],
+                         color=bar_colors(values=_avg_vals), height=.58)
+            axes[0].invert_yaxis(); axes[0].set_xlim(0, scale_max)
+            axes[0].set_xlabel("평균 점수"); deco(axes[0], "문항별 평균", ylabel_top=False)
+            axes[0].grid(axis="y", visible=False)
             bottom = np.zeros(len(qs))
-            for v in range(scale_min, scale_max+1):
+            _mid = scale_max // 2
+            _neg_full = ["#F3D8D8", "#E8AAAA", "#C96767", "#A94D4D", "#8F3E3E"]
+            _pos_full = ["#D6E7F4", "#9EC5E5", "#6291C2", "#4576AB", "#2D5A8E"]
+            if scale_max % 2 == 1:
+                _lk_cols = (_neg_full[-_mid:] + ["#E3E9EF"] + _pos_full[:_mid])
+            else:
+                _lk_cols = (_neg_full[-_mid:] + _pos_full[:_mid])
+            for v in range(1, scale_max+1):
                 vals = dist[f"{v}점"].values
-                axes[1].barh(qs, vals, left=bottom, label=f"{v}점"); bottom += vals
-            axes[1].invert_yaxis(); deco(axes[1], "응답 분포(누적)"); axes[1].legend(fontsize=7, ncol=min(scale_max - scale_min + 1, 6))
-            plt.tight_layout(); st.pyplot(fig); plt.close(fig)
+                _bars = axes[1].barh(qs, vals, left=bottom, label=f"{v}점",
+                                     color=_lk_cols[v-1], height=.58, edgecolor="white", linewidth=.7)
+                for _b, _vv, _left, _q in zip(_bars, vals, bottom, qs):
+                    _tot = max(float(dist.loc[_q].sum()), 1.0)
+                    if float(_vv) / _tot >= .10:
+                        axes[1].text(float(_left)+float(_vv)/2, _b.get_y()+_b.get_height()/2,
+                                     f"{float(_vv)/_tot*100:.0f}%", ha="center", va="center",
+                                     fontsize=7, color="#23394D", fontweight="bold")
+                bottom += vals
+            axes[1].invert_yaxis(); deco(axes[1], "응답 분포(누적)", ylabel_top=False)
+            axes[1].grid(axis="y", visible=False)
+            axes[1].legend(fontsize=7.5, ncol=min(scale_max, 5), loc="upper center",
+                           bbox_to_anchor=(0.5, -0.12), frameon=False, borderaxespad=0)
+            fig.subplots_adjust(bottom=.20, top=.90, left=.10, right=.98, wspace=.34)
+            show_plot(fig); plt.close(fig)
 
             st.markdown("#### 5) 집단별 비교")
             cmp_df = pd.DataFrame()
@@ -8396,7 +10777,7 @@ elif menu == "📋 설문조사 분석":
                                      "통계량": round(stat, 3), "p": round(p, 4),
                                      "유의성": "*" if p < .05 else "n.s."})
                 cmp_df = pd.DataFrame(rows)
-                st.dataframe(cmp_df, width="stretch")
+                smart_table(cmp_df, width="stretch")
                 sig = cmp_df[cmp_df["유의성"] == "*"]
                 st.info(f"💡 응답자 특성에 따라 차이가 유의한 항목 {len(sig)}개"
                         + (": " + ", ".join(f"{r['특성']}×{r['문항']}" for _, r in sig.head(3).iterrows()) if len(sig) else ""))
@@ -8411,12 +10792,9 @@ elif menu == "📋 설문조사 분석":
             else:
                 top = valid_summ.loc[valid_summ["평균"].idxmax(), "문항"]
                 low = valid_summ.loc[valid_summ["평균"].idxmin(), "문항"]
-            _alpha_txt = f"{a_:.3f}" if np.isfinite(a_) else "계산 불가"
             txt = (f"평균이 가장 높은 문항은 '{top}', 가장 낮은 문항은 '{low}'입니다. "
-                   f"전체 신뢰도(크론바흐 α)는 {_alpha_txt} ({lvl})입니다. "
-                   f"긍정은 {positive_min}점 이상, 부정은 {negative_max}점 이하로 집계했습니다.")
+                   f"전체 신뢰도(크론바흐 α)는 {a_:.3f}로 {lvl} 수준입니다.")
             st.download_button("🖼️ 그래프 다운로드", png, "survey.png", "image/png")
-            dl_table(summ, "설문 문항별 분석 결과", "survey17", "survey", image=png)
             log_action("설문 리커트 분석")
             blocks = [{"text": txt},
                       {"caption": "문항별 기술통계", "table": summ, "image": png},
@@ -8429,6 +10807,7 @@ elif menu == "📋 설문조사 분석":
                                 "알파 0.7 이상이면 신뢰할 만하다는 기준을 함께 언급하세요.",
                                 capture_slot="cap_survey")
         report_button("cap_survey")
+        survey_download_panel("cap_survey", "likert", "설문_리커트분석")
 
     # ---------- 객관식 ----------
     elif stype.startswith("🔘"):
@@ -8445,16 +10824,15 @@ elif menu == "📋 설문조사 분석":
                 cc1, cc2 = st.columns([1, 1])
                 with cc1:
                     st.write(f"**{c}** (n={int(vc.sum())})")
-                    st.dataframe(t.drop(columns=["문항"]), width="stretch")
+                    smart_table(t.drop(columns=["문항"]), width="stretch")
                 with cc2:
                     fig = pie_chart(vc, c, donut=True)
-                    st.pyplot(fig); plt.close(fig)
+                    show_plot(fig); plt.close(fig)
             res = pd.concat(all_tbl, ignore_index=True)
             top = res.loc[res["빈도"].idxmax()]
             txt = f"가장 많은 응답은 '{top['문항']}'의 '{top['응답']}'({top['비율(%)']}%)입니다."
             st.info("💡 " + txt)
             png = fig_to_png(fig, show=False)
-            dl_table(res, "객관식 응답 빈도", "mc18", "mc")
             log_action("설문 객관식 분석")
             report_capture("cap_mc", "설문 객관식 분석", txt, res, png)
             ai_interpret_button("svymc", "설문 객관식 응답 분포", res,
@@ -8462,6 +10840,7 @@ elif menu == "📋 설문조사 분석":
                                 "'유의하다'는 표현은 쓰지 말고, 응답이 몰린 항목과 그 뜻을 서술하세요.",
                                 capture_slot="cap_mc")
         report_button("cap_mc")
+        survey_download_panel("cap_mc", "mc", "설문_객관식분석")
 
     # ---------- 다중응답 ----------
     elif stype.startswith("☑️"):
@@ -8479,15 +10858,14 @@ elif menu == "📋 설문조사 분석":
                               "응답률(%)": (vc.values/n_resp*100).round(1),
                               "구성비(%)": (vc.values/vc.sum()*100).round(1)})
             st.write(f"응답자 {n_resp}명 / 총 응답 {int(vc.sum())}건 (1인 평균 {vc.sum()/n_resp:.1f}개)")
-            st.dataframe(t, width="stretch")
+            smart_table(t, width="stretch")
             fig, ax = plt.subplots(figsize=figsize())
-            ax.barh(t["응답 항목"], t["응답률(%)"], color=pcolor()); ax.invert_yaxis()
+            ax.barh(t["응답 항목"], t["응답률(%)"], color=bar_colors(values=t["응답률(%)"].tolist())); ax.invert_yaxis()
             ax.set_xlabel("응답률(%)"); deco(ax, f"{mcol} 다중응답")
             png = fig_to_png(fig)
             txt = (f"가장 많이 선택된 항목은 '{t.iloc[0]['응답 항목']}'로 응답자의 "
                    f"{t.iloc[0]['응답률(%)']}%가 선택했습니다. (응답률 합계가 100%를 넘는 것은 정상입니다)")
             st.info("💡 " + txt)
-            dl_table(t, f"{mcol} 다중응답 분석", "mr19", "mr")
             log_action("설문 다중응답 분석")
             report_capture("cap_mr", "설문 다중응답 분석", txt, t, png)
             ai_interpret_button("svymr", "설문 다중응답 분석", t,
@@ -8495,6 +10873,7 @@ elif menu == "📋 설문조사 분석":
                                 "이를 오류로 지적하지 마세요.",
                                 capture_slot="cap_mr")
         report_button("cap_mr")
+        survey_download_panel("cap_mr", "mr", "설문_다중응답분석")
 
     # ---------- 주관식 ----------
     elif stype.startswith("✍️"):
@@ -8508,12 +10887,11 @@ elif menu == "📋 설문조사 분석":
             c2.metric("응답률", f"{len(ser)/max(len(df),1)*100:.1f} %")
             st.markdown("#### 의견 목록")
             op_tbl = pd.DataFrame({"번호": range(1, len(ser)+1), "의견": ser.values})
-            st.dataframe(op_tbl, width="stretch", hide_index=True, height=320)
+            smart_table(op_tbl, width="stretch", hide_index=True, height=320)
             txt = (f"주관식 문항 '{tcol}'에 대해 전체 {len(df)}명 중 {len(ser)}명"
                    f"({len(ser)/max(len(df),1)*100:.1f}%)이 의견을 제시하였다.")
             st.info("💡 " + txt)
             st.session_state["subj_text"] = "\n".join(f"- {v}" for v in ser.tolist()[:100])
-            dl_table(op_tbl, f"{tcol} 주관식 의견", "text20", "주관식의견")
             log_action("설문 주관식 분석")
             report_capture("cap_tx", "설문 주관식 의견", txt, op_tbl, None)
         if st.session_state.get("subj_text"):
@@ -8527,6 +10905,7 @@ elif menu == "📋 설문조사 분석":
                         st.session_state.get("api_key"), st.session_state.get("ai_model_g"), max_tokens=1200))
                     log_action("AI 주관식 의견 요약")
         report_button("cap_tx")
+        survey_download_panel("cap_tx", "text", "설문_주관식분석")
 
     # ---------- 교차분석 ----------
     else:
@@ -8547,7 +10926,7 @@ elif menu == "📋 설문조사 분석":
                 for c in ct.columns:
                     show.loc[r, c] = f"{int(ct.loc[r, c])}명 ({pct_tbl.loc[r, c]:.1f}%)"
             show["합계"] = [f"{int(ct.loc[r].sum())}명 (100.0%)" for r in ct.index]
-            st.dataframe(show, width="stretch")
+            smart_table(show, width="stretch")
             try:
                 chi2, p, dof, exp = stats.chi2_contingency(ct)
                 low = (exp < 5).sum() / exp.size * 100
@@ -8571,9 +10950,11 @@ elif menu == "📋 설문조사 분석":
             # 세로 공간이 부족하면 '9명(30.0%)'처럼 한 줄로 합쳐서라도 단위·비율을 남긴다.
             _ymax = float(ct.sum(axis=1).max()) or 1.0
             _hidden = 0
-            for col in ct.columns:
+            _ct_cols = _survey_palette(len(ct.columns))
+            for _ci, col in enumerate(ct.columns):
                 vals = ct[col].values
-                ax.bar(ct.index.astype(str), vals, bottom=bottoms, label=str(col))
+                ax.bar(ct.index.astype(str), vals, bottom=bottoms, label=str(col),
+                       color=_ct_cols[_ci], edgecolor="white", linewidth=.6)
                 for x, (v, b, pv) in enumerate(zip(vals, bottoms, row_pct[col].values)):
                     if v <= 0:
                         continue
@@ -8596,7 +10977,6 @@ elif menu == "📋 설문조사 분석":
                 st.caption(f"※ 칸이 너무 좁은 {_hidden}곳은 글씨가 겹쳐 숫자를 생략했습니다. "
                            "정확한 값은 위 교차표를 보세요.")
             out = show.reset_index()
-            dl_table(out, f"{rowv} × {colv} 교차분석", "cross21", "cross", image=png)
             log_action(f"교차분석: {rowv} × {colv}")
             report_capture("cap_ct", f"{rowv} × {colv} 교차분석", txt, out, png)
             ai_interpret_button("svyct", f"{rowv} × {colv} 교차분석", out,
@@ -8604,11 +10984,15 @@ elif menu == "📋 설문조사 분석":
                                 "표의 값은 '인원(비율%)' 형식이며 비율은 행 기준입니다.",
                                 capture_slot="cap_ct")
         report_button("cap_ct")
+        survey_download_panel("cap_ct", "cross", "설문_교차분석")
 
 # ================================================================ 사용설명서
+elif menu == "👑 관리자":
+    render_admin_dashboard()
+
 elif menu == "📖 사용설명서":
     st.title("📖 사용설명서")
-    _MANUAL = '# 스마트 통계 에이전트 — 사용설명서\n\n농업연구사·지도사를 위한 실험데이터 통계분석 자동화 도구\n\n---\n\n## 1. 시작하기 (3단계면 끝)\n\n```\n① 데이터 올리기  →  ② 분석하기  →  ③ 보고서 만들기\n```\n\n**① 데이터 올리기**\n- 왼쪽 사이드바 위쪽에서 엑셀(xlsx)·CSV 파일을 올립니다.\n- 엑셀에 시트가 여러 개면 **시트별로 자동 분리**됩니다.\n- 파일이 없으면 **🧪 샘플 데이터** 버튼으로 먼저 체험해 보세요.\n\n**② 분석하기**\n- 왼쪽 메뉴에서 원하는 분석을 고릅니다.\n- 결과 아래 **➕ 이 결과를 보고서에 담기**를 누릅니다.\n\n**③ 보고서 만들기**\n- 📑 보고서 메뉴에서 한글(hwpx)·워드(docx)로 내려받습니다.\n\n> 💡 **결과는 사라지지 않습니다.** 다른 메뉴에 갔다 와도 분석 결과가 그대로 남아 있습니다.\n\n---\n\n## 2. 메뉴 한눈에 보기\n\n| 메뉴 | 무엇을 하나요 |\n|---|---|\n| 📊 **통계분석** | 데이터 정리 · 분산분석 · 상관 · 회귀 등 |\n| 🧠 **AI 도우미** | 궁금한 걸 물어보고, 어떤 분석을 할지 추천받기 |\n| 💰 **경제성분석** | 소득·순수익 계산, 부분예산표, 증수 효과 |\n| 📋 **설문조사 분석** | 만족도·의견 조사 결과 정리 |\n| 📑 **보고서** | 담아둔 결과를 문서로 만들기 |\n\n---\n\n## 3. 통계분석 메뉴\n\n### 📋 데이터\n- 올린 데이터를 확인하고 **🩺 데이터 검진** 결과를 봅니다.\n- 숫자인데 문자로 읽힌 열(`1,200`, `120kg`)이 있으면 **원클릭 변환** 버튼이 나타납니다.\n- 실험설계(난괴법 등)를 자동으로 추정해 알려줍니다.\n\n### 🧹 전처리\n데이터를 정리합니다. **화면 위에 현재 데이터가 항상 보이므로** 작업 결과를 바로 확인할 수 있습니다.\n\n| 작업 | 언제 쓰나요 |\n|---|---|\n| 결측치 처리 | 조사 누락으로 빈칸이 있을 때 |\n| 이상값 처리 | 입력 실수(15.0 → 150)가 의심될 때 |\n| 중복 행 제거 | 같은 자료가 두 번 들어갔을 때 |\n| 자료형 변환 | 숫자가 문자로 읽혔을 때 |\n| 열 삭제/이름변경 | 필요 없는 열을 뺄 때 |\n| 표준화·정규화 | 단위가 다른 변수를 비교할 때 |\n\n> ↩️ **실행취소** 버튼으로 최대 10단계까지 되돌릴 수 있습니다.\n\n### 🧮 파생변수\n기존 열을 조합해 새 열을 만듭니다.\n- **두 열 사칙연산**: `수량 × 단가 = 조수입`\n- **조건 열**: `기온 ≥ 33` → 폭염일 표시\n- **그룹별 집계**: 연도별 합계·평균\n\n### 🔗 상관분석\n두 변수가 함께 변하는 정도를 봅니다.\n- **Pearson**(직선 관계) / **Spearman**(순위·비정규분포)\n- 논문용 **유의성 별표 표**(`0.826***`)가 자동 생성됩니다.\n\n### 📈 분산분석 — 가장 많이 쓰는 기능\n\n**분석 방식 6가지**\n\n| 방식 | 언제 |\n|---|---|\n| **일원배치** | 처리구 하나 비교 (가장 기본) |\n| **이원배치** | 두 요인 + 상호작용 (품종 × 시비량) |\n| **🌾 분할구법** | 관수·경운처럼 큰 구역 요인이 있을 때 |\n| **🔁 반복측정** | 같은 개체를 시기별로 반복 조사 |\n| **🎚️ ANCOVA** | 초기 생육 차이를 보정하고 싶을 때 |\n| **📊 여러 형질 요약표** | 여러 항목을 한 표로 (논문 표 형식) |\n\n**⚠️ 꼭 확인하세요 — 반복(블록) 열**\n포장시험에서 반복을 두었다면 **반복 열을 반드시 지정**하세요.\n지정하지 않으면 블록 간 토양·경사 차이가 오차에 섞여, 실제로는 있는 처리 효과를 놓칠 수 있습니다.\n\n**사후검정 4가지**\n\n| 방법 | 특징 |\n|---|---|\n| **Tukey HSD** | 국제 표준. 논문 투고에 안전 |\n| **던컨(DMRT)** | 농업 논문 관행. 차이를 잘 잡아냄 |\n| **Bonferroni** | 매우 엄격 |\n| **던넷(Dunnett)** | 대조구와만 비교 (신품종 vs 대비품종) |\n\n**결과 읽기**\n- **유의성 문자**: 같은 문자를 공유하면 차이 없음 (`a`, `ab`, `b`)\n- **CV(%)**: 시험 정밀도. 포장시험 10~20% 양호, 20% 초과 시 재검토\n- **LSD**: 두 평균의 차이가 이 값보다 크면 유의한 차이\n- **논문용 표 각주**가 자동 생성되니 복사해서 쓰세요.\n\n### 🧪 비모수검정\n정규성·등분산 가정이 깨졌을 때 사용합니다.\n(분산분석에서 가정이 위배되면 **자동으로 결과를 함께 보여줍니다.**)\n\n### 🧬 PCA (주성분분석)\n형질이 많을 때 2개 축으로 압축해 그림 하나로 봅니다.\n- 누적 설명분산 **70% 이상**이면 신뢰할 만합니다.\n\n### 📉 회귀분석\n- **단순/다중 회귀**: X로 Y를 설명 (VIF 다중공선성 진단 포함)\n- **로지스틱**: Y가 두 가지 값일 때 (발병/미발병)\n- **🧪 프로빗**: 농약 시험의 **LC50/LD50** 산출\n- **잔차 진단**으로 모형이 적절한지 확인할 수 있습니다.\n\n### 🤖 머신러닝\n수량 예측·등급 판정 등. **🔮 새 데이터 예측** 기능으로 값을 넣으면 바로 예측합니다.\n\n> ⚠️ 표본이 30개 미만이면 쓰지 마세요. 처리 효과 검정은 **분산분석**을 쓰세요.\n\n---\n\n## 4. 🧠 AI 도우미 (선택)\n\nAPI 키를 넣으면 쓸 수 있습니다. **키가 없어도 나머지 기능은 모두 정상 작동합니다.**\n\n**키 넣는 법**: 사이드바 → 🤖 AI 기능 켜기 → 제공사 선택(Claude·Gemini·ChatGPT) → 키 입력\n\n**할 수 있는 것**\n- 결과를 자연어로 질문하기\n- 데이터 자동 요약\n- 연구계획서를 올리면 어떤 분석을 할지 추천\n- 각 분석 결과 아래 **🤖 AI 해석**으로 보고서 문장(`○`·`-` 형식) 생성\n\n> ⚠️ AI가 만든 문장은 **반드시 연구자가 수치와 해석을 확인**한 뒤 사용하세요.\n\n---\n\n## 5. 💰 경제성분석\n\n### 💾 기준단가 관리 (먼저 설정)\n노임·자재비·임차료를 한 번 넣어두면 분석에 자동 반영됩니다.\nCSV로 내려받아 보관하고, 다음 해에 갱신해 다시 올릴 수 있습니다.\n\n**기본으로 들어있는 공식 수치** (기준연도 확인 후 사용하세요)\n\n| 항목 | 단가 | 기준연도 | 출처 |\n|---|---|---|---|\n| 농업노임(남) | 153,520원/일 | 2025년 | 통계청 KOSIS 농가판매·구입가격조사 |\n| 농업노임(여) | 121,392원/일 | 2025년 | 통계청 KOSIS |\n| 농업노임(남·시간) | 19,190원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 농업노임(여·시간) | 15,174원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 요소비료(20kg) | 17,900원 | 2026년 | 농협 (보조금 적용 시 16,250원) |\n| 토지용역비(밭) | 260원/㎡ | 2024년 | 농지임차료실태조사 |\n| 토지용역비(논) | 275원/㎡ | 2024년 | 농지임차료실태조사 |\n\n**자동으로 받아올 수 있는 자료**\n- **🌐 KAMIS** : 농산물 가격 (일별) — kamis.or.kr에서 인증키 발급(무료)\n- **📊 KOSIS** : 농촌 일용노임·농가구입가격지수 (분기) — kosis.kr/openapi에서 인증키 발급(무료)\n  - 가장 쉬운 방법: KOSIS 통계표 화면에서 [OpenAPI] 버튼 → 주소 복사 → 앱에 붙여넣기\n\n**직접 확인해 입력해야 하는 자료**\n- 자본용역비 이자율, 감가상각 내용연수 → 농촌진흥청 「농축산물 소득자료집」 부록\n  또는 농산업경영과(063-238-1197) 문의\n- 농협 자재 실판매가(연 1회), 위탁영농비, 지역별 노임\n\n### 📕 부분예산표 (손실적·이익적 요소) — 가장 많이 쓰는 기능\n신기술 도입 시 **바뀐 것만** 모아 늘어난 비용(A)과 늘어난 이익(B)을 비교하고 **추정수익액(B−A)** 을 구합니다. 관행·신기술이 똑같이 쓰는 비용은 넣지 않습니다.\n\n| 자료에서 바뀐 것 | 어디로 |\n|---|---|\n| 수량이 늘었다 (× 단가) | 이익적 요소(B) |\n| 수량이 줄었다 (× 단가) | 손실적 요소(A) |\n| 비용이 늘었다 | 손실적 요소(A) |\n| 비용이 줄었다 | **이익적 요소(B)** — 절감은 번 것입니다 |\n| 노동시간이 늘었다 (× 시간당 노임) | 손실적 요소(A) |\n\n> ⚠️ **자가노동시간처럼 값이 \'시간\'인 열**은 비용 열이 아니라 **노동시간 열**에 넣으세요. 비용 열에 넣으면 10시간이 10원으로 계산됩니다. 이름에 \'시간\'이 들어가면 자동으로 골라 줍니다.\n\n**두 가지 방법으로 만들 수 있습니다.**\n1. 화면에서 항목·산출근거·금액을 직접 입력\n2. **📊 올린 데이터에서 자동으로 채우기** — 처리구 열, 수량 열, 대조구, 신기술구, 단가, 비용 열을 고르면 대조구 대비 달라진 값만 뽑아 표를 채워 줍니다(10a 기준 자동 환산). 채운 뒤 손으로 고치거나 항목을 더할 수 있습니다.\n\n> 💡 화면의 **🧮 이 숫자가 어떻게 나온 건가요?** 에 예시 숫자로 따라가는 계산 과정과 자주 하는 실수가 정리되어 있습니다.\n\n### 📗 소득분석\n```\n총수입 = 주산물가액 + 부산물가액\n소득   = 총수입 − 경영비\n순수익 = 총수입 − 생산비\n소득률(%) = 소득 ÷ 총수입 × 100\n```\n**어떤 엑셀을 올리나요** — 화면의 `📋 어떤 엑셀을 올려야 하나요?` 에서 예시 서식을 CSV로 내려받아 숫자만 바꿔 올리면 됩니다.\n- **한 줄 = 한 조사구**(처리구 × 반복)로 적습니다.\n- 모든 값은 **10a(1,000㎡) 기준**으로 환산해 적습니다.\n- 합계·소득같은 **계산 결과 열은 넣지 마세요.** 이중으로 잡힙니다.\n- **작목 유형**(식량작물·노지채소·시설채소·과수 등)을 고르면 그에 맞는 항목을 안내합니다.\n- **과수·다년생**은 과수원 조성비를 내용연수로 나눠 매년 상각합니다.\n- **대조구를 지정하면** 증수율·증수액·순증가소득이 자동 계산됩니다.\n\n### 📘 신기술 경제성 (부분예산·MRR)\nCIMMYT의 부분예산 원칙을 참고해 지배분석과 한계수익률을 계산합니다.\n권장 여부는 사용자가 설정한 최소 MRR과 반복수·가격·수량 민감도를 함께 확인합니다.\n\n---\n\n## 6. 📋 설문조사 분석\n\n**🤖 자동 인식**을 쓰면 문항 유형을 스스로 판별해 한 번에 분석합니다.\n\n| 유형 | 결과 |\n|---|---|\n| 리커트 척도 | 평균·표준편차, 긍정률, **크론바흐 α**, 다이버징 차트 |\n| 객관식 | 빈도·비율 표 + 원형/도넛 그래프 (%·인원 표시) |\n| 다중응답 | 응답률 (합계가 100%를 넘는 것이 정상) |\n| 주관식 | 의견 목록 표, AI 요약 |\n| 교차분석 | 교차표 + 카이제곱 검정 |\n\n**크론바흐 α**: 0.7 이상이면 신뢰할 만합니다.\n\n**🤖 AI 해석**: 객관식·다중응답·리커트·교차분석·자동인식 결과 아래에서 보고서 문장을 만들 수 있습니다.\n설문은 실험과 달라서, 검정하지 않은 결과에 \'유의하다\'고 쓰지 않도록 AI에게 미리 일러 둡니다.\n\n---\n\n## 7. 📑 보고서\n\n**만드는 순서**\n1. 각 분석에서 **➕ 보고서에 담기**\n2. 📑 보고서 메뉴로 이동\n3. 필요하면 **표지·재료및방법**, **적요**, **표·그림 목차** 추가\n4. 한글(hwpx) 또는 워드(docx)로 내려받기\n\n**자동으로 만들어지는 것**\n- `□` 항목 제목, `◦` 불릿 (시험연구보고서 양식)\n- `<표 1>`, `<그림 1>` 캡션 (왼쪽 정렬)\n- **통계처리 문구** — 어떤 분석·사후검정을 썼는지 자동 서술\n- **적요 초안** — 담긴 결과를 요약\n\n**계획서 첨부**: 연구계획서 파일(hwpx·docx·pdf)을 올리면 내용을 보고서 앞에 넣을 수 있습니다.\n\n---\n\n## 8. 자주 겪는 문제\n\n| 증상 | 해결 |\n|---|---|\n| 한글 파일이 안 열림 | 구버전 한글은 hwpx 미지원 → **워드(docx)로 받으세요** |\n| `No module named \'docx\'` | 터미널에서 `pip install python-docx` |\n| 그래프 글자가 □로 깨짐 | 한글 폰트(맑은 고딕·나눔고딕) 설치 |\n| 결과가 안 보임 | 분석 실행 버튼을 눌렀는지 확인 |\n| 숫자 열인데 분석이 안 됨 | 데이터 탭에서 **숫자로 변환** 실행 |\n| 반복 열을 안 넣었는데 결과가 이상함 | 분산분석에서 **반복(블록) 열**을 지정하세요 |\n| 빨간 오류 상자가 떴음 | 그 아래 **🆘 이 오류, 도움받기**에서 `🤖 앱 안에서 바로 물어보기` |\n\n---\n\n## 9. 실행 방법\n\n**처음 설치하는 컴퓨터**\n```\n① python.org에서 파이썬 설치 (★ "Add python.exe to PATH" 체크)\n② 폴더에서 터미널 열고: pip install -r requirements.txt\n③ 실행: py -m streamlit run app.py\n```\n\n**이미 설치한 컴퓨터**\n```\npy -m streamlit run app.py\n```\n\n종료는 터미널에서 `Ctrl + C`.\n\n---\n\n## 10. 꼭 기억할 것\n\n1. **반복(블록) 열을 지정하세요** — 포장시험 결과가 달라집니다.\n2. **CV(%)를 확인하세요** — 20% 넘으면 시험 정밀도를 점검하세요.\n3. **AI 문장은 반드시 검토하세요** — 그대로 제출하지 마세요.\n4. **분석 결과는 바로 보고서에 담으세요** — 나중에 한 번에 문서가 됩니다.\n5. **기준단가는 기관 공식 자료로 입력하세요** — 자동으로 받아오지 않습니다.\n\n---\n\n*스마트 통계 에이전트*\n'
+    _MANUAL = "# 스마트 통계 에이전트 — 사용설명서\n\n농업연구사·지도사를 위한 실험데이터 통계분석 자동화 도구\n\n---\n\n## 1. 웹에서 시작하기\n\n별도 설치 없이 **스마트 통계 에이전트 웹주소에 접속**해서 사용합니다.\n로그인 기능이 켜져 있으면 회원가입/로그인 후 아래 순서대로 진행하세요.\n\n```\n① 데이터 넣기  →  ② 분석하기  →  ③ 결과 내려받기·보고서 만들기\n```\n\n**① 데이터 올리기**\n- 왼쪽 사이드바 위쪽에서 엑셀(xlsx)·CSV를 올리거나, 이미지·카메라·음성 입력을 선택합니다.\n- 엑셀에 시트가 여러 개면 **시트별로 자동 분리**됩니다.\n- 파일이 없으면 **🧪 샘플 데이터** 버튼으로 먼저 체험해 보세요.\n\n**② 분석하기**\n- 왼쪽 메뉴에서 원하는 분석을 고릅니다.\n- 결과 아래 **➕ 이 결과를 보고서에 담기**를 누릅니다.\n\n**③ 결과 내려받기·보고서 만들기**\n- 각 분석 화면에서 한글(hwpx)·Excel(xlsx) 결과를 바로 내려받거나,\n- 📑 보고서 메뉴에 여러 분석 결과를 모아 한글(hwpx)·워드(docx) 보고서를 만듭니다.\n\n> 💡 **결과는 사라지지 않습니다.** 다른 메뉴에 갔다 와도 분석 결과가 그대로 남아 있습니다.\n\n---\n\n## 2. 메뉴 한눈에 보기\n\n| 메뉴 | 무엇을 하나요 |\n|---|---|\n| 📊 **통계분석** | 데이터 정리 · 분산분석 · 상관 · 회귀 등 |\n| 🧠 **AI 도우미** | 궁금한 걸 물어보고, 어떤 분석을 할지 추천받기 |\n| 💰 **경제성분석** | 소득·순수익 계산, 부분예산표, 증수 효과 |\n| 📋 **설문조사 분석** | 만족도·의견 조사 결과 정리 |\n| 📑 **보고서** | 담아둔 결과를 문서로 만들기 |\n\n---\n\n## 3. 통계분석 메뉴\n\n### 📋 데이터\n- 올린 데이터를 확인하고 **🩺 데이터 검진** 결과를 봅니다.\n- 숫자인데 문자로 읽힌 열(`1,200`, `120kg`)이 있으면 **원클릭 변환** 버튼이 나타납니다.\n- 실험설계(난괴법 등)를 자동으로 추정해 알려줍니다.\n\n### 🧹 전처리\n데이터를 정리합니다. **화면 위에 현재 데이터가 항상 보이므로** 작업 결과를 바로 확인할 수 있습니다.\n\n| 작업 | 언제 쓰나요 |\n|---|---|\n| 결측치 처리 | 조사 누락으로 빈칸이 있을 때 |\n| 이상값 처리 | 입력 실수(15.0 → 150)가 의심될 때 |\n| 중복 행 제거 | 같은 자료가 두 번 들어갔을 때 |\n| 자료형 변환 | 숫자가 문자로 읽혔을 때 |\n| 열 삭제/이름변경 | 필요 없는 열을 뺄 때 |\n| 표준화·정규화 | 단위가 다른 변수를 비교할 때 |\n\n> ↩️ **실행취소** 버튼으로 최대 10단계까지 되돌릴 수 있습니다.\n\n### 🧮 파생변수\n기존 열을 조합해 새 열을 만듭니다.\n- **두 열 사칙연산**: `수량 × 단가 = 조수입`\n- **조건 열**: `기온 ≥ 33` → 폭염일 표시\n- **그룹별 집계**: 연도별 합계·평균\n\n### 🔗 상관분석\n두 변수가 함께 변하는 정도를 봅니다.\n- **Pearson**(직선 관계) / **Spearman**(순위·비정규분포)\n- 논문용 **유의성 별표 표**(`0.826***`)가 자동 생성됩니다.\n\n### 📈 분산분석 — 가장 많이 쓰는 기능\n\n**분석 방식 6가지**\n\n| 방식 | 언제 |\n|---|---|\n| **일원배치** | 처리구 하나 비교 (가장 기본) |\n| **이원배치** | 두 요인 + 상호작용 (품종 × 시비량) |\n| **🌾 분할구법** | 관수·경운처럼 큰 구역 요인이 있을 때 |\n| **🔁 반복측정** | 같은 개체를 시기별로 반복 조사 |\n| **🎚️ ANCOVA** | 초기 생육 차이를 보정하고 싶을 때 |\n| **📊 여러 형질 요약표** | 여러 항목을 한 표로 (논문 표 형식) |\n\n**⚠️ 꼭 확인하세요 — 반복(블록) 열**\n포장시험에서 반복을 두었다면 **반복 열을 반드시 지정**하세요.\n지정하지 않으면 블록 간 토양·경사 차이가 오차에 섞여, 실제로는 있는 처리 효과를 놓칠 수 있습니다.\n\n**사후검정 4가지**\n\n| 방법 | 특징 |\n|---|---|\n| **Tukey HSD** | 국제 표준. 논문 투고에 안전 |\n| **던컨(DMRT)** | 농업 논문 관행. 차이를 잘 잡아냄 |\n| **Bonferroni** | 매우 엄격 |\n| **던넷(Dunnett)** | 대조구와만 비교 (신품종 vs 대비품종) |\n\n**결과 읽기**\n- **유의성 문자**: 같은 문자를 공유하면 차이 없음 (`a`, `ab`, `b`)\n- **CV(%)**: 시험 정밀도. 포장시험 10~20% 양호, 20% 초과 시 재검토\n- **LSD**: 두 평균의 차이가 이 값보다 크면 유의한 차이\n- **논문용 표 각주**가 자동 생성되니 복사해서 쓰세요.\n\n### 🧪 비모수검정\n정규성·등분산 가정이 깨졌을 때 사용합니다.\n(분산분석에서 가정이 위배되면 **자동으로 결과를 함께 보여줍니다.**)\n\n### 🧬 PCA (주성분분석)\n형질이 많을 때 2개 축으로 압축해 그림 하나로 봅니다.\n- 누적 설명분산 **70% 이상**이면 신뢰할 만합니다.\n\n### 📉 회귀분석\n- **단순/다중 회귀**: X로 Y를 설명 (VIF 다중공선성 진단 포함)\n- **로지스틱**: Y가 두 가지 값일 때 (발병/미발병)\n- **🧪 프로빗**: 농약 시험의 **LC50/LD50** 산출\n- **잔차 진단**으로 모형이 적절한지 확인할 수 있습니다.\n\n### 🤖 머신러닝\n수량 예측·등급 판정 등. **🔮 새 데이터 예측** 기능으로 값을 넣으면 바로 예측합니다.\n\n> ⚠️ 표본이 30개 미만이면 쓰지 마세요. 처리 효과 검정은 **분산분석**을 쓰세요.\n\n---\n\n## 4. 🧠 AI 도우미 (선택)\n\nAPI 키를 넣으면 쓸 수 있습니다. **키가 없어도 나머지 기능은 모두 정상 작동합니다.**\n\n**키 넣는 법**: 사이드바 → 🤖 AI 기능 켜기 → 제공사 선택(Claude·Gemini·ChatGPT) → 키 입력\n\n**할 수 있는 것**\n- 결과를 자연어로 질문하기\n- 데이터 자동 요약\n- 연구계획서를 올리면 어떤 분석을 할지 추천\n- 각 분석 결과 아래 **🤖 AI 해석**으로 보고서 문장(`○`·`-` 형식) 생성\n\n> ⚠️ AI가 만든 문장은 **반드시 연구자가 수치와 해석을 확인**한 뒤 사용하세요.\n\n---\n\n## 5. 💰 경제성분석\n\n### 🧭 경제성 분석 길잡이 v3.6 — 처음이면 여기부터\n경제성 분석을 배운 적이 없어도 **STEP 1~5를 한 단계씩** 답하면 적합한 분석방법을 규칙 기반으로 추천합니다. 처음 화면에서는 길잡이와 바로 분석하기 중 하나만 선택하므로 화면이 복잡하지 않습니다. API 키 없이 작동합니다.\n\n1. **STEP 1 연구목적** — 신기술 비교, 현재 수익성, 여러 대안 선택, 시설투자, 손익분기, 위험평가 등\n2. **STEP 2 변화요인** — 품종·방제·재배법, 투입수준, 시설·농기계, 가격·수량 등\n3. **STEP 3 비교구조** — 대조구 vs 신기술, 비용이 다른 여러 대안, 여러 처리의 한 해 성과, 비교대상 없음\n4. **STEP 4 분석기간** — 한 작기·1년, 2년 이상, 시설·기계 내용연수 전체\n5. **STEP 5 보유자료** — 처리구, 수량, 가격, 경영비, 변화비용, 반복, 투자비, 연도별 편익·비용, 할인율 등\n\n모르는 항목은 **잘 모르겠어요**를 골라도 나머지 답으로 판단하며, 답이 너무 불확실하면 임의로 분석을 연결하지 않고 **추천 보류 + 확인할 두 가지**를 안내합니다.\n- 현재 작목의 수익성 → **소득분석**\n- 대조구와 신품종·신기술 비교 → **부분예산법**\n- 비용이 다른 여러 기술 중 추천대안 선택 → **지배분석·MRR**\n- 시설·농기계 장기투자 → **NPV·할인 B/C·IRR**\n- 손익분기 가격·수량 / 가격·수량 변동 위험 → **소득분석 안의 손익분기점·민감도**\n- 정책사업의 사회적 효과(CBA)는 현재 직접 계산하지 않으며 별도 분석이 필요하다고 안내합니다.\n\n추천 결과에는 **추천 확신도, 추천 이유, 필요한 자료, 함께 볼 분석, 자료 준비도**가 표시됩니다. STEP 5 앞의 **📦 자료 준비 가이드**에서는 공통자료, 농촌진흥청 소득조사 체계에 맞춘 비용 항목, 분석별 추가자료와 빈 CSV 서식을 제공합니다. 올린 데이터가 있으면 처리구·수량·단가·비용·반복 열 후보를 자동으로 찾아 STEP 5와 데이터 점검에 활용합니다. **🚀 추천 분석 바로 시작하기**를 누르면 해당 분석 방식이 자동 선택됩니다.\n\n### 💾 기준단가 관리 (먼저 설정)\n노임·자재비·임차료를 한 번 넣어두면 분석에 자동 반영됩니다.\nCSV로 내려받아 보관하고, 다음 해에 갱신해 다시 올릴 수 있습니다.\n\n**기본으로 들어있는 공식 수치** (기준연도 확인 후 사용하세요)\n\n| 항목 | 단가 | 기준연도 | 출처 |\n|---|---|---|---|\n| 농업노임(남) | 153,520원/일 | 2025년 | 통계청 KOSIS 농가판매·구입가격조사 |\n| 농업노임(여) | 121,392원/일 | 2025년 | 통계청 KOSIS |\n| 농업노임(남·시간) | 19,190원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 농업노임(여·시간) | 15,174원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 요소비료(20kg) | 17,900원 | 2026년 | 농협 (보조금 적용 시 16,250원) |\n| 토지용역비(밭) | 260원/㎡ | 2024년 | 농지임차료실태조사 |\n| 토지용역비(논) | 275원/㎡ | 2024년 | 농지임차료실태조사 |\n\n**자동으로 받아올 수 있는 자료**\n- **🌐 KAMIS** : 농산물 가격 (일별) — kamis.or.kr에서 인증키 발급(무료)\n- **📊 KOSIS** : 농촌 일용노임·농가구입가격지수 (분기) — kosis.kr/openapi에서 인증키 발급(무료)\n  - 가장 쉬운 방법: KOSIS 통계표 화면에서 [OpenAPI] 버튼 → 주소 복사 → 앱에 붙여넣기\n\n**직접 확인해 입력해야 하는 자료**\n- 자본용역비 이자율, 감가상각 내용연수 → 농촌진흥청 「농축산물 소득자료집」 부록\n  또는 농산업경영과(063-238-1197) 문의\n- 농협 자재 실판매가(연 1회), 위탁영농비, 지역별 노임\n\n### 📕 부분예산표 (손실적·이익적 요소) — 가장 많이 쓰는 기능\n신기술 도입 시 **바뀐 것만** 모아 늘어난 비용(A)과 늘어난 이익(B)을 비교하고 **추정수익액(B−A)** 을 구합니다. 관행·신기술이 똑같이 쓰는 비용은 넣지 않습니다.\n\n| 자료에서 바뀐 것 | 어디로 |\n|---|---|\n| 수량이 늘었다 (× 단가) | 이익적 요소(B) |\n| 수량이 줄었다 (× 단가) | 손실적 요소(A) |\n| 비용이 늘었다 | 손실적 요소(A) |\n| 비용이 줄었다 | **이익적 요소(B)** — 절감은 번 것입니다 |\n| 노동시간이 늘었다 (× 시간당 노임) | 손실적 요소(A) |\n\n> ⚠️ **자가노동시간처럼 값이 '시간'인 열**은 비용 열이 아니라 **노동시간 열**에 넣으세요. 비용 열에 넣으면 10시간이 10원으로 계산됩니다. 이름에 '시간'이 들어가면 자동으로 골라 줍니다.\n\n**두 가지 방법으로 만들 수 있습니다.**\n1. 화면에서 항목·산출근거·금액을 직접 입력\n2. **📊 올린 데이터에서 자동으로 채우기** — 처리구 열, 수량 열, 대조구, 신기술구, 단가, 비용 열을 고르면 대조구 대비 달라진 값만 뽑아 표를 채워 줍니다(10a 기준 자동 환산). 채운 뒤 손으로 고치거나 항목을 더할 수 있습니다.\n\n> 💡 화면의 **🧮 이 숫자가 어떻게 나온 건가요?** 에 예시 숫자로 따라가는 계산 과정과 자주 하는 실수가 정리되어 있습니다.\n\n### 📗 소득분석\n```\n총수입 = 주산물가액 + 부산물가액\n소득   = 총수입 − 경영비\n순수익 = 총수입 − 생산비\n소득률(%) = 소득 ÷ 총수입 × 100\n```\n**어떤 엑셀을 올리나요** — 화면의 `📋 어떤 엑셀을 올려야 하나요?` 에서 예시 서식을 CSV로 내려받아 숫자만 바꿔 올리면 됩니다.\n- **한 줄 = 한 조사구**(처리구 × 반복)로 적습니다.\n- 모든 값은 **10a(1,000㎡) 기준**으로 환산해 적습니다.\n- 합계·소득같은 **계산 결과 열은 넣지 마세요.** 이중으로 잡힙니다.\n- **작목 유형**(식량작물·노지채소·시설채소·과수 등)을 고르면 그에 맞는 항목을 안내합니다.\n- **과수·다년생**은 과수원 조성비를 내용연수로 나눠 매년 상각합니다.\n- **대조구를 지정하면** 증수율·증수액·순증가소득이 자동 계산됩니다.\n\n### 📘 신기술 경제성 (부분예산·MRR)\nCIMMYT의 부분예산 원칙을 참고해 지배분석과 한계수익률을 계산합니다.\n권장 여부는 사용자가 설정한 최소 MRR과 반복수·가격·수량 민감도를 함께 확인합니다.\n\n---\n\n## 6. 📋 설문조사 분석\n\n**🤖 자동 인식**을 쓰면 문항 유형을 스스로 판별해 한 번에 분석합니다.\n\n| 유형 | 결과 |\n|---|---|\n| 리커트 척도 | 평균·표준편차, 긍정률, **크론바흐 α**, 다이버징 차트 |\n| 객관식 | 빈도·비율 표 + 원형/도넛 그래프 (%·인원 표시) |\n| 다중응답 | 응답률 (합계가 100%를 넘는 것이 정상) |\n| 주관식 | 의견 목록 표, AI 요약 |\n| 교차분석 | 교차표 + 카이제곱 검정 |\n\n**크론바흐 α**: 0.7 이상이면 신뢰할 만합니다.\n\n**🤖 AI 해석**: 객관식·다중응답·리커트·교차분석·자동인식 결과 아래에서 보고서 문장을 만들 수 있습니다.\n설문은 실험과 달라서, 검정하지 않은 결과에 '유의하다'고 쓰지 않도록 AI에게 미리 일러 둡니다.\n\n---\n\n## 7. 📑 보고서\n\n**만드는 순서**\n1. 각 분석에서 **➕ 보고서에 담기**\n2. 📑 보고서 메뉴로 이동\n3. 필요하면 **표지·재료및방법**, **적요**, **표·그림 목차** 추가\n4. 한글(hwpx) 또는 워드(docx)로 내려받기\n\n**자동으로 만들어지는 것**\n- `□` 항목 제목, `◦` 불릿 (시험연구보고서 양식)\n- `<표 1>`, `<그림 1>` 캡션 (왼쪽 정렬)\n- **통계처리 문구** — 어떤 분석·사후검정을 썼는지 자동 서술\n- **적요 초안** — 담긴 결과를 요약\n\n**계획서 첨부**: 연구계획서 파일(hwpx·docx·pdf)을 올리면 내용을 보고서 앞에 넣을 수 있습니다.\n\n---\n\n## 8. 자주 겪는 문제\n\n| 증상 | 해결 |\n|---|---|\n| 한글 파일이 안 열림 | 구버전 한글은 hwpx 미지원 → **워드(docx)로 받으세요** |\n| 워드(docx) 버튼이 비활성화됨 | 현재 배포 서버에서 Word 생성 기능이 꺼진 상태입니다. 관리자에게 문의하세요. |\n| 그래프 글자가 □로 깨짐 | 유의성 문자는 서버 글꼴에 의존하지 않는 수식 위첨자로 표시됩니다. 일반 한글이 깨지면 배포 서버 글꼴을 확인하세요. |\n| 결과가 안 보임 | 분석 실행 버튼을 눌렀는지 확인 |\n| 숫자 열인데 분석이 안 됨 | 데이터 탭에서 **숫자로 변환** 실행 |\n| 반복 열을 안 넣었는데 결과가 이상함 | 분산분석에서 **반복(블록) 열**을 지정하세요 |\n| 빨간 오류 상자가 떴음 | 그 아래 **🆘 이 오류, 도움받기**에서 `🤖 앱 안에서 바로 물어보기` |\n\n---\n\n## 9. 꼭 기억할 것\n\n1. **반복(블록) 열을 지정하세요** — 포장시험 결과가 달라집니다.\n2. **CV(%)를 확인하세요** — 20% 넘으면 시험 정밀도를 점검하세요.\n3. **AI 문장은 반드시 검토하세요** — 그대로 제출하지 마세요.\n4. **분석 결과는 바로 보고서에 담으세요** — 나중에 한 번에 문서가 됩니다.\n5. **기준단가는 기관 공식 자료로 입력하세요** — 자동으로 받아오지 않습니다.\n\n---\n\n*스마트 통계 에이전트*\n"
     def _manual_html(md_text):
         """설명서를 어느 컴퓨터에서나 열리는 HTML로 변환"""
         try:
@@ -8649,7 +11033,7 @@ else:
     with st.expander(f"🕘 분석 이력 ({len(logs)}건)"):
         if logs:
             log_df = pd.DataFrame(logs)
-            st.dataframe(log_df, width="stretch")
+            smart_table(log_df, width="stretch")
             c1, c2 = st.columns(2)
             if c1.button("➕ 이력을 보고서에 담기", width="stretch"):
                 st.session_state.report_items.append(
@@ -8849,8 +11233,8 @@ else:
         rtitle = st.text_input("보고서 제목", value="2026 실험 통계 분석 보고서")
         st.caption("한글이 안 열리는 컴퓨터에서는 워드(docx)로 받으세요.")
         if not _HAS_DOCX:
-            st.warning("⚠️ 워드 저장 기능이 꺼져 있습니다. 터미널에서 `pip install python-docx` 를 "
-                       "실행한 뒤 앱을 다시 시작하면 워드로도 받을 수 있어요.")
+            st.warning("⚠️ 현재 배포 서버에서 워드(docx) 저장 기능이 비활성화되어 있습니다. "
+                       "한글(hwpx)을 이용하거나 관리자에게 문의하세요.")
         gen = st.checkbox("📄 보고서 파일 만들기", key="gen_report",
                           help="체크하면 문서를 생성합니다. (체크 전에는 만들지 않아 화면이 빠릅니다)")
         c1, c2, c3 = st.columns(3)
@@ -8864,7 +11248,7 @@ else:
                         st.download_button("📝 워드(docx)", build_report_docx(items, rtitle),
                                            "통계분석.docx", width="stretch")
                     else:
-                        st.caption("워드: pip install python-docx 필요")
+                        st.caption("워드(docx): 현재 배포 환경에서 비활성화")
         with c3:
             if st.button("🗑️ 전체 비우기", width="stretch"):
                 st.session_state.report_items = []; st.rerun()
