@@ -118,19 +118,25 @@ def _script():
                 ep = url.rsplit(":", 1)[-1] if "identitytoolkit" in url else "refresh"
                 S["_calls"].append((ep, json or data))
                 U = S["_users"]
+                if ep == "refresh":
+                    email = data["refresh_token"][3:]
+                    if email not in U or U[email].get("revoked"):
+                        return err("TOKEN_EXPIRED")
+                    return R(200, {{"id_token": "tok-" + email, "refresh_token": data["refresh_token"],
+                                     "expires_in": "3600", "user_id": U[email]["uid"]}})
                 if ep == "signUp":
                     if json["email"] in U:
                         return err("EMAIL_EXISTS")
                     U[json["email"]] = {{"pw": json["password"], "verified": False,
                                          "uid": "uid-" + json["email"].split("@")[0]}}
                     u = U[json["email"]]
-                    return R(200, {{"idToken": "tok-" + json["email"], "refreshToken": "rt",
+                    return R(200, {{"idToken": "tok-" + json["email"], "refreshToken": "rt-" + json["email"],
                                      "expiresIn": "3600", "localId": u["uid"], "email": json["email"]}})
                 if ep == "signInWithPassword":
                     u = U.get(json["email"])
                     if not u or u["pw"] != json["password"]:
                         return err("INVALID_LOGIN_CREDENTIALS")
-                    return R(200, {{"idToken": "tok-" + json["email"], "refreshToken": "rt",
+                    return R(200, {{"idToken": "tok-" + json["email"], "refreshToken": "rt-" + json["email"],
                                      "expiresIn": "3600", "localId": u["uid"], "email": json["email"]}})
                 if ep == "lookup":
                     email = json["idToken"][4:]
@@ -169,11 +175,16 @@ def _script():
         _src = open({str(APP)!r}, encoding="utf-8").read()
         exec(_src[_src.index({START!r}):_src.index({END!r})])
         _fs_session = lambda: FakeFirestore()
+        _read_auth_cookie = lambda: S.get("_cookie_in", "")
+        def _write_auth_cookie(value):
+            S.setdefault("_cookie_writes", []).append(value)
         def smart_table(df, **kw):
             st.dataframe(df)
         def dataframe_to_styled_xlsx(df, title=""):
             return b"x"
 
+        if S.pop("_do_logout", False):
+            _auth_logout()
         render_auth_gate()
         st.write("APP_OPEN")
         if st.session_state.get("_do_usage"):
@@ -351,3 +362,78 @@ def test_individual_without_organization():
     prof = _docs(at, "profiles")["profiles/uid-farmer"]
     assert prof["organization"]["stringValue"] == "개인"
     assert prof["organization_type"]["stringValue"] == "개인 (소속 없음)"
+
+
+# ---------------------------------------------------------------- 자동 입력·로그인 상태 유지
+def test_inputs_tell_browser_to_autofill():
+    at = _new_app()
+    ac = {t.key: t.proto.autocomplete for t in at.text_input}
+    assert ac["auth_login_email"] == "username"
+    assert ac["auth_login_pw"] == "current-password"      # 브라우저 저장 비밀번호 자동 입력
+    assert ac["auth_signup_pw"] == "new-password"
+
+
+def _verified_user(at, email="hong@korea.kr"):
+    at = _signup(at, email)
+    _verify(at, email)
+    return at
+
+
+def test_remember_me_writes_cookie_after_login():
+    at = _verified_user(_new_app())
+    at.checkbox(key="auth_remember").check()
+    at = _login(at, "hong@korea.kr")
+    assert _opened(at)
+    assert at.session_state["_cookie_writes"] == ["rt-hong@korea.kr"]
+
+
+def test_without_remember_no_cookie():
+    at = _login(_verified_user(_new_app()), "hong@korea.kr")
+    assert _opened(at)
+    assert not at.session_state["_cookie_writes"] if "_cookie_writes" in at.session_state else True
+
+
+def _fresh_visit(prev_at, cookie):
+    """같은 브라우저로 새로 접속: 가짜 서버 데이터는 유지하고 세션만 새로 시작."""
+    at = AppTest.from_string(_script(), default_timeout=30)
+    for k, v in SECRETS.items():
+        at.secrets[k] = v
+    for k in ("_users", "_docs", "_seq"):
+        at.session_state[k] = prev_at.session_state[k]
+    at.session_state["_cookie_in"] = cookie
+    return at.run()
+
+
+def test_cookie_logs_in_without_password_on_next_visit():
+    at = _verified_user(_new_app())
+    at = _fresh_visit(at, "rt-hong@korea.kr")
+    assert _opened(at)
+    assert at.session_state["auth_user"]["user_metadata"]["organization"] == "경상북도농업기술원"
+    assert not _calls(at, "signInWithPassword")
+
+
+def test_bad_cookie_is_cleared_and_shows_login():
+    at = _verified_user(_new_app())
+    at.session_state["_users"]["hong@korea.kr"]["revoked"] = True
+    at = _fresh_visit(at, "rt-hong@korea.kr")
+    assert not _opened(at)
+    assert at.session_state["_cookie_writes"] == [None]           # 쿠키 삭제
+
+
+def test_cookie_for_unverified_account_is_ignored():
+    at = _signup(_new_app(), "hong@korea.kr")                        # 인증 안 함
+    at = _fresh_visit(at, "rt-hong@korea.kr")
+    assert not _opened(at)
+
+
+def test_logout_clears_cookie_and_does_not_auto_login_again():
+    at = _verified_user(_new_app())
+    at = _fresh_visit(at, "rt-hong@korea.kr")
+    assert _opened(at)
+    # 사이드바 로그아웃과 같은 동작
+    at.session_state["_do_logout"] = True
+    at = at.run()
+    assert not _opened(at)
+    assert None in at.session_state["_cookie_writes"]
+    at = at.run()                                                    # 같은 세션에서 다시 그려도
+    assert not _opened(at)                                           # 쿠키로 재로그인하지 않음

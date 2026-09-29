@@ -2633,7 +2633,72 @@ def _record_login(user):
 
 def _auth_logout():
     _clear_auth_session()
+    st.session_state.pop("_auth_cookie_pending", None)
+    st.session_state["_auth_cookie_clear"] = True
     st.rerun()
+
+
+# ---------------------------------------------------------------- 로그인 상태 유지(쿠키)
+_REMEMBER_COOKIE = "ssa_remember"
+_REMEMBER_DAYS = 30
+
+
+def _read_auth_cookie():
+    """브라우저가 접속할 때 보낸 '로그인 상태 유지' 쿠키(갱신 토큰)를 읽는다."""
+    try:
+        return st.context.cookies.get(_REMEMBER_COOKIE) or ""
+    except Exception:
+        return ""
+
+
+def _write_auth_cookie(value):
+    """앱 페이지에 쿠키를 쓰거나(value) 지운다(None). 화면에는 아무것도 보이지 않는다."""
+    import json
+    import streamlit.components.v1 as _components
+    if value:
+        attrs = f"path=/; max-age={_REMEMBER_DAYS * 86400}; SameSite=Lax"
+        cookie = f"{_REMEMBER_COOKIE}=" + "${encodeURIComponent(" + json.dumps(value) + ")}; " + attrs
+    else:
+        cookie = f"{_REMEMBER_COOKIE}=; path=/; max-age=0; SameSite=Lax"
+    js = ("<script>(function(){try{var d=window.parent.document;"
+          "var sec=(window.parent.location.protocol==='https:')?'; Secure':'';"
+          f"d.cookie=`{cookie}`+sec;}}catch(e){{}}}})();</script>")
+    _components.html(js, height=0)
+
+
+def _flush_auth_cookie():
+    """예약된 쿠키 쓰기/지우기를 실행한다. 로그인 화면·앱 화면 어디서든 호출된다."""
+    if st.session_state.pop("_auth_cookie_clear", False):
+        _write_auth_cookie(None)
+    pending = st.session_state.pop("_auth_cookie_pending", None)
+    if pending:
+        _write_auth_cookie(pending)
+
+
+def _try_cookie_login(cfg):
+    """접속 시 한 번만: 유지 쿠키가 있으면 비밀번호 없이 로그인시킨다."""
+    if st.session_state.get("_auth_cookie_tried"):
+        return False
+    st.session_state["_auth_cookie_tried"] = True     # 로그아웃 후 재로그인 반복 방지
+    rt = _read_auth_cookie()
+    if not rt:
+        return False
+    js, err = _fb_refresh(rt)
+    if err or not js:
+        if not str(err).startswith("NETWORK"):
+            st.session_state["_auth_cookie_clear"] = True   # 만료·정지된 토큰은 지운다
+        return False
+    info, err = _fb_lookup(js.get("id_token"))
+    email = str((info or {}).get("email", ""))
+    if err or not info or not _email_allowed(email, cfg) or (
+            cfg["verify_email"] and not info.get("emailVerified")):
+        st.session_state["_auth_cookie_clear"] = True
+        return False
+    meta = _load_profile(js.get("user_id"), email)
+    if _save_auth_session({**js, "email": email}, meta):
+        _record_login(st.session_state.get("auth_user"))
+        return True
+    return False
 
 
 def _record_usage(action):
@@ -2682,6 +2747,9 @@ def render_auth_gate():
     if not (cfg["api_key"] and cfg["required"]):
         return True
     user = _current_auth_user()
+    if not user and _try_cookie_login(cfg):
+        user = _current_auth_user()
+    _flush_auth_cookie()
     if user and _email_allowed(user.get("email", ""), cfg):
         return True
     if user:
@@ -2694,8 +2762,13 @@ def render_auth_gate():
         st.caption("회원가입 후 연구 데이터를 쉽고 정확하게 분석하세요.")
         login_tab, signup_tab, reset_tab = st.tabs(["🔐 로그인", "✨ 회원가입", "🔑 비밀번호 찾기"])
         with login_tab:
-            em = st.text_input("이메일", key="auth_login_email")
-            pw = st.text_input("비밀번호", type="password", key="auth_login_pw")
+            em = st.text_input("이메일", key="auth_login_email", autocomplete="username")
+            pw = st.text_input("비밀번호", type="password", key="auth_login_pw",
+                               autocomplete="current-password")
+            remember = st.checkbox("로그인 상태 유지 (30일)", key="auth_remember",
+                                   help="체크하면 이 브라우저에서는 창을 닫았다 열어도 로그인 화면 없이 바로 들어갑니다. "
+                                        "사이드바의 로그아웃을 누르면 해제됩니다.")
+            st.caption("⚠️ 사무실 공용 PC에서는 체크하지 마세요.")
             if st.button("로그인", type="primary", width="stretch", key="auth_login_btn"):
                 if not em or not pw:
                     st.warning("이메일과 비밀번호를 입력해 주세요.")
@@ -2705,6 +2778,9 @@ def render_auth_gate():
                     if err:
                         st.error(_fb_error_text(err))
                     elif _finish_login(js):
+                        if remember:
+                            # st.rerun() 직후에는 브라우저 스크립트가 실행되지 않으므로 다음 화면에서 쿠키를 쓴다.
+                            st.session_state["_auth_cookie_pending"] = st.session_state.get("auth_refresh_token", "")
                         st.rerun()
             pending = st.session_state.get("auth_unverified")
             if pending:
@@ -2719,11 +2795,12 @@ def render_auth_gate():
 
         with signup_tab:
             nm = st.text_input("이름", key="auth_name")
-            em2 = st.text_input("이메일", key="auth_signup_email")
+            em2 = st.text_input("이메일", key="auth_signup_email", autocomplete="username")
             if _allowed_hint(cfg):
                 st.caption(f"기관 메일({_allowed_hint(cfg)})로 가입할 수 있습니다. "
                            "다른 메일은 관리자가 등록해야 합니다.")
-            pw2 = st.text_input("비밀번호 (8자 이상)", type="password", key="auth_signup_pw")
+            pw2 = st.text_input("비밀번호 (8자 이상)", type="password", key="auth_signup_pw",
+                                autocomplete="new-password")
             org_type = st.selectbox("기관 유형", ["도·특광역시 농업기술원", "농촌진흥청/소속기관",
                                                   "시·군 농업기술센터", "대학교/연구기관",
                                                   "농업 관련 기업/단체", "기타", _NO_ORG_LABEL],
@@ -2773,7 +2850,7 @@ def render_auth_gate():
                             st.rerun()
 
         with reset_tab:
-            rem = st.text_input("가입한 이메일", key="auth_reset_email")
+            rem = st.text_input("가입한 이메일", key="auth_reset_email", autocomplete="username")
             if st.button("비밀번호 재설정 메일 보내기", width="stretch", key="auth_reset_btn"):
                 if not rem:
                     st.warning("이메일을 입력해 주세요.")
