@@ -329,3 +329,25 @@ def test_usage_logging_and_admin_dashboard():
     labels = {m.label: m.value for m in at.metric}
     assert labels["가입 사용자"] == "2명"
     assert labels["기능 이용 기록"] == "1회"
+
+
+def test_no_restriction_lets_anyone_sign_up():
+    """허용 목록을 비우면 기관 메일이 아니어도 가입된다."""
+    at = _signup(_new_app(ALLOWED_EMAIL_DOMAINS="", ALLOWED_EMAILS=""), "farmer@gmail.com")
+    assert _calls(at, "signUp")
+    assert any("인증 메일" in s.value for s in at.success)
+    assert not any("가입할 수 있습니다" in c.value for c in at.caption)   # 도메인 안내 문구 없음
+
+
+def test_individual_without_organization():
+    at = _new_app(ALLOWED_EMAIL_DOMAINS="", ALLOWED_EMAILS="")
+    at.text_input(key="auth_name").input("김농부")
+    at.text_input(key="auth_signup_email").input("farmer@naver.com")
+    at.text_input(key="auth_signup_pw").input("password123")
+    at.selectbox(key="auth_org_type").select("개인 (소속 없음)").run()
+    assert not [t for t in at.text_input if t.key == "auth_org"]     # 소속기관 칸이 사라짐
+    at.checkbox(key="auth_consent").check()
+    at = at.button(key="auth_signup_btn").click().run()
+    prof = _docs(at, "profiles")["profiles/uid-farmer"]
+    assert prof["organization"]["stringValue"] == "개인"
+    assert prof["organization_type"]["stringValue"] == "개인 (소속 없음)"

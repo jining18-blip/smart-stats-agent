@@ -2215,6 +2215,8 @@ _FB_AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts:"
 _FB_TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
 _FS_BASE_URL = "https://firestore.googleapis.com/v1"
 _AUTH_SESSION_KEYS = ("auth_user", "auth_id_token", "auth_refresh_token", "auth_expires_at")
+_NO_ORG_LABEL = "개인 (소속 없음)"
+_NO_ORG_VALUE = "개인"
 
 
 def _secret(name, default=""):
@@ -2724,9 +2726,15 @@ def render_auth_gate():
             pw2 = st.text_input("비밀번호 (8자 이상)", type="password", key="auth_signup_pw")
             org_type = st.selectbox("기관 유형", ["도·특광역시 농업기술원", "농촌진흥청/소속기관",
                                                   "시·군 농업기술센터", "대학교/연구기관",
-                                                  "농업 관련 기업/단체", "기타"], key="auth_org_type")
-            org = st.text_input("소속기관", placeholder="예: 경상북도농업기술원", key="auth_org")
-            dept = st.text_input("부서/연구소 (선택)", placeholder="예: 영양고추연구소", key="auth_dept")
+                                                  "농업 관련 기업/단체", "기타", _NO_ORG_LABEL],
+                                    key="auth_org_type")
+            if org_type == _NO_ORG_LABEL:
+                # 농업인·학생 등 소속이 없는 사람도 가입할 수 있게 한다(관리자 통계에서는 '개인'으로 집계).
+                org, dept = _NO_ORG_VALUE, ""
+                st.caption("소속기관 없이 개인으로 가입합니다.")
+            else:
+                org = st.text_input("소속기관", placeholder="예: 경상북도농업기술원", key="auth_org")
+                dept = st.text_input("부서/연구소 (선택)", placeholder="예: 영양고추연구소", key="auth_dept")
             consent = st.checkbox("이름·이메일·소속기관 및 서비스 접속기록을 운영 목적으로 저장하는 것에 동의합니다.",
                                   key="auth_consent")
             if st.button("회원가입", type="primary", width="stretch", key="auth_signup_btn"):
