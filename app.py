@@ -2633,69 +2633,102 @@ def _record_login(user):
 
 def _auth_logout():
     _clear_auth_session()
-    st.session_state.pop("_auth_cookie_pending", None)
-    st.session_state["_auth_cookie_clear"] = True
+    _remember_forget()
     st.rerun()
 
 
-# ---------------------------------------------------------------- 로그인 상태 유지(쿠키)
-_REMEMBER_COOKIE = "ssa_remember"
+# ---------------------------------------------------------------- 로그인 상태 유지(브라우저 저장소)
+# Streamlit Community Cloud는 서버에서 쿠키를 읽을 수 없어서(st.context.cookies가 비어 있음),
+# 브라우저 localStorage에 갱신 토큰을 저장하고 작은 JS 컴포넌트(streamlit-js-eval)로 읽고 쓴다.
+_REMEMBER_KEY = "ssa_remember"
 _REMEMBER_DAYS = 30
+try:
+    from streamlit_js_eval import streamlit_js_eval as _streamlit_js_eval
+    _HAS_JS_EVAL = True
+except Exception:
+    _HAS_JS_EVAL = False
 
 
-def _read_auth_cookie():
-    """브라우저가 접속할 때 보낸 '로그인 상태 유지' 쿠키(갱신 토큰)를 읽는다."""
+def _js_eval(expr, key):
+    """브라우저에서 JS 식을 실행하고 결과를 돌려준다. 아직 응답 전이면 None."""
+    if not _HAS_JS_EVAL:
+        return ""
     try:
-        return st.context.cookies.get(_REMEMBER_COOKIE) or ""
+        return _streamlit_js_eval(js_expressions=expr, key=key)
     except Exception:
         return ""
 
 
-def _write_auth_cookie(value):
-    """앱 페이지에 쿠키를 쓰거나(value) 지운다(None). 화면에는 아무것도 보이지 않는다."""
-    import json
-    import streamlit.components.v1 as _components
-    if value:
-        attrs = f"path=/; max-age={_REMEMBER_DAYS * 86400}; SameSite=Lax"
-        cookie = f"{_REMEMBER_COOKIE}=" + "${encodeURIComponent(" + json.dumps(value) + ")}; " + attrs
-    else:
-        cookie = f"{_REMEMBER_COOKIE}=; path=/; max-age=0; SameSite=Lax"
-    js = ("<script>(function(){try{var d=window.parent.document;"
-          "var sec=(window.parent.location.protocol==='https:')?'; Secure':'';"
-          f"d.cookie=`{cookie}`+sec;}}catch(e){{}}}})();</script>")
-    _components.html(js, height=0)
+def _remember_read():
+    """저장된 갱신 토큰. 없거나 만료면 "", 브라우저 응답 전이면 None."""
+    import json, time
+    raw = _js_eval(f"localStorage.getItem('{_REMEMBER_KEY}') || ''", key="ssa_remember_read")
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return ""
+    if not data.get("rt") or float(data.get("exp", 0)) < time.time():
+        return ""
+    return str(data["rt"])
 
 
-def _flush_auth_cookie():
-    """예약된 쿠키 쓰기/지우기를 실행한다. 로그인 화면·앱 화면 어디서든 호출된다."""
-    if st.session_state.pop("_auth_cookie_clear", False):
-        _write_auth_cookie(None)
-    pending = st.session_state.pop("_auth_cookie_pending", None)
-    if pending:
-        _write_auth_cookie(pending)
+def _remember_save(refresh_token):
+    """로그인 상태 유지를 켠 세션에서 매 화면 호출. 같은 key라 브라우저에서는 한 번만 실행된다."""
+    import json, time, hashlib
+    payload = json.dumps({"rt": refresh_token, "exp": time.time() + _REMEMBER_DAYS * 86400})
+    tag = hashlib.sha1(refresh_token.encode()).hexdigest()[:10]
+    gen = st.session_state.get("_auth_remember_gen", 0)
+    _js_eval(f"localStorage.setItem('{_REMEMBER_KEY}', {json.dumps(payload)}) || 'ok'",
+             key=f"ssa_remember_save_{gen}_{tag}")
 
 
-def _try_cookie_login(cfg):
-    """접속 시 한 번만: 유지 쿠키가 있으면 비밀번호 없이 로그인시킨다."""
-    if st.session_state.get("_auth_cookie_tried"):
+def _remember_bump():
+    # 같은 세션에서 저장→삭제→저장을 반복해도 매번 브라우저에서 새로 실행되도록 key를 바꾼다.
+    st.session_state["_auth_remember_gen"] = st.session_state.get("_auth_remember_gen", 0) + 1
+
+
+def _remember_forget():
+    st.session_state.pop("_auth_remember_rt", None)
+    st.session_state["_auth_remember_clear"] = True
+    _remember_bump()
+
+
+def _remember_sync():
+    """예약된 저장/삭제를 브라우저에 반영한다. 로그인 화면·앱 화면 모두에서 호출."""
+    if st.session_state.get("_auth_remember_clear"):
+        _js_eval(f"localStorage.removeItem('{_REMEMBER_KEY}') || 'ok'",
+                 key=f"ssa_remember_clear_{st.session_state.get('_auth_remember_gen', 0)}")
+    rt = st.session_state.get("_auth_remember_rt")
+    if rt:
+        _remember_save(rt)
+
+
+def _try_remembered_login(cfg):
+    """접속 시 한 번만: 저장된 토큰이 있으면 비밀번호 없이 로그인시킨다."""
+    if st.session_state.get("_auth_remember_tried") or st.session_state.get("_auth_remember_clear"):
         return False
-    st.session_state["_auth_cookie_tried"] = True     # 로그아웃 후 재로그인 반복 방지
-    rt = _read_auth_cookie()
+    rt = _remember_read()
+    if rt is None:                 # 브라우저 응답 대기 중 — 응답이 오면 화면이 다시 그려진다
+        return False
+    st.session_state["_auth_remember_tried"] = True
     if not rt:
         return False
     js, err = _fb_refresh(rt)
     if err or not js:
         if not str(err).startswith("NETWORK"):
-            st.session_state["_auth_cookie_clear"] = True   # 만료·정지된 토큰은 지운다
+            _remember_forget()     # 만료·정지·비밀번호 변경된 토큰은 지운다
         return False
     info, err = _fb_lookup(js.get("id_token"))
     email = str((info or {}).get("email", ""))
     if err or not info or not _email_allowed(email, cfg) or (
             cfg["verify_email"] and not info.get("emailVerified")):
-        st.session_state["_auth_cookie_clear"] = True
+        _remember_forget()
         return False
     meta = _load_profile(js.get("user_id"), email)
     if _save_auth_session({**js, "email": email}, meta):
+        st.session_state["_auth_remember_rt"] = rt
         _record_login(st.session_state.get("auth_user"))
         return True
     return False
@@ -2747,9 +2780,9 @@ def render_auth_gate():
     if not (cfg["api_key"] and cfg["required"]):
         return True
     user = _current_auth_user()
-    if not user and _try_cookie_login(cfg):
+    if not user and _try_remembered_login(cfg):
         user = _current_auth_user()
-    _flush_auth_cookie()
+    _remember_sync()
     if user and _email_allowed(user.get("email", ""), cfg):
         return True
     if user:
@@ -2765,10 +2798,12 @@ def render_auth_gate():
             em = st.text_input("이메일", key="auth_login_email", autocomplete="username")
             pw = st.text_input("비밀번호", type="password", key="auth_login_pw",
                                autocomplete="current-password")
-            remember = st.checkbox("로그인 상태 유지 (30일)", key="auth_remember",
-                                   help="체크하면 이 브라우저에서는 창을 닫았다 열어도 로그인 화면 없이 바로 들어갑니다. "
-                                        "사이드바의 로그아웃을 누르면 해제됩니다.")
-            st.caption("⚠️ 사무실 공용 PC에서는 체크하지 마세요.")
+            remember = False
+            if _HAS_JS_EVAL:
+                remember = st.checkbox("로그인 상태 유지 (30일)", key="auth_remember",
+                                       help="체크하면 이 브라우저에서는 창을 닫았다 열어도 로그인 화면 없이 바로 들어갑니다. "
+                                            "사이드바의 로그아웃을 누르면 해제됩니다.")
+                st.caption("⚠️ 사무실 공용 PC에서는 체크하지 마세요.")
             if st.button("로그인", type="primary", width="stretch", key="auth_login_btn"):
                 if not em or not pw:
                     st.warning("이메일과 비밀번호를 입력해 주세요.")
@@ -2779,8 +2814,9 @@ def render_auth_gate():
                         st.error(_fb_error_text(err))
                     elif _finish_login(js):
                         if remember:
-                            # st.rerun() 직후에는 브라우저 스크립트가 실행되지 않으므로 다음 화면에서 쿠키를 쓴다.
-                            st.session_state["_auth_cookie_pending"] = st.session_state.get("auth_refresh_token", "")
+                            st.session_state.pop("_auth_remember_clear", None)
+                            _remember_bump()
+                            st.session_state["_auth_remember_rt"] = st.session_state.get("auth_refresh_token", "")
                         st.rerun()
             pending = st.session_state.get("auth_unverified")
             if pending:

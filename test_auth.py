@@ -175,9 +175,26 @@ def _script():
         _src = open({str(APP)!r}, encoding="utf-8").read()
         exec(_src[_src.index({START!r}):_src.index({END!r})])
         _fs_session = lambda: FakeFirestore()
-        _read_auth_cookie = lambda: S.get("_cookie_in", "")
-        def _write_auth_cookie(value):
-            S.setdefault("_cookie_writes", []).append(value)
+        # 가짜 브라우저 localStorage: 위젯처럼 같은 key는 한 번만 실행된다.
+        S.setdefault("_ls", {{}})
+        S.setdefault("_js_done", {{}})
+        def _js_eval(expr, key):
+            if key in S["_js_done"]:
+                return S["_js_done"][key]
+            if S.get("_js_slow"):
+                return None
+            m = re.search(r"getItem\('([^']+)'\)", expr)
+            if m:
+                out = S["_ls"].get(m.group(1), "")
+            elif "setItem" in expr:
+                m = re.search(r"setItem\\('([^']+)', (\\x22.*\\x22)\\)", expr)
+                S["_ls"][m.group(1)] = json.loads(m.group(2))
+                out = "ok"
+            elif "removeItem" in expr:
+                S["_ls"].pop(re.search(r"removeItem\('([^']+)'\)", expr).group(1), None)
+                out = "ok"
+            S["_js_done"][key] = out
+            return out
         def smart_table(df, **kw):
             st.dataframe(df)
         def dataframe_to_styled_xlsx(df, title=""):
@@ -379,61 +396,109 @@ def _verified_user(at, email="hong@korea.kr"):
     return at
 
 
-def test_remember_me_writes_cookie_after_login():
+def _stored_rt(at):
+    import json as _j
+    raw = at.session_state["_ls"].get("ssa_remember")
+    return _j.loads(raw)["rt"] if raw else None
+
+
+def test_remember_me_saves_token_after_login():
     at = _verified_user(_new_app())
     at.checkbox(key="auth_remember").check()
     at = _login(at, "hong@korea.kr")
     assert _opened(at)
-    assert at.session_state["_cookie_writes"] == ["rt-hong@korea.kr"]
+    assert _stored_rt(at) == "rt-hong@korea.kr"
+    import json as _j
+    exp = _j.loads(at.session_state["_ls"]["ssa_remember"])["exp"]
+    assert 29 * 86400 < exp - __import__("time").time() <= 30 * 86400      # 30일 만료
 
 
-def test_without_remember_no_cookie():
+def test_without_remember_nothing_saved():
     at = _login(_verified_user(_new_app()), "hong@korea.kr")
     assert _opened(at)
-    assert not at.session_state["_cookie_writes"] if "_cookie_writes" in at.session_state else True
+    assert _stored_rt(at) is None
 
 
-def _fresh_visit(prev_at, cookie):
-    """같은 브라우저로 새로 접속: 가짜 서버 데이터는 유지하고 세션만 새로 시작."""
+def _fresh_visit(prev_at, stored=None):
+    """같은 브라우저로 새로 접속: 가짜 서버 데이터와 localStorage는 유지하고 세션만 새로 시작."""
     at = AppTest.from_string(_script(), default_timeout=30)
     for k, v in SECRETS.items():
         at.secrets[k] = v
-    for k in ("_users", "_docs", "_seq"):
+    for k in ("_users", "_docs", "_seq", "_ls"):
         at.session_state[k] = prev_at.session_state[k]
-    at.session_state["_cookie_in"] = cookie
+    if stored is not None:
+        at.session_state["_ls"] = stored
     return at.run()
 
 
-def test_cookie_logs_in_without_password_on_next_visit():
+def _remembered(at, rt="rt-hong@korea.kr", days=30):
+    import json as _j, time as _t
+    return {"ssa_remember": _j.dumps({"rt": rt, "exp": _t.time() + days * 86400})}
+
+
+def test_saved_token_logs_in_without_password_on_next_visit():
     at = _verified_user(_new_app())
-    at = _fresh_visit(at, "rt-hong@korea.kr")
+    at.checkbox(key="auth_remember").check()
+    at = _login(at, "hong@korea.kr")
+    at = _fresh_visit(at)                                             # 브라우저 다시 열기
     assert _opened(at)
     assert at.session_state["auth_user"]["user_metadata"]["organization"] == "경상북도농업기술원"
     assert not _calls(at, "signInWithPassword")
 
 
-def test_bad_cookie_is_cleared_and_shows_login():
+def test_expired_saved_token_is_ignored():
+    at = _verified_user(_new_app())
+    at = _fresh_visit(at, _remembered(at, days=-1))
+    assert not _opened(at)
+    assert not _calls(at, "refresh")
+
+
+def test_revoked_token_is_removed_and_shows_login():
     at = _verified_user(_new_app())
     at.session_state["_users"]["hong@korea.kr"]["revoked"] = True
-    at = _fresh_visit(at, "rt-hong@korea.kr")
+    at = _fresh_visit(at, _remembered(at))
     assert not _opened(at)
-    assert at.session_state["_cookie_writes"] == [None]           # 쿠키 삭제
+    assert "ssa_remember" not in at.session_state["_ls"]              # 저장소에서 삭제
 
 
-def test_cookie_for_unverified_account_is_ignored():
-    at = _signup(_new_app(), "hong@korea.kr")                        # 인증 안 함
-    at = _fresh_visit(at, "rt-hong@korea.kr")
+def test_saved_token_for_unverified_account_is_ignored():
+    at = _signup(_new_app(), "hong@korea.kr")                         # 인증 안 함
+    at = _fresh_visit(at, _remembered(at))
     assert not _opened(at)
 
 
-def test_logout_clears_cookie_and_does_not_auto_login_again():
+def test_waiting_for_browser_shows_login_form_without_error():
     at = _verified_user(_new_app())
-    at = _fresh_visit(at, "rt-hong@korea.kr")
+    at = AppTest.from_string(_script(), default_timeout=30)
+    for k, v in SECRETS.items():
+        at.secrets[k] = v
+    at.session_state["_js_slow"] = True
+    at = at.run()
+    assert not at.exception and not _opened(at)
+    assert at.button(key="auth_login_btn")
+
+
+def test_logout_removes_token_and_does_not_auto_login_again():
+    at = _verified_user(_new_app())
+    at.checkbox(key="auth_remember").check()
+    at = _login(at, "hong@korea.kr")
+    at = _fresh_visit(at)
     assert _opened(at)
-    # 사이드바 로그아웃과 같은 동작
     at.session_state["_do_logout"] = True
     at = at.run()
     assert not _opened(at)
-    assert None in at.session_state["_cookie_writes"]
-    at = at.run()                                                    # 같은 세션에서 다시 그려도
-    assert not _opened(at)                                           # 쿠키로 재로그인하지 않음
+    assert "ssa_remember" not in at.session_state["_ls"]
+    at = at.run()
+    assert not _opened(at)
+
+
+def test_login_again_with_remember_after_logout_saves_again():
+    at = _verified_user(_new_app())
+    at.checkbox(key="auth_remember").check()
+    at = _login(at, "hong@korea.kr")
+    at.session_state["_do_logout"] = True
+    at = at.run()
+    assert _stored_rt(at) is None
+    at.checkbox(key="auth_remember").check()
+    at = _login(at, "hong@korea.kr")
+    assert _stored_rt(at) == "rt-hong@korea.kr"

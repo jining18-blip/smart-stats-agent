@@ -22,5 +22,6 @@ pypdf>=4.0,<7.0
 markdown>=3.5,<4.0
 requests>=2.31,<3.0
 google-auth>=2.20,<3.0   # Firebase 로그인 — Firestore(회원 명부·이용 기록) 서비스 계정 인증
+streamlit-js-eval>=0.1.7,<2.0   # 로그인 상태 유지 — 브라우저 저장소 읽기/쓰기
 anthropic>=0.40,<2.0
 pytest>=7,<10
