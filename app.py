@@ -5,7 +5,7 @@
 ================================================================
 실행: streamlit run app.py
 """
-import io, copy
+import io, copy, re
 from collections import Counter
 import numpy as np
 import pandas as pd
@@ -93,7 +93,7 @@ def set_korean_font():
 set_korean_font()
 
 # ================================================================ 공통 그래프 디자인
-# 원클릭 보고서의 차분한 블루 톤을 앱 전체 그래프의 기본값으로 사용한다.
+# 원클릭 분석의 차분한 블루 톤을 앱 전체 그래프의 기본값으로 사용한다.
 # 개별 그래프에서 별도 색을 지정하지 않아도 같은 분위기로 보이도록 rcParams에 반영한다.
 from cycler import cycler as _cycler
 _SMART_CHART_BLUE = ["#DCE9F5", "#C2D9EE", "#A3C4E2", "#82ACD3",
@@ -128,6 +128,35 @@ plt.rcParams.update({
 
 st.set_page_config(page_title="스마트 통계 에이전트", page_icon="📊", layout="wide")
 
+# ================================================================ V1 배포/테마 설정
+def _v1_env(name, default=""):
+    import os
+    try:
+        v = st.secrets.get(name, None)
+        if v is not None:
+            return str(v).strip()
+    except Exception:
+        pass
+    return str(os.environ.get(name, default)).strip()
+
+V2_APP_URL = _v1_env("V2_APP_URL")
+
+# 아래 CSS는 V1의 배경/사이드바 분위기만 바꿉니다.
+# 통계 그래프와 Excel 차트 디자인은 기존 검증 버전을 그대로 사용합니다.
+st.markdown("""<style>
+.stApp {
+ background-image:url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0ODAiIGhlaWdodD0iMzIwIiB2aWV3Qm94PSIwIDAgNDgwIDMyMCI+CjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzVFOEY2OSIgc3Ryb2tlLXdpZHRoPSIyLjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgb3BhY2l0eT0iMC4zMCI+CiA8cGF0aCBkPSJNNDcwIDIyIEMzOTUgNDIgMzM3IDg4IDI5MiAxNTAgQzI2MCAxOTQgMjI2IDIyNiAxNzYgMjUwIi8+CiA8cGF0aCBkPSJNMzk0IDUyIEMzOTEgODggMzc3IDExNiAzNTAgMTQwIi8+CiA8cGF0aCBkPSJNMzM3IDk1IEMzMjUgNjggMzA1IDQ4IDI3OCAzOCIvPgogPHBhdGggZD0iTTMwNiAxMzMgQzI5MCAxNjQgMjY3IDE4MSAyMzYgMTkwIi8+CiA8cGF0aCBkPSJNMjcyIDE3NCBDMjUyIDE0NyAyMjcgMTMyIDE5OCAxMjgiLz4KIDxwYXRoIGQ9Ik0yMzAgMjE5IEMyMDQgMjEwIDE4MSAyMTIgMTU3IDIyNSIvPgo8L2c+CjxnIGZpbGw9IiM4RkJFOTgiIG9wYWNpdHk9IjAuMTYiPgogPGVsbGlwc2UgY3g9IjM5NCIgY3k9Ijc4IiByeD0iMTUiIHJ5PSIzMyIgdHJhbnNmb3JtPSJyb3RhdGUoMjYgMzk0IDc4KSIvPgogPGVsbGlwc2UgY3g9IjMwNyIgY3k9IjUyIiByeD0iMTQiIHJ5PSIzMSIgdHJhbnNmb3JtPSJyb3RhdGUoLTQ3IDMwNyA1MikiLz4KIDxlbGxpcHNlIGN4PSIyODQiIGN5PSIxNjEiIHJ4PSIxNiIgcnk9IjM2IiB0cmFuc2Zvcm09InJvdGF0ZSg1NCAyODQgMTYxKSIvPgogPGVsbGlwc2UgY3g9IjIyNiIgY3k9IjE0MSIgcng9IjE1IiByeT0iMzQiIHRyYW5zZm9ybT0icm90YXRlKC01MiAyMjYgMTQxKSIvPgogPGVsbGlwc2UgY3g9IjE5MyIgY3k9IjIxOSIgcng9IjE0IiByeT0iMzIiIHRyYW5zZm9ybT0icm90YXRlKDc2IDE5MyAyMTkpIi8+CjwvZz48L3N2Zz4="),linear-gradient(135deg,#F8FCF8 0%,#F1F8F2 48%,#F9FCF9 100%);
+ background-repeat:no-repeat,no-repeat;
+ background-position:right 1.2rem top 4.2rem,center;
+ background-size:min(32vw,390px) auto,cover;
+ background-attachment:fixed,fixed;
+}
+[data-testid="stAppViewContainer"] > .main {background:transparent;}
+[data-testid="stSidebar"] {background:linear-gradient(180deg,#EDF7EF 0%,#F8FBF8 100%); border-right:1px solid #D9E9DC;}
+[data-testid="stHeader"] {background:rgba(248,252,248,.86);}
+</style>""", unsafe_allow_html=True)
+
+
 
 # ================================================================ 공통 화면/엑셀 표 디자인
 # 모든 분석 화면이 같은 "스마트 블루" 표 디자인을 쓰도록 한 곳에서 관리한다.
@@ -159,7 +188,7 @@ def _smart_excluded_gradient_col(name):
 def smart_table(data, *args, **kwargs):
     """st.dataframe 호환 래퍼.
 
-    - 원클릭 보고서의 푸른 계열 분위기를 모든 표에 통일한다.
+    - 원클릭 분석의 푸른 계열 분위기를 모든 표에 통일한다.
     - 일반 결과표에는 값 크기에 따른 자동 색상(그라데이션)을 넣지 않는다.
       숫자가 크다는 이유만으로 더 중요하거나 더 좋은 값처럼 보이는 오해를 막기 위함이다.
     - 머리행과 아주 옅은 행 구분만 유지한다.
@@ -328,21 +357,46 @@ def compact_letter_display(means_sorted, not_sig_pairs):
         for g in col: letters[g] += chr(97 + i)
     return {g: "".join(sorted(v)) for g, v in letters.items()}
 
+def _formula_design_matrix(model, newdata):
+    """적합된 수식 모형의 설계행렬 규칙을 새 자료에 그대로 적용한다.
+
+    statsmodels 0.14는 ``data.design_info``(patsy)를, 0.15부터는 ``data.model_spec``
+    (patsy DesignInfo 또는 formulaic ModelSpec)을 쓰므로 버전별로 나눠 처리한다.
+    열 순서는 항상 model.params 순서에 맞춘다.
+    """
+    mdata = model.model.data
+    spec = getattr(mdata, "design_info", None)
+    if spec is None:
+        spec = getattr(mdata, "model_spec", None)
+    if spec is None:
+        raise RuntimeError("이 statsmodels 버전에서 모형의 설계 정보를 찾을 수 없습니다.")
+    if hasattr(spec, "get_model_matrix"):              # formulaic ModelSpec
+        mat = pd.DataFrame(spec.get_model_matrix(newdata))
+    else:                                               # patsy DesignInfo
+        from patsy import build_design_matrices
+        mat = build_design_matrices([spec], newdata, return_type="dataframe")[0]
+    names = list(getattr(model.model, "exog_names", None) or mat.columns)
+    if list(mat.columns) != names:
+        missing = [c for c in names if c not in mat.columns]
+        if missing:
+            raise RuntimeError("설계행렬 열이 모형 계수와 맞지 않습니다: " + ", ".join(map(str, missing)))
+        mat = mat[names]
+    return mat
+
+
 def _model_emmeans(model, data, treatment_col):
     """적합된 statsmodels 모형에서 처리별 추정주변평균(EMM)과 설계벡터를 계산한다.
 
     블록이 포함된 RCBD/불균형 자료에서는 원자료 평균이 아니라 모형이 보정한 평균을
     사용해야 ANOVA와 사후검정이 같은 오차구조를 공유한다.
     """
-    from patsy import build_design_matrices
-    design_info = model.model.data.design_info
     levels = list(pd.unique(data[treatment_col].dropna()))
     rows, means = {}, {}
     params = np.asarray(model.params, dtype=float)
     for level in levels:
         tmp = data.copy()
         tmp[treatment_col] = level
-        mat = build_design_matrices([design_info], tmp, return_type="dataframe")[0]
+        mat = _formula_design_matrix(model, tmp)
         xbar = np.asarray(mat, dtype=float).mean(axis=0)
         rows[level] = xbar
         means[level] = float(xbar @ params)
@@ -600,10 +654,9 @@ def error_help(err, context="", key="err"):
         c1, c2, c3 = st.columns([1.6, 1, 1])
         _ans_key = f"errans_{key}"
         if c1.button("🤖 앱 안에서 바로 물어보기", key=f"errai_{key}", width="stretch",
-                     help="사이드바에 넣어 둔 AI 키를 사용합니다. 답이 이 화면에 바로 나옵니다."):
+                     help="AI 도우미에서 연결한 API 키를 사용합니다. 답이 이 화면에 바로 나옵니다."):
             if not st.session_state.get("api_key"):
-                st.session_state[_ans_key] = ("⚠️ 사이드바 **🤖 AI 기능 켜기**에서 "
-                                              "API 키를 먼저 넣어 주세요.")
+                st.session_state[_ans_key] = ("⚠️ **🧠 AI 도우미 → AI 연결 설정**에서 API 키를 먼저 연결해 주세요.")
             else:
                 try:
                     with st.spinner("AI가 오류를 살펴보는 중..."):
@@ -692,15 +745,17 @@ def strip_md(text):
         out.pop()
     return "\n".join(out)
 
-from economic_core import (
-    is_excluded_cost, validate_economic_inputs,
-    calculate_row_economics, validate_economic_results,
-    calculate_partial_budget, validate_partial_budget_results,
-    perform_dominance_analysis, calculate_mrr_table,
-    validate_manual_budget_table,
-    round_half_up, run_economic_self_test,
-    calculate_investment_analysis, investment_sensitivity_table,
-)
+from decimal import Decimal, ROUND_HALF_UP
+
+def round_half_up(value, ndigits=0):
+    """공통 표시용 반올림. V1은 economic_core에 의존하지 않는다."""
+    try:
+        q = Decimal("1") if int(ndigits) == 0 else Decimal("1").scaleb(-int(ndigits))
+        _out = Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP)
+        return int(_out) if int(ndigits) == 0 else float(_out)
+    except Exception:
+        _out = round(value, int(ndigits))
+        return int(_out) if int(ndigits) == 0 else _out
 
 
 def validate_repeated_measure_balance(data, subject_col, time_col):
@@ -2098,47 +2153,70 @@ def report_button(slot, label="➕ 이 결과를 보고서에 담기"):
 
 
 def survey_download_panel(slot, key, fname):
-    """설문 결과의 한글/엑셀 다운로드를 체크박스에 숨기지 않고 바로 보여준다."""
+    """설문 결과를 한글·워드·Excel로 바로 내려받는다.
+    한글/워드는 표·그래프가 포함된 보고서, Excel은 사용자가 차트를 직접 수정하는 파일이다.
+    """
     item = st.session_state.get(slot)
     if not item:
         return
     st.markdown("#### 📥 설문 분석 결과 다운로드")
-    st.caption("한글은 표·그래프를 묶은 보고서로, Excel은 결과표를 항목별 시트로 저장합니다.")
+    st.caption("한글·워드는 표와 그래프를 묶은 보고서로, Excel은 표와 편집 가능한 차트를 저장합니다.")
 
-    # 이전 버전의 상태 보존 로직이 download_button key를 session_state에 써 둔 세션에서는
-    # StreamlitValueAssignmentNotAllowedError가 계속 재현될 수 있다. 렌더 직전에 정리한다.
-    for _wk in (f"dl_svyhwp_{key}", f"dl_svyxls_{key}"):
+    # 과거 세션에 다운로드 버튼 key가 남아 있으면 Streamlit이 위젯 값 할당 오류를 낼 수 있어 렌더 직전에 정리한다.
+    for _wk in (f"dl_svyhwp_{key}", f"dl_svydocx_{key}", f"dl_svyxls_{key}"):
         try:
             if _wk in st.session_state:
                 del st.session_state[_wk]
         except Exception:
             pass
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
+    _title = item.get("heading", "설문조사 분석 결과")
+
     try:
-        hwp = build_report_hwpx([item], doc_title=item.get("heading", "설문조사 분석 결과"))
-        c1.download_button("📘 한글 보고서(hwpx)", hwp, f"{fname}.hwpx",
+        hwp = build_report_hwpx([item], doc_title=_title)
+        c1.download_button("📘 한글(hwpx)", hwp, f"{fname}.hwpx",
                            key=f"dl_svyhwp_{key}", width="stretch")
     except Exception as ex:
         c1.caption(f"한글 파일 생성 실패 ({type(ex).__name__})")
+
+    if _HAS_DOCX:
+        try:
+            docx_bytes = build_report_docx([item], doc_title=_title)
+            c2.download_button("📝 워드(docx)", docx_bytes, f"{fname}.docx",
+                               key=f"dl_svydocx_{key}", width="stretch")
+        except Exception as ex:
+            c2.caption(f"워드 파일 생성 실패 ({type(ex).__name__})")
+    else:
+        c2.caption("워드 저장: python-docx 설치 필요")
+
     blocks = item.get("blocks") or []
     if not blocks and item.get("table") is not None:
         blocks = [{"caption": item.get("heading", "설문 결과"), "table": item.get("table")}]
     xblocks = [b for b in blocks if b.get("table") is not None]
     try:
         if xblocks:
-            xls = make_xlsx_multi(xblocks, doc_title=item.get("heading", "설문조사 분석 결과"))
-            c2.download_button("📈 Excel(xlsx) — 항목별 시트", xls, f"{fname}.xlsx",
+            xls = make_xlsx_multi(xblocks, doc_title=_title)
+            c3.download_button("📈 Excel(xlsx) — 편집 가능한 그래프", xls, f"{fname}.xlsx",
                                key=f"dl_svyxls_{key}", width="stretch",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               help="Excel에서 그래프를 클릭해 막대 색·글꼴·축 범위·차트 종류를 직접 수정할 수 있습니다.")
         else:
-            c2.caption("Excel로 저장할 표가 없습니다.")
+            c3.caption("Excel로 저장할 표가 없습니다.")
     except Exception as ex:
-        c2.caption(f"Excel 파일 생성 실패 ({type(ex).__name__})")
+        c3.caption(f"Excel 파일 생성 실패 ({type(ex).__name__})")
 
 
-# ================================================================ 회원가입/로그인 (Supabase Auth)
-# 별도 Python 패키지 없이 Supabase의 공식 Auth/REST endpoint를 requests로 호출한다.
+# ================================================================ 회원가입/로그인 (Firebase Auth)
+# 로그인은 Firebase Authentication REST API(이메일/비밀번호)로 처리하고, 회원 명부·이용 기록은
+# Firestore에 서비스 계정으로 저장한다. firebase SDK 없이 requests + google-auth만 사용한다.
+# 비밀번호는 Firebase가 보관하며 이 앱은 저장하지 않는다.
+_FB_AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts:"
+_FB_TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
+_FS_BASE_URL = "https://firestore.googleapis.com/v1"
+_AUTH_SESSION_KEYS = ("auth_user", "auth_id_token", "auth_refresh_token", "auth_expires_at")
+
+
 def _secret(name, default=""):
     import os
     try:
@@ -2154,201 +2232,458 @@ def _truthy(v):
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def _auth_config():
-    # 2026년 Supabase 권장 키: publishable / secret.
-    # 기존 프로젝트의 anon / service_role 키도 호환되도록 fallback을 둔다.
-    publishable = _secret("SUPABASE_PUBLISHABLE_KEY") or _secret("SUPABASE_ANON_KEY")
-    secret = _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY")
-    return {
-        "url": _secret("SUPABASE_URL").rstrip("/"),
-        "anon": publishable,      # 기존 코드 호환용 이름
-        "service": secret,        # 기존 코드 호환용 이름
-        "required": _truthy(_secret("AUTH_REQUIRED", "false")),
-        "admins": {x.strip().lower() for x in _secret("ADMIN_EMAILS", "").split(",") if x.strip()},
-    }
-
-
-def _supabase_headers(token=None, service=False, content_type=False):
-    """Supabase 새 API key 모델과 legacy key를 모두 지원하는 헤더."""
-    cfg = _auth_config()
-    key = cfg["service"] if service and cfg["service"] else cfg["anon"]
-    headers = {"apikey": key} if key else {}
-    # 새 sb_publishable_/sb_secret_ 키는 API key 자체를 Bearer JWT로 보내면 안 된다.
-    # 사용자 세션 JWT가 있을 때만 Authorization에 넣는다.
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    elif key and not str(key).startswith("sb_"):
-        # legacy anon/service_role은 JWT 형태라 기존 방식과 호환된다.
-        headers["Authorization"] = f"Bearer {key}"
-    if content_type:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-
-def _supabase_post(path, payload, token=None, service=False, params=None, timeout=25):
-    cfg = _auth_config()
-    if not cfg["url"] or not cfg["anon"]:
-        return None, "Supabase 설정이 없습니다."
-    if service and not cfg["service"]:
-        return None, "Supabase Secret key 설정이 없습니다."
-    headers = _supabase_headers(token=token, service=service, content_type=True)
+def _service_account_info():
+    """Streamlit secrets의 [firebase_service_account] 표 또는 JSON 문자열을 읽는다."""
+    import json
+    raw = None
     try:
-        r = _requests.post(cfg["url"] + path, headers=headers, json=payload,
-                           params=params, timeout=timeout)
-    except Exception as ex:
-        return None, f"네트워크 오류: {type(ex).__name__}"
-    if r.status_code not in (200, 201, 204):
+        raw = st.secrets.get("firebase_service_account", None)
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = _secret("FIREBASE_SERVICE_ACCOUNT", "") or None
+    if not raw:
+        return None
+    if isinstance(raw, str):
         try:
-            body = r.json() or {}
-            msg = body.get("msg") or body.get("message") or body.get("error_description") or body.get("error") or r.text
+            info = json.loads(raw)
         except Exception:
-            msg = r.text
-        return None, f"{r.status_code}: {str(msg)[:180]}"
-    if r.status_code == 204 or not r.text.strip():
-        return {}, None
-    try:
-        return r.json(), None
-    except Exception:
-        return {}, None
+            return None
+    else:
+        try:
+            info = {k: raw[k] for k in raw}
+        except Exception:
+            return None
+    pk = str(info.get("private_key", ""))
+    if "\\n" in pk:
+        info["private_key"] = pk.replace("\\n", "\n")
+    if not (info.get("client_email") and info.get("private_key")):
+        return None
+    return info
 
 
-def _supabase_get(path, token=None, service=False, params=None, timeout=25):
+def _auth_config():
+    sa = _service_account_info()
+    return {
+        "api_key": _secret("FIREBASE_WEB_API_KEY"),
+        "project_id": _secret("FIREBASE_PROJECT_ID") or str((sa or {}).get("project_id", "")),
+        "service_account": sa,
+        "required": _truthy(_secret("AUTH_REQUIRED", "false")),
+        "verify_email": _truthy(_secret("REQUIRE_EMAIL_VERIFICATION", "true")),
+        "admins": {x.strip().lower() for x in _secret("ADMIN_EMAILS", "").split(",") if x.strip()},
+        # 가입 허용: 도메인 목록(하위 도메인 포함) + 예외 이메일. 둘 다 비어 있으면 누구나 허용.
+        "allowed_domains": [x.strip().lower().lstrip("@").lstrip(".")
+                            for x in _secret("ALLOWED_EMAIL_DOMAINS", "").split(",") if x.strip()],
+        "allowed_emails": {x.strip().lower() for x in _secret("ALLOWED_EMAILS", "").split(",") if x.strip()},
+    }
+
+
+def _email_allowed(email, cfg=None):
+    """허용 도메인(하위 도메인 포함)·예외 이메일·관리자 이메일이면 True.
+
+    예) 허용 도메인이 go.kr 이면 rda.go.kr, gb.go.kr 주소도 통과한다.
+    허용 목록이 하나도 없으면 제한 없이 모두 허용한다.
+    가입할 때와 로그인할 때 모두 검사하므로 Firebase 쪽 차단 기능(유료)은 쓰지 않는다.
+    """
+    cfg = cfg or _auth_config()
+    email = str(email or "").strip().lower()
+    if "@" not in email:
+        return False
+    domains, emails = cfg.get("allowed_domains") or [], cfg.get("allowed_emails") or set()
+    if not domains and not emails:
+        return True
+    if email in emails or email in (cfg.get("admins") or set()):
+        return True
+    host = email.rsplit("@", 1)[1]
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _allowed_hint(cfg=None):
+    cfg = cfg or _auth_config()
+    ds = cfg.get("allowed_domains") or []
+    return ", ".join("@" + d for d in ds) if ds else ""
+
+
+# ---------------------------------------------------------------- Firebase Auth REST
+_FB_ERROR_KO = {
+    "EMAIL_EXISTS": "이미 가입된 이메일입니다. 로그인하거나 비밀번호 찾기를 이용해 주세요.",
+    "INVALID_LOGIN_CREDENTIALS": "이메일 또는 비밀번호가 올바르지 않습니다.",
+    "INVALID_PASSWORD": "이메일 또는 비밀번호가 올바르지 않습니다.",
+    "EMAIL_NOT_FOUND": "이메일 또는 비밀번호가 올바르지 않습니다.",
+    "USER_DISABLED": "사용이 중지된 계정입니다. 관리자에게 문의해 주세요.",
+    "TOO_MANY_ATTEMPTS_TRY_LATER": "시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+    "WEAK_PASSWORD": "비밀번호가 너무 약합니다. 8자 이상으로 정해 주세요.",
+    "INVALID_EMAIL": "이메일 형식이 올바르지 않습니다.",
+    "MISSING_PASSWORD": "비밀번호를 입력해 주세요.",
+    "OPERATION_NOT_ALLOWED": "Firebase 콘솔에서 '이메일/비밀번호' 로그인이 켜져 있지 않습니다.",
+    "INVALID_ID_TOKEN": "로그인이 만료되었습니다. 다시 로그인해 주세요.",
+    "TOKEN_EXPIRED": "로그인이 만료되었습니다. 다시 로그인해 주세요.",
+    "USER_NOT_FOUND": "계정을 찾을 수 없습니다. 다시 가입해 주세요.",
+    "NO_CONFIG": "로그인 설정(FIREBASE_WEB_API_KEY)이 없습니다.",
+}
+
+
+def _fb_error_code(msg):
+    return str(msg or "").split(" ")[0].split(":")[0].strip()
+
+
+def _fb_error_text(msg):
+    code = _fb_error_code(msg)
+    if code in _FB_ERROR_KO:
+        return _FB_ERROR_KO[code]
+    if code.startswith("NETWORK"):
+        return "Firebase 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    if "API_KEY" in code or "API key" in str(msg):
+        return "Firebase API 키가 올바르지 않습니다. 관리자에게 문의해 주세요."
+    return f"요청을 처리하지 못했습니다 ({code or '알 수 없는 오류'})."
+
+
+def _fb_post(endpoint, payload):
+    """identitytoolkit accounts:<endpoint> 호출. (응답 dict, 오류코드) 반환."""
     cfg = _auth_config()
-    if not cfg["url"] or not cfg["anon"]:
-        return None, "Supabase 설정이 없습니다."
-    if service and not cfg["service"]:
-        return None, "Supabase Secret key 설정이 없습니다."
-    headers = _supabase_headers(token=token, service=service)
+    if not cfg["api_key"]:
+        return None, "NO_CONFIG"
+    headers = {"Content-Type": "application/json", "X-Firebase-Locale": "ko"}
     try:
-        r = _requests.get(cfg["url"] + path, headers=headers, params=params, timeout=timeout)
+        r = _requests.post(_FB_AUTH_URL + endpoint, params={"key": cfg["api_key"]},
+                           json=payload, headers=headers, timeout=20)
+    except Exception as ex:
+        return None, f"NETWORK:{type(ex).__name__}"
+    try:
+        js = r.json() or {}
+    except Exception:
+        js = {}
+    if r.status_code != 200:
+        msg = (js.get("error") or {}).get("message") if isinstance(js, dict) else None
+        return None, str(msg or f"HTTP_{r.status_code}")
+    return js, None
+
+
+def _fb_signup(email, password):
+    return _fb_post("signUp", {"email": email.strip(), "password": password,
+                               "returnSecureToken": True})
+
+
+def _fb_signin(email, password):
+    return _fb_post("signInWithPassword", {"email": email.strip(), "password": password,
+                                           "returnSecureToken": True})
+
+
+def _fb_lookup(id_token):
+    js, err = _fb_post("lookup", {"idToken": id_token})
+    if err:
+        return None, err
+    users = (js or {}).get("users") or []
+    return (users[0] if users else None), (None if users else "USER_NOT_FOUND")
+
+
+def _fb_send_verify(id_token):
+    return _fb_post("sendOobCode", {"requestType": "VERIFY_EMAIL", "idToken": id_token})
+
+
+def _fb_send_reset(email):
+    return _fb_post("sendOobCode", {"requestType": "PASSWORD_RESET", "email": email.strip()})
+
+
+def _fb_set_display_name(id_token, name):
+    return _fb_post("update", {"idToken": id_token, "displayName": name.strip(),
+                               "returnSecureToken": False})
+
+
+def _fb_refresh(refresh_token):
+    cfg = _auth_config()
+    if not cfg["api_key"]:
+        return None, "NO_CONFIG"
+    try:
+        r = _requests.post(_FB_TOKEN_URL, params={"key": cfg["api_key"]},
+                           data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                           timeout=20)
+    except Exception as ex:
+        return None, f"NETWORK:{type(ex).__name__}"
+    try:
+        js = r.json() or {}
+    except Exception:
+        js = {}
+    if r.status_code != 200:
+        return None, str((js.get("error") or {}).get("message") or f"HTTP_{r.status_code}")
+    return js, None
+
+
+# ---------------------------------------------------------------- Firestore (서비스 계정)
+@st.cache_resource(show_spinner=False)
+def _fs_session_cached(sa_json):
+    import json
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import AuthorizedSession
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/datastore"])
+    return AuthorizedSession(creds)
+
+
+def _fs_session():
+    """Firestore에 쓰기 위한 인증 세션. 서비스 계정이 없거나 google-auth가 없으면 None."""
+    import json
+    cfg = _auth_config()
+    sa = cfg["service_account"]
+    if not sa or not cfg["project_id"]:
+        return None
+    try:
+        return _fs_session_cached(json.dumps(sa, sort_keys=True))
+    except Exception:
+        return None
+
+
+def _fs_docs_url(path=""):
+    pid = _auth_config()["project_id"]
+    base = f"{_FS_BASE_URL}/projects/{pid}/databases/(default)/documents"
+    return f"{base}/{path}" if path else base
+
+
+def _now_utc():
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _fs_encode(value):
+    import datetime as _dt
+    if value is None:
+        return {"nullValue": None}
+    if isinstance(value, bool):
+        return {"booleanValue": value}
+    if isinstance(value, int):
+        return {"integerValue": str(value)}
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=_dt.timezone.utc)
+        return {"timestampValue": value.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
+    return {"stringValue": str(value)}
+
+
+def _fs_decode(fields):
+    out = {}
+    for k, v in (fields or {}).items():
+        if "stringValue" in v:
+            out[k] = v["stringValue"]
+        elif "integerValue" in v:
+            out[k] = int(v["integerValue"])
+        elif "doubleValue" in v:
+            out[k] = float(v["doubleValue"])
+        elif "booleanValue" in v:
+            out[k] = bool(v["booleanValue"])
+        elif "timestampValue" in v:
+            out[k] = v["timestampValue"]
+        else:
+            out[k] = None
+    return out
+
+
+def _fs_set(collection, doc_id, data):
+    """문서의 지정한 필드만 덮어쓴다(없으면 새로 만든다). 다른 필드는 유지된다."""
+    sess = _fs_session()
+    if sess is None:
+        return "NO_FIRESTORE"
+    try:
+        r = sess.patch(_fs_docs_url(f"{collection}/{doc_id}"),
+                       params={"updateMask.fieldPaths": list(data.keys())},
+                       json={"fields": {k: _fs_encode(v) for k, v in data.items()}}, timeout=15)
+        return None if r.status_code == 200 else f"HTTP_{r.status_code}"
+    except Exception as ex:
+        return f"NETWORK:{type(ex).__name__}"
+
+
+def _fs_add(collection, data):
+    sess = _fs_session()
+    if sess is None:
+        return "NO_FIRESTORE"
+    try:
+        r = sess.post(_fs_docs_url(collection),
+                      json={"fields": {k: _fs_encode(v) for k, v in data.items()}}, timeout=10)
+        return None if r.status_code == 200 else f"HTTP_{r.status_code}"
+    except Exception as ex:
+        return f"NETWORK:{type(ex).__name__}"
+
+
+def _fs_get(collection, doc_id):
+    sess = _fs_session()
+    if sess is None:
+        return None
+    try:
+        r = sess.get(_fs_docs_url(f"{collection}/{doc_id}"), timeout=10)
+        if r.status_code != 200:
+            return None
+        return _fs_decode((r.json() or {}).get("fields"))
+    except Exception:
+        return None
+
+
+def _fs_list(collection, max_docs=5000):
+    """컬렉션 전체(최대 max_docs개)를 읽는다. (행 목록, 오류) 반환."""
+    sess = _fs_session()
+    if sess is None:
+        return None, "Firestore 서비스 계정 설정이 없습니다."
+    rows, token = [], None
+    try:
+        while len(rows) < max_docs:
+            params = {"pageSize": 300}
+            if token:
+                params["pageToken"] = token
+            r = sess.get(_fs_docs_url(collection), params=params, timeout=20)
+            if r.status_code != 200:
+                return None, f"HTTP_{r.status_code}: {r.text[:160]}"
+            js = r.json() or {}
+            rows += [_fs_decode(d.get("fields")) for d in js.get("documents", [])]
+            token = js.get("nextPageToken")
+            if not token:
+                break
     except Exception as ex:
         return None, f"네트워크 오류: {type(ex).__name__}"
-    if r.status_code != 200:
-        return None, f"{r.status_code}: {r.text[:180]}"
+    return rows[:max_docs], None
+
+
+def _fs_recent(collection, time_field, limit):
+    """time_field 기준 최신순 limit개. (행 목록, 오류) 반환."""
+    sess = _fs_session()
+    if sess is None:
+        return None, "Firestore 서비스 계정 설정이 없습니다."
+    query = {"structuredQuery": {
+        "from": [{"collectionId": collection}],
+        "orderBy": [{"field": {"fieldPath": time_field}, "direction": "DESCENDING"}],
+        "limit": int(limit)}}
     try:
-        return r.json(), None
-    except Exception:
-        return None, "응답을 읽지 못했습니다."
-
-def _supabase_signup(email, password, name, org_type, organization, department):
-    payload = {
-        "email": email.strip(), "password": password,
-        "data": {"name": name.strip(), "organization_type": org_type,
-                 "organization": organization.strip(), "department": department.strip()}
-    }
-    return _supabase_post("/auth/v1/signup", payload)
+        r = sess.post(_fs_docs_url() + ":runQuery", json=query, timeout=30)
+        if r.status_code != 200:
+            return None, f"HTTP_{r.status_code}: {r.text[:160]}"
+        return [_fs_decode(x["document"].get("fields")) for x in (r.json() or [])
+                if isinstance(x, dict) and x.get("document")], None
+    except Exception as ex:
+        return None, f"네트워크 오류: {type(ex).__name__}"
 
 
-def _supabase_login(email, password):
-    return _supabase_post("/auth/v1/token", {"email": email.strip(), "password": password},
-                          params={"grant_type": "password"})
-
-
-def _supabase_refresh(refresh_token):
-    return _supabase_post("/auth/v1/token", {"refresh_token": refresh_token},
-                          params={"grant_type": "refresh_token"})
-
-
-def _supabase_recover(email):
-    return _supabase_post("/auth/v1/recover", {"email": email.strip()})
-
-
-def _save_auth_session(js):
+# ---------------------------------------------------------------- 세션·기록
+def _save_auth_session(js, meta=None):
+    """signIn/refresh 응답을 세션에 저장한다. 앱 나머지는 auth_user 형태만 사용한다."""
     import time
     if not js:
         return False
-    user = js.get("user") or {}
-    token = js.get("access_token")
-    if not token or not user:
+    uid = js.get("localId") or js.get("user_id")
+    token = js.get("idToken") or js.get("id_token")
+    if not uid or not token:
         return False
-    st.session_state["auth_user"] = user
-    st.session_state["auth_access_token"] = token
-    st.session_state["auth_refresh_token"] = js.get("refresh_token", "")
-    st.session_state["auth_expires_at"] = time.time() + float(js.get("expires_in") or 3600)
+    old = st.session_state.get("auth_user") or {}
+    st.session_state["auth_user"] = {
+        "id": uid,
+        "email": js.get("email") or old.get("email", ""),
+        "user_metadata": meta if meta is not None else (old.get("user_metadata") or {}),
+    }
+    st.session_state["auth_id_token"] = token
+    st.session_state["auth_refresh_token"] = js.get("refreshToken") or js.get("refresh_token", "")
+    st.session_state["auth_expires_at"] = time.time() + float(js.get("expiresIn") or js.get("expires_in") or 3600)
     return True
 
 
+def _clear_auth_session():
+    for k in _AUTH_SESSION_KEYS:
+        st.session_state.pop(k, None)
+
+
 def _current_auth_user():
+    """로그인 사용자. 토큰이 만료되면 갱신하고, 계정이 정지·삭제됐으면 로그아웃시킨다."""
     import time
     user = st.session_state.get("auth_user")
     if not user:
         return None
     if time.time() > float(st.session_state.get("auth_expires_at", 0)) - 60:
         rt = st.session_state.get("auth_refresh_token")
-        if rt:
-            js, err = _supabase_refresh(rt)
-            if not err and _save_auth_session(js):
-                user = st.session_state.get("auth_user")
-    return user
+        js, err = _fb_refresh(rt) if rt else (None, "TOKEN_EXPIRED")
+        if err and not str(err).startswith("NETWORK"):
+            _clear_auth_session()
+            return None
+        if js:
+            _save_auth_session(js)
+    return st.session_state.get("auth_user")
+
+
+def _load_profile(uid, email=""):
+    prof = _fs_get("profiles", uid) or {}
+    return {"name": prof.get("name", ""), "organization_type": prof.get("organization_type", ""),
+            "organization": prof.get("organization", ""), "department": prof.get("department", ""),
+            "email": prof.get("email", email)}
 
 
 def _record_login(user):
-    """관리자 대시보드용 프로필/접속 기록. service role secret은 서버 안에서만 사용."""
-    cfg = _auth_config()
-    if not user or not cfg["service"]:
+    """관리자 대시보드용 최근 로그인 갱신 + 로그인 기록. 실패해도 앱 사용은 막지 않는다."""
+    if not user:
         return
-    import datetime as _dt
-    meta = user.get("user_metadata") or {}
-    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    profile = {
-        "id": user.get("id"), "email": user.get("email", ""),
-        "name": meta.get("name", ""), "organization_type": meta.get("organization_type", ""),
-        "organization": meta.get("organization", ""), "department": meta.get("department", ""),
-        "last_login_at": now,
-    }
-    # profiles: id unique/PK 전제. merge-duplicates로 가입자 프로필을 갱신한다.
-    cfg2 = _auth_config(); key = cfg2["service"]
-    headers = _supabase_headers(service=True, content_type=True)
-    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
     try:
-        _requests.post(cfg2["url"] + "/rest/v1/profiles", headers=headers,
-                       params={"on_conflict": "id"}, json=profile, timeout=15)
-        event = {"user_id": profile.get("id"), "email": profile.get("email", ""),
-                 "name": profile.get("name", ""), "organization_type": profile.get("organization_type", ""),
-                 "organization": profile.get("organization", ""), "department": profile.get("department", ""),
-                 "logged_in_at": now}
-        _requests.post(cfg2["url"] + "/rest/v1/login_events", headers=headers,
-                       json=event, timeout=15)
+        meta = user.get("user_metadata") or {}
+        now = _now_utc()
+        _fs_set("profiles", user.get("id"), {"email": user.get("email", ""), "last_login_at": now})
+        _fs_add("login_events", {
+            "user_id": user.get("id"), "email": user.get("email", ""),
+            "name": meta.get("name", ""), "organization_type": meta.get("organization_type", ""),
+            "organization": meta.get("organization", ""), "department": meta.get("department", ""),
+            "logged_in_at": now})
     except Exception:
         pass
 
 
 def _auth_logout():
-    for k in ("auth_user", "auth_access_token", "auth_refresh_token", "auth_expires_at"):
-        st.session_state.pop(k, None)
+    _clear_auth_session()
     st.rerun()
 
 
 def _record_usage(action):
     """로그인 사용자가 실제 분석/보고서 기능을 실행했을 때 기관별 이용량을 남긴다."""
-    cfg = _auth_config(); user = _current_auth_user()
-    if not user or not cfg["service"]:
+    user = _current_auth_user()
+    if not user:
         return
-    import datetime as _dt
-    meta = user.get("user_metadata") or {}
-    key = cfg["service"]
-    headers = _supabase_headers(service=True, content_type=True)
-    payload = {
-        "user_id": user.get("id"), "email": user.get("email", ""),
-        "name": meta.get("name", ""), "organization": meta.get("organization", ""),
-        "department": meta.get("department", ""), "action": str(action)[:300],
-        "used_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-    }
     try:
-        _requests.post(cfg["url"] + "/rest/v1/usage_events", headers=headers, json=payload, timeout=10)
+        meta = user.get("user_metadata") or {}
+        _fs_add("usage_events", {
+            "user_id": user.get("id"), "email": user.get("email", ""),
+            "name": meta.get("name", ""), "organization": meta.get("organization", ""),
+            "department": meta.get("department", ""), "action": str(action)[:300],
+            "used_at": _now_utc()})
     except Exception:
         pass
 
 
-def render_auth_gate():
-    """AUTH_REQUIRED=true이고 Supabase가 설정된 경우 회원만 앱에 진입하게 한다."""
+def _finish_login(js):
+    """비밀번호 확인이 끝난 signIn 응답으로 허용·인증 여부를 확인하고 로그인시킨다."""
     cfg = _auth_config()
-    configured = bool(cfg["url"] and cfg["anon"])
-    if not (configured and cfg["required"]):
+    email = str((js or {}).get("email", ""))
+    if not _email_allowed(email, cfg):
+        st.error("이용이 허용되지 않은 이메일입니다. 관리자에게 문의해 주세요.")
+        return False
+    if cfg["verify_email"]:
+        info, err = _fb_lookup(js.get("idToken"))
+        if err or not info:
+            st.error(_fb_error_text(err))
+            return False
+        if not info.get("emailVerified"):
+            st.session_state["auth_unverified"] = {"email": email, "id_token": js.get("idToken")}
+            return False
+    st.session_state.pop("auth_unverified", None)
+    meta = _load_profile(js.get("localId"), email)
+    if _save_auth_session(js, meta):
+        _record_login(st.session_state.get("auth_user"))
+        return True
+    st.error("로그인 응답을 확인하지 못했습니다.")
+    return False
+
+
+def render_auth_gate():
+    """AUTH_REQUIRED=true이고 Firebase가 설정된 경우 회원만 앱에 진입하게 한다."""
+    cfg = _auth_config()
+    if not (cfg["api_key"] and cfg["required"]):
         return True
     user = _current_auth_user()
-    if user:
+    if user and _email_allowed(user.get("email", ""), cfg):
         return True
+    if user:
+        _clear_auth_session()
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 1.35, 1])
@@ -2364,19 +2699,29 @@ def render_auth_gate():
                     st.warning("이메일과 비밀번호를 입력해 주세요.")
                 else:
                     with st.spinner("로그인 중..."):
-                        js, err = _supabase_login(em, pw)
+                        js, err = _fb_signin(em, pw)
                     if err:
-                        st.error("로그인에 실패했습니다. 이메일/비밀번호 또는 이메일 인증 여부를 확인해 주세요.")
-                    elif _save_auth_session(js):
-                        _record_login(st.session_state.get("auth_user"))
+                        st.error(_fb_error_text(err))
+                    elif _finish_login(js):
                         st.rerun()
+            pending = st.session_state.get("auth_unverified")
+            if pending:
+                st.warning(f"**{pending['email']}** 의 이메일 인증이 아직 끝나지 않았습니다. "
+                           "메일함(스팸함 포함)의 인증 링크를 누른 뒤 다시 로그인해 주세요.")
+                if st.button("인증 메일 다시 보내기", width="stretch", key="auth_resend_verify"):
+                    _, err = _fb_send_verify(pending.get("id_token"))
+                    if err:
+                        st.error(_fb_error_text(err))
                     else:
-                        st.error("로그인 응답을 확인하지 못했습니다.")
+                        st.success("인증 메일을 다시 보냈습니다.")
 
         with signup_tab:
             nm = st.text_input("이름", key="auth_name")
             em2 = st.text_input("이메일", key="auth_signup_email")
-            pw2 = st.text_input("비밀번호 (8자 이상 권장)", type="password", key="auth_signup_pw")
+            if _allowed_hint(cfg):
+                st.caption(f"기관 메일({_allowed_hint(cfg)})로 가입할 수 있습니다. "
+                           "다른 메일은 관리자가 등록해야 합니다.")
+            pw2 = st.text_input("비밀번호 (8자 이상)", type="password", key="auth_signup_pw")
             org_type = st.selectbox("기관 유형", ["도·특광역시 농업기술원", "농촌진흥청/소속기관",
                                                   "시·군 농업기술센터", "대학교/연구기관",
                                                   "농업 관련 기업/단체", "기타"], key="auth_org_type")
@@ -2388,18 +2733,36 @@ def render_auth_gate():
                 if not all([nm, em2, pw2, org]) or not consent:
                     st.warning("이름·이메일·비밀번호·소속기관과 개인정보 안내 동의를 확인해 주세요.")
                 elif len(pw2) < 8:
-                    st.warning("비밀번호는 8자 이상을 권장합니다.")
+                    st.warning("비밀번호는 8자 이상이어야 합니다.")
+                elif not _email_allowed(em2, cfg):
+                    _h = _allowed_hint(cfg)
+                    st.error("가입이 허용되지 않은 이메일입니다."
+                             + (f" 기관 메일({_h})로 가입하거나" if _h else "")
+                             + " 관리자에게 등록을 요청해 주세요.")
                 else:
                     with st.spinner("회원가입 중..."):
-                        js, err = _supabase_signup(em2, pw2, nm, org_type, org, dept)
+                        js, err = _fb_signup(em2, pw2)
                     if err:
-                        st.error(f"회원가입에 실패했습니다: {err}")
-                    elif _save_auth_session(js):
-                        _record_login(st.session_state.get("auth_user"))
-                        st.success("가입과 로그인이 완료되었습니다.")
-                        st.rerun()
+                        st.error(_fb_error_text(err))
                     else:
-                        st.success("가입 신청이 완료되었습니다. 이메일 인증 메일을 확인한 뒤 로그인해 주세요.")
+                        token, uid = js.get("idToken"), js.get("localId")
+                        _fb_set_display_name(token, nm)
+                        meta = {"name": nm.strip(), "organization_type": org_type,
+                                "organization": org.strip(), "department": dept.strip()}
+                        _fs_set("profiles", uid, {**meta, "email": em2.strip().lower(),
+                                                  "created_at": _now_utc(), "consent_at": _now_utc()})
+                        if cfg["verify_email"]:
+                            _, verr = _fb_send_verify(token)
+                            if verr:
+                                st.error("가입은 되었지만 인증 메일을 보내지 못했습니다. "
+                                         "로그인 탭에서 '인증 메일 다시 보내기'를 눌러 주세요.")
+                            else:
+                                st.success(f"**{em2.strip()}** 로 인증 메일을 보냈습니다. "
+                                           "메일의 링크를 누른 뒤 로그인해 주세요. "
+                                           "메일이 안 보이면 스팸함을 확인해 주세요.")
+                        elif _save_auth_session(js, meta):
+                            _record_login(st.session_state.get("auth_user"))
+                            st.rerun()
 
         with reset_tab:
             rem = st.text_input("가입한 이메일", key="auth_reset_email")
@@ -2407,12 +2770,15 @@ def render_auth_gate():
                 if not rem:
                     st.warning("이메일을 입력해 주세요.")
                 else:
-                    _, err = _supabase_recover(rem)
-                    if err:
-                        st.error("재설정 메일 요청에 실패했습니다.")
+                    _, err = _fb_send_reset(rem)
+                    code = _fb_error_code(err)
+                    # 가입 여부를 드러내지 않도록 '없는 이메일'도 성공과 같은 안내를 보여 준다.
+                    if err and code not in ("EMAIL_NOT_FOUND", "USER_NOT_FOUND"):
+                        st.error(_fb_error_text(err))
                     else:
-                        st.success("재설정 안내 메일을 보냈습니다.")
-        st.caption("🔒 비밀번호는 스마트 통계 에이전트 코드가 직접 저장하지 않고 Supabase Auth가 처리합니다.")
+                        st.success("가입된 이메일이면 재설정 메일이 발송됩니다. 메일의 링크에서 새 비밀번호를 "
+                                   "정한 뒤 로그인해 주세요. 메일이 안 보이면 스팸함을 확인해 주세요.")
+        st.caption("🔒 비밀번호는 이 앱이 저장하지 않고 Google Firebase 인증이 처리합니다.")
     st.stop()
 
 
@@ -2422,29 +2788,35 @@ def _is_admin_user(user=None):
     return bool(email and email in _auth_config()["admins"])
 
 
+def _to_kst_text(series):
+    t = pd.to_datetime(series, errors="coerce", utc=True)
+    return t.dt.tz_convert("Asia/Seoul").dt.strftime("%Y-%m-%d %H:%M").fillna("")
+
+
 def render_admin_dashboard():
     st.title("👑 관리자 — 이용 현황")
-    cfg = _auth_config()
     if not _is_admin_user():
         st.error("관리자 계정만 접근할 수 있습니다.")
         return
-    if not cfg["service"]:
-        st.warning("SUPABASE_SECRET_KEY(또는 기존 SERVICE_ROLE_KEY)가 설정되어야 관리자 통계를 볼 수 있습니다.")
+    if _fs_session() is None:
+        st.warning("Firestore 서비스 계정(firebase_service_account)이 설정되어야 관리자 통계를 볼 수 있습니다.")
         return
-    profiles, e1 = _supabase_get("/rest/v1/profiles", service=True,
-                                 params={"select": "*", "order": "last_login_at.desc"})
-    events, e2 = _supabase_get("/rest/v1/login_events", service=True,
-                               params={"select": "*", "order": "logged_in_at.desc", "limit": 5000})
-    usage, e3 = _supabase_get("/rest/v1/usage_events", service=True,
-                              params={"select": "*", "order": "used_at.desc", "limit": 10000})
+    profiles, e1 = _fs_list("profiles", 5000)
+    events, e2 = _fs_recent("login_events", "logged_in_at", 5000)
+    usage, e3 = _fs_recent("usage_events", "used_at", 10000)
     if e1:
         st.error(f"회원 목록을 불러오지 못했습니다: {e1}")
         return
     p = pd.DataFrame(profiles or [])
     ev = pd.DataFrame(events or [])
     uv = pd.DataFrame(usage or [])
+    if not p.empty and "last_login_at" in p:
+        p = p.sort_values("last_login_at", ascending=False, na_position="last")
+    for df_, col in ((p, "last_login_at"), (p, "created_at"), (ev, "logged_in_at"), (uv, "used_at")):
+        if not df_.empty and col in df_:
+            df_[col] = _to_kst_text(df_[col])
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("가입/프로필 사용자", f"{len(p):,}명")
+    c1.metric("가입 사용자", f"{len(p):,}명")
     c2.metric("확인된 소속기관", f"{p['organization'].replace('', np.nan).nunique() if 'organization' in p else 0:,}곳")
     c3.metric("로그인 기록", f"{len(ev):,}회")
     c4.metric("기능 이용 기록", f"{len(uv):,}회")
@@ -2456,12 +2828,16 @@ def render_admin_dashboard():
         smart_table(g, width="stretch", hide_index=True)
     if not p.empty:
         st.markdown("### 👥 사용자 목록")
-        cols = [c for c in ["name", "email", "organization_type", "organization", "department", "last_login_at"] if c in p]
-        show = p[cols].rename(columns={"name":"이름", "email":"이메일", "organization_type":"기관유형",
-                                      "organization":"소속기관", "department":"부서", "last_login_at":"최근 로그인"})
+        cols = [c for c in ["name", "email", "organization_type", "organization", "department",
+                            "created_at", "last_login_at"] if c in p]
+        show = p[cols].rename(columns={"name": "이름", "email": "이메일", "organization_type": "기관유형",
+                                       "organization": "소속기관", "department": "부서",
+                                       "created_at": "가입일", "last_login_at": "최근 로그인"})
         smart_table(show, width="stretch", hide_index=True)
         st.download_button("📊 사용자 목록 Excel", dataframe_to_styled_xlsx(show, "스마트 통계 에이전트 사용자 목록"),
                            "사용자목록.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if e3:
+        st.caption(f"기능 이용 기록을 불러오지 못했습니다: {e3}")
     if not uv.empty:
         st.markdown("### 📈 기관별 기능 이용")
         _orguse = (uv.assign(소속기관=uv.get("organization", pd.Series(index=uv.index, dtype=object)).fillna("미입력").replace("", "미입력"))
@@ -2470,15 +2846,16 @@ def render_admin_dashboard():
         smart_table(_orguse, width="stretch", hide_index=True)
         st.markdown("### 🧭 최근 기능 이용 기록")
         _ucols = [c for c in ["used_at", "name", "email", "organization", "department", "action"] if c in uv]
-        _ushow = uv[_ucols].head(500).rename(columns={"used_at":"이용시각", "name":"이름", "email":"이메일",
-                                                        "organization":"소속기관", "department":"부서", "action":"기능"})
+        _ushow = uv[_ucols].head(500).rename(columns={"used_at": "이용시각", "name": "이름", "email": "이메일",
+                                                        "organization": "소속기관", "department": "부서", "action": "기능"})
         smart_table(_ushow, width="stretch", hide_index=True)
-
+    if e2:
+        st.caption(f"로그인 기록을 불러오지 못했습니다: {e2}")
     if not ev.empty:
         st.markdown("### 🕘 최근 로그인")
         cols = [c for c in ["logged_in_at", "name", "email", "organization", "department"] if c in ev]
-        show2 = ev[cols].head(300).rename(columns={"logged_in_at":"접속시각", "name":"이름", "email":"이메일",
-                                                   "organization":"소속기관", "department":"부서"})
+        show2 = ev[cols].head(300).rename(columns={"logged_in_at": "접속시각", "name": "이름", "email": "이메일",
+                                                   "organization": "소속기관", "department": "부서"})
         smart_table(show2, width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------- AI 호출
@@ -2869,7 +3246,7 @@ def ai_call(prompt, api_key=None, model=None, max_tokens=900, system=None, provi
     model = model or st.session_state.get("ai_model_g")
     system = system or _AI_SYS
     if not api_key:
-        return "⚠️ 사이드바에 API 키를 입력하면 AI 해석을 사용할 수 있어요."
+        return "⚠️ AI 도우미에서 API 키를 연결하면 AI 해석을 사용할 수 있어요."
     if not model:
         return "⚠️ 모델명이 지정되지 않았습니다. 사이드바에서 모델을 선택해 주세요."
     fn = None
@@ -2901,13 +3278,13 @@ def _extract_ai_text_from_openai_response(js):
 
 
 def ai_multimodal_text(binary, mime_type, prompt, kind="image"):
-    """현재 사이드바에서 선택한 AI 제공사로 이미지/오디오를 읽어 텍스트를 반환."""
+    """AI 도우미에서 선택한 AI 제공사로 이미지/오디오를 읽어 텍스트를 반환."""
     import base64
     provider = st.session_state.get("ai_provider", "Claude (Anthropic)")
     api_key = st.session_state.get("api_key")
     model = st.session_state.get("ai_model_g")
     if not api_key or not model:
-        return "⚠️ 먼저 사이드바의 '🤖 AI 기능 켜기'에서 API 키와 모델을 설정해 주세요."
+        return "⚠️ 먼저 `🧠 AI 도우미 → AI 연결 설정`에서 API 키와 모델을 설정해 주세요."
     if not _HAS_REQUESTS:
         return "⚠️ requests 라이브러리가 필요합니다."
     b64 = base64.b64encode(binary).decode("ascii")
@@ -3578,7 +3955,7 @@ def ai_interpret_advanced(slot, kind, table_df, extra="", context=None, capture_
     }
     with st.expander("🤖 AI 해석 (보고서·고찰·현장지도)"):
         if not key:
-            st.info("왼쪽 사이드바 **🤖 AI 기능 켜기**에 API 키를 넣으면 "
+            st.info("**🧠 AI 도우미 → AI 연결 설정**에 API 키를 넣으면 "
                     "이 결과를 3가지 형태의 문장으로 바꿔 드립니다.")
             return
         want = st.radio("어떤 형태로 만들까요?", list(STYLES.keys()), key="aim_" + slot)
@@ -3811,8 +4188,6 @@ def recommend_analysis(df):
                          ("**t-검정/ANOVA**" if ng == 2 else "**ANOVA + 사후검정(a,b,c)**") + " 이 적합합니다.", 3 if ng > 2 else 2))
     if len(cc) >= 2 and nc:
         recs.append(("범주형 변수가 2개 이상 → **이원배치 분산분석**으로 상호작용도 볼 수 있어요.", 2))
-    if len(nc) >= 3:
-        recs.append((f"숫자형 변수가 {len(nc)}개 → **PCA**로 특성을 압축·시각화할 수 있어요.", 1))
     if len(nc) >= 2:
         recs.append(("숫자형 변수가 여러 개 → **상관분석/히트맵**과 **회귀분석**이 가능합니다.", 2))
     seen, out = set(), []
@@ -4146,96 +4521,70 @@ MRR은 사용자가 정한 최소수용 기준과 자료 신뢰도·민감도를
 
 **보고서에 들어가는 것**: 소제목 · 해석 문장 · 결과표(`<표 1>` 캡션) · 그래프(`<그림 1>` 캡션, 가운데 정렬)
 
-표 서식(글꼴·크기·음영·선 굵기·행 높이)은 사이드바 **⚙️ 한글 표 서식 설정**에서 미리 바꿀 수 있습니다.
+표 서식(글꼴·크기·음영·선 굵기·행 높이)은 사이드바 **⚙️ 출력 및 그래프 설정 → 문서**에서 미리 바꿀 수 있습니다.
 **🕘 분석 이력**에는 언제 어떤 분석을 했는지 자동 기록되며, 이 기록도 보고서에 첨부할 수 있습니다.""",
 }
 
-# ---------------------------------------------------------------- 샘플 데이터
-def make_sample(kind):
-    if kind == "실험":
-        # 2품종 × 4처리 × 4반복 = 32행 (일원·이원배치·난괴법 모두 시연 가능)
-        rng = np.random.default_rng(42)
-        trt = {"대조구": 0, "처리1": 13, "처리2": 18, "처리3": 5}
-        var = {"청양": 0, "수비초": 8}
-        blk = {"I": -4, "II": 0, "III": 3, "IV": 1}
-        rows = []
-        for v, ve in var.items():
-            for t, te in trt.items():
-                for b, be in blk.items():
-                    rows.append({
-                        "품종": v, "처리구": t, "반복": b,
-                        "초장(cm)": round(95 + te*0.8 + ve*0.5 + be*0.4 + rng.normal(0, 3), 1),
-                        "엽수(개)": round(8 + te*0.15 + ve*0.2 + rng.normal(0, 0.8)),
-                        "생체중(g)": round(120 + te*2.2 + ve*1.5 + be + rng.normal(0, 6), 1),
-                        "수량(kg/10a)": round(480 + te*6 + ve*4 + be*2 + rng.normal(0, 15)),
-                    })
-        return pd.DataFrame(rows)
+# ================================================================ V1 간편형: 데이터 작성 가이드
+_V1_TEMPLATES = {
+    "일반 포장시험(처리×반복)": ["처리구", "반복", "초장(cm)", "생체중(g)", "수량(kg/10a)"],
+    "두 요인 시험": ["품종", "처리", "반복", "수량(kg/10a)"],
+    "반복측정 시험": ["개체번호", "처리구", "조사시기", "초장(cm)"],
+    "상관·회귀·예측": ["개체번호", "초장(cm)", "생체중(g)", "착과수(개)", "수량(kg/10a)"],
+}
 
-    if kind == "경제성":
-        return pd.DataFrame({
-            "처리구": ["대조구", "처리1", "처리2", "처리3"],
-            "수량": [250, 290, 310, 265], "단가": [15000]*4,
-            "종자비": [90000]*4, "비료비": [350000, 400000, 450000, 380000],
-            "농약비": [300000, 290000, 285000, 295000],
-            "고용노력비": [600000, 640000, 660000, 620000],
-            "재료비": [250000, 255000, 260000, 252000], "감가상각비": [200000]*4,
-            "자가노동시간": [95, 105, 110, 98]})
+def _v1_template_bytes(columns):
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        pd.DataFrame(columns=list(columns)).to_excel(writer, index=False, sheet_name="입력자료")
+        pd.DataFrame({"작성방법": [
+            "첫 번째 행에는 변수명만 적습니다.",
+            "한 열에는 한 가지 변수만 적습니다.",
+            "한 행에는 한 조사단위만 적습니다.",
+            "숫자 셀에는 숫자만 적고 단위는 열 이름에 적습니다.",
+            "병합셀·중간제목·소계·합계행은 넣지 않습니다.",
+            "반복1·반복2를 별도 열로 만들지 말고 반복 열 하나에 세로로 입력합니다.",
+        ]}).to_excel(writer, index=False, sheet_name="작성방법")
+    return out.getvalue()
 
-    if kind == "설문":
-        # 응답자별 '전반적 만족도(잠재요인)'를 두어 문항 간 상관이 생기도록 구성
-        rng = np.random.default_rng(7); N = 60
-        latent = rng.normal(0, 1, N)
-        def item(bias):
-            v = 3.8 + bias + latent*0.85 + rng.normal(0, 0.55, N)
-            return np.clip(np.round(v), 1, 5).astype(int)
-        opts = ["분산분석", "상관분석", "그래프 작성", "한글 표 생성", "머신러닝", "경제성 분석"]
-        return pd.DataFrame({
-            "응답자ID": [f"R{i+1:03d}" for i in range(N)],
-            "성별": rng.choice(["남", "여"], N),
-            "연령대": rng.choice(["20대", "30대", "40대", "50대 이상"], N),
-            "소속": rng.choice(["농업기술원", "농업기술센터", "국립연구소"], N),
-            "경력": rng.choice(["5년 미만", "5~10년", "10년 이상"], N),
-            "주사용목적": rng.choice(["논문 작성", "시험 보고서", "현장 지도", "교육 자료"], N),
-            "사용기능(다중)": [";".join(rng.choice(opts, size=int(rng.integers(1, 4)), replace=False))
-                          for _ in range(N)],
-            "Q1_사용편의성": item(0.30), "Q2_분석속도": item(-0.25), "Q3_결과신뢰도": item(0.10),
-            "Q4_기능충분성": item(-0.15), "Q5_보고서품질": item(0.35), "Q6_재사용의향": item(-0.05),
-            "개선의견": rng.choice([
-                "통계 종류가 더 많았으면 좋겠습니다",
-                "한글 표 서식이 편리해서 업무 시간이 줄었습니다",
-                "그래프 색상을 더 다양하게 바꾸고 싶습니다",
-                "사용법 설명이 자세해서 초보자도 쓰기 좋습니다",
-                "엑셀 시트가 많을 때 처리가 편리했으면 합니다",
-                "보고서 자동 생성 기능이 가장 유용했습니다", ""], N)})
-
-    if kind == "반복측정":
-        rng = np.random.default_rng(5); rows = []
-        for i in range(1, 13):
-            b0 = rng.normal(18, 3)
-            for w, add in zip(["2주", "4주", "6주", "8주"], [0, 9, 17, 23]):
-                rows.append({"개체번호": f"P{i:02d}", "조사시기": w,
-                             "초장(cm)": round(b0 + add + rng.normal(0, 1.8), 1)})
-        return pd.DataFrame(rows)
-
-    if kind == "분할구":
-        # 주구(관수) 2 × 세구(품종) 3 × 반복 3 = 18
-        rng = np.random.default_rng(7); rows = []
-        for rep in ["I", "II", "III"]:
-            for mp, me in [("관수", 8), ("무관수", 0)]:
-                for _cv, se in [("청양", 0), ("수비초", 5), ("칼미007", 9)]:
-                    rows.append({"반복": rep, "관수방법": mp, "품종": _cv,
-                                 "수량(kg/10a)": round(480 + me*6 + se*5 + rng.normal(0, 12), 1)})
-        return pd.DataFrame(rows)
-
-    if kind == "프로빗":
-        rng = np.random.default_rng(9); rows = []
-        for line, shift in [("감수성계통", 0.0), ("저항성계통", 0.55)]:
-            for dose in [5, 10, 20, 40, 80, 160]:
-                p = stats.norm.cdf((np.log10(dose) - (1.25 + shift)) * 2.3)
-                rows.append({"계통": line, "농도(ppm)": dose, "공시충수": 30,
-                             "사충수": int(np.clip(round(30*p + rng.normal(0, 1.2)), 0, 30))})
-        return pd.DataFrame(rows)
-    return pd.DataFrame()
+def _v1_data_readiness(data):
+    """업로드 직후 초보자가 고쳐야 할 자료 구조를 먼저 알려준다."""
+    errors, warns, oks = [], [], []
+    if data is None or getattr(data, "empty", True):
+        return {"errors": ["데이터가 비어 있습니다."], "warns": [], "oks": []}
+    if len(data.columns) < 2:
+        errors.append("열이 1개뿐입니다. 처리구·반복·측정값을 각각 다른 열로 나눠 주세요.")
+    else:
+        oks.append(f"{len(data.columns)}개 변수(열)")
+    oks.append(f"{len(data):,}개 관측값(행)")
+    if len(data) < 3:
+        warns.append("행이 3개 미만입니다. 대부분의 통계검정에는 관측값이 더 필요합니다.")
+    numlike = find_numeric_like(data)
+    if numlike:
+        warns.append("숫자인데 문자로 저장된 열: " + ", ".join(map(str, numlike.keys()))
+                     + ". `120kg`처럼 단위를 값에 붙이지 말고 `120`처럼 숫자만 적어 주세요.")
+    n_miss = int(data.isna().sum().sum())
+    if n_miss:
+        warns.append(f"빈칸(결측치) {n_miss}개가 있습니다. 조사 누락인지 확인해 주세요.")
+    n_dup = int(data.duplicated().sum())
+    if n_dup:
+        warns.append(f"완전히 같은 행이 {n_dup}개 있습니다. 중복 입력인지 확인해 주세요.")
+    coltxt = [str(c).strip().lower() for c in data.columns]
+    treat_header_hits = [c for c in coltxt if re.search(r"대조|처리\s*\d|처리[가-힣a-z]|품종\s*\d", c)]
+    has_group_col = any(any(k in c for k in ("처리구", "처리", "품종", "그룹", "시험구")) for c in coltxt)
+    if len(treat_header_hits) >= 2 and not has_group_col:
+        warns.append("처리구가 여러 열로 가로로 펼쳐진 형태로 보입니다. `처리구 / 반복 / 측정값`처럼 세로형으로 바꾸는 것을 권장합니다.")
+    repeat_wide = [c for c in coltxt if re.search(r"반복\s*[1-9]|rep\s*[1-9]", c)]
+    if len(repeat_wide) >= 2:
+        warns.append("`반복1`, `반복2`처럼 반복이 여러 열로 나뉜 것으로 보입니다. `반복` 열 하나에 1, 2, 3을 세로로 입력해 주세요.")
+    dsg = detect_design(data)
+    if dsg.get("trt"):
+        oks.append(f"처리·그룹 후보: {dsg['trt']}")
+        if dsg.get("blk"):
+            oks.append(f"반복·블록 후보: {dsg['blk']}")
+    else:
+        warns.append("처리·품종 비교용 자료라면 `처리구` 또는 `품종` 열이 필요합니다. 상관·회귀·예측 자료라면 없어도 됩니다.")
+    return {"errors": errors, "warns": warns, "oks": oks}
 
 # ================================================================ 세션
 # 메뉴를 옮겨다녀도 각 화면의 선택 상태가 초기화되지 않도록 붙잡아 둔다.
@@ -4243,7 +4592,7 @@ def make_sample(kind):
 # 화면(메뉴)이 바뀌면 스트림릿은 그려지지 않은 위젯의 상태를 버린다.
 # 아래 키들은 각 메뉴 안에서만 그려지므로 값을 다시 써 넣어 유지한다.
 # (사이드바 위젯은 매번 그려지므로 대상이 아니다)
-_PINNED_DEFAULTS = {"ap_ph": "Tukey HSD", "ap_err": "표준편차(SD)", "ap_max": 8}
+_PINNED_DEFAULTS = {"ap_ph": "Tukey HSD", "ap_err": "표준편차(SD)"}
 for _k, _v in _PINNED_DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
 
@@ -4253,7 +4602,7 @@ _PIN_GLOBAL_EXACT = {
     "hdr_rows", "del_sel", "err_type", "round_n", "plot_color",
     "svy_type", "econ_mode", "stat_sub", "svy_chart",
     "menu_choice", "menu_main", "menu_support",
-    "ap_ph", "ap_err", "ap_max",
+    "ap_ph", "ap_err",
     "_pin_store", "_pin_owner", "_pin_deny",
 }
 _PIN_GLOBAL_PREFIX = ("hwp_", "sup_", "fig_", "kamis_", "kosis_", "price_",
@@ -4295,7 +4644,7 @@ _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
 _PIN_TOUCH_GLOBAL = ("svy_type", "econ_mode", "stat_sub", "svy_chart", "ai_mode",
-                     "ap_ph", "ap_err", "ap_max")
+                     "ap_ph", "ap_err")
 
 
 def _pin_scoped_keys():
@@ -4323,7 +4672,7 @@ def _pin_restore_defaults():
     """상태를 지운 뒤 기본값을 다시 채운다.
 
     `st.slider("...", 1, 15, key="ap_max")` 처럼 **value= 없이 key= 로만** 만든 위젯은
-    세션에 값이 없으면 최솟값(1)으로 떨어진다. 원클릭 보고서의 '한 번에 분석할
+    세션에 값이 없으면 최솟값(1)으로 떨어진다. 원클릭 분석의 '한 번에 분석할
     조사항목 수'가 1이 되어 측정항목을 하나만 분석하던 원인이었다.
     """
     for k, v in _PINNED_DEFAULTS.items():
@@ -4380,12 +4729,16 @@ if "df" not in st.session_state: st.session_state.df = None
 if "price_db" not in st.session_state: st.session_state["price_db"] = None
 if "report_items" not in st.session_state: st.session_state.report_items = []
 
-# Supabase가 설정되고 AUTH_REQUIRED=true이면 로그인한 사용자만 아래 앱을 렌더링합니다.
+# Firebase가 설정되고 AUTH_REQUIRED=true이면 로그인한 사용자만 아래 앱을 렌더링합니다.
 render_auth_gate()
 
 # ================================================================ 사이드바
-st.sidebar.title("📊 스마트 통계 에이전트")
-st.sidebar.caption("실험 데이터 자동 통계 분석 시스템")
+st.sidebar.markdown("""
+<div class="v1-sidebar-brand">
+  <div class="v1-sidebar-brand-title">스마트 통계 에이전트 <span>Ver1</span></div>
+  <div class="v1-sidebar-brand-sub">실험 데이터 자동 통계 분석</div>
+</div>
+""", unsafe_allow_html=True)
 
 # 로그인 사용자의 소속을 사이드바에 표시한다.
 _auth_u = _current_auth_user()
@@ -4397,6 +4750,36 @@ if _auth_u:
     if st.sidebar.button("로그아웃", width="stretch", key="auth_logout_sidebar"):
         _auth_logout()
 
+with st.sidebar.expander("📘 데이터 작성 가이드", expanded=False):
+    st.markdown("""
+**기본 원칙**
+- 첫 행에는 변수명만 입력
+- 한 열 = 한 변수, 한 행 = 한 조사단위
+- 숫자 셀에는 숫자만 입력 (`120kg` ❌ → `120` ✅)
+- 단위는 열 이름에 입력 (`수량(kg/10a)`)
+- 병합셀·중간제목·평균·합계행은 넣지 않기
+""")
+    st.markdown("**✅ 권장 예시**")
+    smart_table(pd.DataFrame({
+        "처리구": ["대조구", "대조구", "처리1", "처리1"],
+        "반복": [1, 2, 1, 2],
+        "수량(kg/10a)": [500, 510, 560, 555],
+    }), hide_index=True, width="stretch")
+    with st.expander("❌ 자주 틀리는 작성 예시"):
+        st.markdown("**처리구를 가로로 펼치지 마세요.**")
+        smart_table(pd.DataFrame({"반복": [1,2], "대조구": [500,510], "처리1": [560,555]}), hide_index=True, width="stretch")
+        st.markdown("→ `처리구 / 반복 / 수량` 세 열로 세로 입력합니다.")
+        st.markdown("**숫자와 단위를 섞지 마세요.**  `120kg`, `35cm`, `결측` ❌ → `120`, `35`, 빈칸 ✅")
+        st.markdown("**병합셀·중간 합계행을 넣지 마세요.** 모든 행에 처리구/품종 값을 반복 입력하고 실제 관측값만 남깁니다.")
+        st.markdown("**반복을 여러 열로 만들지 마세요.** `반복1 수량 / 반복2 수량` ❌ → `반복` 열 + `수량` 열 ✅")
+    st.markdown("**빈 엑셀 양식**")
+    for _name, _cols in _V1_TEMPLATES.items():
+        st.download_button(
+            f"📥 {_name}", _v1_template_bytes(_cols),
+            file_name=f"{_name.replace('·','_').replace('×','x')}_빈서식.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"v1_tpl_{_name}", width="stretch")
+
 with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
     _input_mode = st.radio("입력 방식", ["📁 Excel/CSV", "📷 이미지/사진", "🎤 음성"],
                            horizontal=False, key="data_input_mode")
@@ -4404,8 +4787,14 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
     if _input_mode == "📁 Excel/CSV":
         ups = st.file_uploader("Excel / CSV 업로드 (여러 개 가능)",
                                type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-        hdr_rows = st.radio("↳ 머리글(변수명) 행 수", [1, 2], horizontal=True, key="hdr_rows",
-                            help="변수명이 두 줄로 되어 있으면 2를 선택하세요. 두 줄이 합쳐진 이름으로 만들어집니다.")
+        st.session_state.setdefault("hdr_rows", 1)
+        with st.expander("고급 · 변수명이 두 줄인 파일", expanded=False):
+            _two_header = st.checkbox("변수명이 위·아래 두 줄로 나뉘어 있습니다",
+                                      value=(int(st.session_state.get("hdr_rows", 1)) == 2),
+                                      key="v1_two_header")
+            st.session_state["hdr_rows"] = 2 if _two_header else 1
+            st.caption("대부분의 파일은 끈 상태(머리글 1행)가 맞습니다.")
+        hdr_rows = int(st.session_state.get("hdr_rows", 1))
         st.caption("엑셀에 시트가 여러 개면 시트별로 나뉘어 들어옵니다. "
                    "값을 바꾸면 올려둔 파일을 **자동으로 다시 읽습니다**(새로고침 불필요).")
         # 머리글 행 수를 바꾸면 이미 올린 파일을 다시 읽어 화면에도 즉시 반영한다.
@@ -4462,24 +4851,6 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
         elif _hdr_changed:
             st.info("머리글 행 수를 바꿨습니다. 파일을 다시 올리면 새 기준으로 읽습니다.")
 
-        st.markdown("---")
-        st.markdown("**🧪 샘플 데이터 (연습용)**")
-        st.caption("데이터가 없다면 아래 버튼을 눌러 체험해 보세요.")
-        c6, c7 = st.columns(2)
-        if c6.button("🔁 반복측정", width="stretch"):
-            st.session_state.files["샘플_반복측정"] = make_sample("반복측정")
-        if c7.button("🧪 프로빗", width="stretch"):
-            st.session_state.files["샘플_프로빗"] = make_sample("프로빗")
-        if st.button("🌾 분할구(Split-plot)", width="stretch"):
-            st.session_state.files["샘플_분할구"] = make_sample("분할구")
-        c1, c2, c3 = st.columns(3)
-        if c1.button("🌱 실험", width="stretch"):
-            st.session_state.files["샘플_실험데이터"] = make_sample("실험")
-        if c2.button("💰 경제성", width="stretch"):
-            st.session_state.files["샘플_경제성"] = make_sample("경제성")
-        if c3.button("📋 설문", width="stretch"):
-            st.session_state.files["샘플_설문"] = make_sample("설문")
-
     elif _input_mode == "📷 이미지/사진":
         st.caption("엑셀 화면 캡처·조사표 사진을 AI가 표 데이터로 바꿉니다. 분석 전 반드시 값을 확인하세요.")
         _img = st.file_uploader("표 이미지 업로드", type=["png", "jpg", "jpeg", "webp"], key="table_img_up")
@@ -4512,7 +4883,7 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
                 st.success("이미지에서 읽은 표를 분석 데이터로 적용했습니다.")
                 st.rerun()
         if not st.session_state.get("api_key"):
-            st.info("이미지 표 인식은 아래 '🤖 AI 기능 켜기'에서 API 키를 설정한 뒤 사용할 수 있습니다.")
+            st.info("이미지 표 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 설정한 뒤 사용할 수 있습니다.")
 
     else:  # 음성
         st.caption("예: '처리구 A, 반복 1, 초장 72.3, 수량 615.4'처럼 한 행씩 말해 주세요.")
@@ -4562,7 +4933,7 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
                 st.session_state.pop("voice_transcript", None)
                 st.rerun()
         if not st.session_state.get("api_key"):
-            st.info("음성 인식은 ChatGPT 또는 Gemini API 키를 설정한 뒤 사용할 수 있습니다.")
+            st.info("음성 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 ChatGPT 또는 Gemini API 키를 설정한 뒤 사용할 수 있습니다.")
 
 # 데이터 선택 + 삭제
 if st.session_state.files:
@@ -4583,12 +4954,21 @@ if st.session_state.files:
             st.session_state.df = st.session_state.files[choice].copy()
 
     if st.sidebar.button("↩️ 원본 데이터로 되돌리기", width="stretch",
-                         help="전처리·파생변수 작업을 모두 취소하고 처음 불러온 상태로 복원합니다."):
+                         help="현재 선택한 데이터를 처음 불러온 상태로 다시 불러옵니다."):
         k = st.session_state.get("cur_key")
         if k in st.session_state.files:
             st.session_state.df = st.session_state.files[k].copy()
             st.sidebar.success("원본으로 되돌렸습니다.")
             st.rerun()
+
+    _ready = _v1_data_readiness(st.session_state.get("df"))
+    if _ready["errors"]:
+        st.sidebar.error("❌ 데이터 구조 확인 필요")
+    elif _ready["warns"]:
+        st.sidebar.warning(f"⚠️ 데이터 점검 {len(_ready['warns'])}건")
+    else:
+        st.sidebar.success("✅ 분석 준비 완료")
+    st.sidebar.caption("자세한 내용: 통계분석 → 내 데이터 확인")
 
     with st.sidebar.expander("🗑️ 데이터 삭제"):
         dels = st.multiselect("삭제할 데이터 선택", names, key="del_sel")
@@ -4615,19 +4995,11 @@ if st.session_state.files and st.sidebar.button(
     st.session_state.get("_pin_store", {}).pop(st.session_state.get("cur_key"), None)
     st.rerun()
 
-# 메뉴 — 주요 분석 흐름을 크게, AI/설명서는 보조 기능으로 작게 분리한다.
-_MAIN_MENU_OPTIONS = [
-    "⚡ 원클릭 보고서",
-    "📊 통계분석",
-    "💰 경제성분석",
-    "📋 설문조사 분석",
-    "📑 보고서",
-]
-_SUPPORT_MENU_OPTIONS = ["🧠 AI 도우미", "📖 사용설명서"]
+# 메뉴 — V1은 분석 시작 3개만 강조, 보고서·AI·설명서는 보조 기능으로 작게 표시
+_MAIN_MENU_OPTIONS = ["⚡ 원클릭 분석", "📊 통계분석", "📋 설문조사 분석"]
+_SUPPORT_MENU_OPTIONS = ["📑 보고서", "🧠 AI 도우미", "📖 사용설명서"]
 if _is_admin_user():
     _SUPPORT_MENU_OPTIONS.append("👑 관리자")
-
-# 현재 선택은 두 라디오 사이에서 하나만 유지한다.
 _all_menu_options = _MAIN_MENU_OPTIONS + _SUPPORT_MENU_OPTIONS
 if st.session_state.get("menu_choice") not in _all_menu_options:
     st.session_state["menu_choice"] = _MAIN_MENU_OPTIONS[0]
@@ -4642,123 +5014,298 @@ def _menu_from_support():
     if value:
         st.session_state["menu_choice"] = value
 
-# key가 있는 container에는 st-key-* 클래스가 붙으므로 메뉴 영역만 안전하게 스타일링한다.
 st.sidebar.markdown("""
 <style>
-[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] div[role="radiogroup"] {
-    gap: 0.22rem;
+/* 클릭되지 않는 섹션 제목은 평문. 실제 radio option만 선택/hover 표현 */
+[data-testid="stSidebar"] .v1-section-label {
+    margin:.72rem 0 .18rem .18rem; color:#66786c; font-size:.76rem;
+    font-weight:700; letter-spacing:.02em; background:transparent; border:0; box-shadow:none;
 }
-[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label {
-    padding: 0.22rem 0.34rem;
-    border-radius: 8px;
+[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] > label,
+[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] > label {display:none!important;}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] {gap:.16rem;}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label {
+    width:100%; padding:.48rem .58rem; border:0!important; border-radius:8px;
+    background:transparent!important; box-shadow:none!important; font-size:.98rem; font-weight:720;
 }
-[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label p {
-    font-size: 1.04rem !important;
-    font-weight: 750 !important;
-    line-height: 1.45 !important;
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:hover {background:#EEF6F0!important;}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:has(input:checked) {
+    background:#E4F1E7!important; box-shadow:inset 3px 0 0 #4F8060!important; color:#244A33!important;
 }
-[data-testid="stSidebar"] .st-key-main_menu_block [data-testid="stRadio"] label:has(input:checked) {
-    background: #EAF3FA;
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] {gap:.04rem;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label {
+    width:100%; padding:.28rem .58rem; border:0!important; border-radius:7px;
+    background:transparent!important; box-shadow:none!important; color:#65756C!important;
+    font-size:.82rem; font-weight:540;
 }
-[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] div[role="radiogroup"] {
-    gap: 0.06rem;
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:hover {background:#F2F7F3!important;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:has(input:checked) {
+    background:#EDF4EF!important; color:#334A3A!important; font-weight:680;
 }
-[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label {
-    padding: 0.08rem 0.28rem;
-    border-radius: 7px;
-}
-[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label p {
-    font-size: 0.84rem !important;
-    font-weight: 500 !important;
-    color: #5F7285 !important;
-    line-height: 1.3 !important;
-}
-[data-testid="stSidebar"] .st-key-support_menu_block [data-testid="stRadio"] label:has(input:checked) {
-    background: #F3F7FA;
-}
-[data-testid="stSidebar"] .menu-support-title {
-    margin: 0.75rem 0 0.10rem 0.15rem;
-    font-size: 0.72rem;
-    font-weight: 700;
-    color: #8A9AAA;
-    letter-spacing: 0.02em;
-}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label > div:first-child,
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label > div:first-child {display:none!important;}
 </style>
 """, unsafe_allow_html=True)
 
-st.sidebar.markdown("### 📁 주요 기능")
+# ================================================================ V1 최종 시안 색감/캐릭터 테마
+# 첨부 시안에서 빨간 네모로 표시한 4개 디자인 요소를 반영합니다.
+# ① 좌측 상단 브랜드 ② 메인 상단 배너 ③ 좌측 하단 캐릭터 ④ 우측 하단 AI 버튼
+# 통계 계산·그래프·Excel/HWPX/Word·분석 메뉴 기능 로직은 변경하지 않습니다.
+_V1_MASCOT_TOP = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAG4AAABeCAYAAADCISFWAAAgAElEQVR4AYzBefjnB0Ef+Nf78/3NneM3ObmCA+G+HEVdtChpVTyKJd4Wu6VKW6RVqdvd5Y/t4/Fsn922u49ufGjts61ukUVtUQldDzw7EbyqQOQQAiZMyJ1MMr85Mr/z+3nv95jfTCYB6+uVu87saOuCIkE9RZEiEloUCeqCxEKrlmKpiLhULQW1EFLqvLpELbUWGtJaCEko4vMKGkutuSSUOC8oNRMLKYJGFRUhZkJLzMRcW4oQ1JMV0SJF1HmttDa3ttz1mXu86523esUrXix3ndnWooiFiKoLihBVc/H5tBUzCTETWnNBUSSRFkEtRdVcUJdqSy3FTFAtVRG7Eook2oqnSqIqQkpJQs1URVBzJaG1FBdVEgt1QVUSrUsk0VZL4oK2FhJVMVNOnzrjve/5TXcf/6zJJLa3d+SuM9vUTMxVBUVQcxXxRPVEQS20FhILCa25JKqWImZaEh0riaq5oAiKtiS0FlrJoK0qQlDETBELIaWIWEjFRUm0CEFL0CIuiKq5ELQihDqvxFLNBK2IWmqLSFzQltAiRHS6450/+16mO771W17rissP2djclrtObxPUpVpiJuaCulRdKv4KglLETNCg5iIatLSIKomFVs205iqozydmglpKXBBiKS6qpZippbgooYiFlDovpRYq4rygFmqmVMVFDWopMeCjH7nDz73zF73tf3yza687rCMjctfpbbsa1EIsBY2LWhIRdVFbSWgR1FxioYJaipaYCWqmJLSIhLbm6rzWXMSolKqEFikNrSpiSMR5CYIqElqGRFXQhBIltERcVMmgLUERtIi5hNYFiZkoWqLm2pLQIiiJucTCL777191z/F7/wz/5HitDTMtU5PipLVMloUVIqJkSklioSwQVVEMsRWhJUEvRlkRLYqaUJNpKYq6KoFoLQVtLQdVcFWMrrI7dObK+fW51c+ecweDgnoP2rexfGyYrx9usVcwlFuJSSWglUeeVhLYiGhfEUhFBLZRRBUm0iIWWWGqpWgohloL/+B9/1X133+eHfuhNEoqWbG5PbZetaW1ORxs7o50yZJDBRY25hNoVQsyVxELrghC0cVG1SMxFLUURVTOl5orQmisSC1Vji3F17dxjN/3BR297/afu/eiRrenjxu06uO9yz3nG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'
+_V1_MASCOT_SIDE = 'data:image/png;base64,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'
+_V1_MASCOT_BADGE = 'data:image/png;base64,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'
+
+_V1_HERO_SCENE = 'data:image/png;base64,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'
+_V1_HERO_STRIP = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAACaCAIAAAAbw56UAAAA8klEQVR42t1XQQ7DMAiDLOdd9v9n7b4H7DC16qSuTdgHcCRHtJGaq0UTbDBUn0sR7+RSzAeSqgskAQcCWZSNUPaOqwBZxNgII2mHEYHSwjyygpBsbDF0ZK4owjrykKA8eti1wxunQbvG6UG/ypAeSTSOXTucK7U4zXWc+wRa+BmmD7niPRE7Q2C10x11ilCRVQIE4XuQ1zx0CKOpRs+PoV0bucPxkxMWw6/OPjBtLx9Y9rcPVNvpVgvcyDRomWhdju5QI59rMELi/g0GfqpFe/WBtXx9YN4+CJh8YLP1cFviy2ekLTW2cNQ4pYL/2vvt4QJ/FIBODn7azPkAAAAASUVORK5CYII='
+
+_V1_REFERENCE_THEME_CSS = """
+<style>
+/* ── 시안 배경: 하늘 → 민트 그라데이션 + 구름 + 언덕 3겹 ── */
+.stApp {
+    background-color:#F2F8F1 !important;
+    background-image:
+        /* 구름 */
+        radial-gradient(ellipse 96px 24px at 17% 62%, rgba(255,255,255,.92) 0 99%, rgba(255,255,255,0) 100%),
+        radial-gradient(ellipse 62px 18px at 24% 59%, rgba(255,255,255,.88) 0 99%, rgba(255,255,255,0) 100%),
+        radial-gradient(ellipse 84px 22px at 74% 55%, rgba(255,255,255,.90) 0 99%, rgba(255,255,255,0) 100%),
+        radial-gradient(ellipse 56px 16px at 80% 52%, rgba(255,255,255,.85) 0 99%, rgba(255,255,255,0) 100%),
+        /* 언덕 3겹 */
+        radial-gradient(ellipse 62% 210px at 86% 106%, #CDE9B4 0 99%, rgba(205,233,180,0) 100%),
+        radial-gradient(ellipse 58% 190px at 50% 108%, #DDF1C9 0 99%, rgba(221,241,201,0) 100%),
+        radial-gradient(ellipse 68% 225px at 10% 111%, #E8F6DA 0 99%, rgba(232,246,218,0) 100%),
+        /* 하늘 → 민트 */
+        linear-gradient(180deg,#E4F4FB 0%,#EEF9FC 16%,#F6FBF8 52%,#F1F8F0 100%) !important;
+    background-repeat:no-repeat !important;
+    background-attachment:fixed !important;
+}
+[data-testid="stAppViewContainer"] > .main {background:transparent !important;}
+[data-testid="stHeader"] {background:transparent !important;}
+[data-testid="stSidebar"] {
+    background:linear-gradient(180deg,#EFF7F0 0%,#F5FDF7 55%,#FBFEFB 100%) !important;
+    border-right:1px solid #DCECDF !important;
+}
+
+/* 좌측 상단: 시안의 캐릭터 + 한 줄 브랜드명 */
+[data-testid="stSidebar"] .v1-sidebar-brand {
+    position:relative; min-height:82px; padding:.42rem .10rem .30rem 4.55rem;
+    margin:.02rem 0 .28rem 0; display:flex; flex-direction:column; justify-content:center;
+}
+[data-testid="stSidebar"] .v1-sidebar-brand::before {
+    content:""; position:absolute; left:.05rem; top:.10rem; width:72px; height:76px;
+    background-image:url('__BADGE_MASCOT__'); background-repeat:no-repeat;
+    background-position:center; background-size:contain; pointer-events:none;
+}
+[data-testid="stSidebar"] .v1-sidebar-brand-title {
+    color:#17344B; font-size:1.03rem; line-height:1.16; font-weight:850; letter-spacing:-.050em;
+    white-space:nowrap;
+}
+[data-testid="stSidebar"] .v1-sidebar-brand-title span {color:#25A953;}
+@media (max-width: 1180px) {
+    [data-testid="stSidebar"] .v1-sidebar-brand-title {font-size:.96rem;}
+}
+[data-testid="stSidebar"] .v1-sidebar-brand-sub {
+    margin-top:.28rem; color:#718077; font-size:.70rem; line-height:1.25; font-weight:600;
+}
+
+/* 제목/본문 포인트 색 */
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
+.main h1, .main h2, .main h3 {color:#17344B !important;}
+.main a, [data-testid="stSidebar"] a {color:#259B4A !important;}
+input[type="radio"], input[type="checkbox"] {accent-color:#2DBD60 !important;}
+
+/* 버튼/입력창/카드 색감만 시안 계열로 */
+[data-testid="stBaseButton-primary"] {
+    background:#2FBE62 !important; border-color:#2FBE62 !important; color:#FFFFFF !important;
+    box-shadow:0 3px 10px rgba(46,190,99,.18) !important;
+}
+[data-testid="stBaseButton-primary"]:hover {background:#27AD58 !important; border-color:#27AD58 !important;}
+[data-testid="stBaseButton-secondary"], div.stDownloadButton > button {
+    background:#FFFFFF !important; border-color:#C8E8D2 !important; color:#28593A !important;
+}
+[data-testid="stBaseButton-secondary"]:hover, div.stDownloadButton > button:hover {
+    background:#F1FAF4 !important; border-color:#73CE8D !important; color:#1F7C3F !important;
+}
+[data-testid="stFileUploaderDropzone"] {background:#F7FCF8 !important; border-color:#BFE5CA !important;}
+[data-testid="stExpander"] {border-color:#D7EBDD !important; background:rgba(255,255,255,.86) !important;}
+button[data-baseweb="tab"][aria-selected="true"] {color:#219B4B !important;}
+[data-baseweb="tab-highlight"] {background-color:#31BE63 !important;}
+[data-baseweb="input"] > div:focus-within,
+[data-baseweb="select"] > div:focus-within,
+[data-baseweb="textarea"]:focus-within {
+    border-color:#75CF90 !important; box-shadow:0 0 0 1px #75CF90 !important;
+}
+
+/* 기존 사이드바 메뉴 구조는 유지하고 선택 색만 시안처럼 */
+[data-testid="stSidebar"] .v1-section-label {color:#6B7E72 !important;}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:hover {background:#EDF9F1 !important;}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:has(input:checked) {
+    background:linear-gradient(90deg,#35BE62 0%,#48C96F 100%) !important;
+    box-shadow:0 5px 12px rgba(46,174,86,.16) !important; color:#FFFFFF !important;
+}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:has(input:checked) p {color:#FFFFFF !important;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label {color:#64766B !important;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:hover {background:#F1F9F3 !important;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:has(input:checked) {
+    background:#EAF7EE !important; color:#2A6540 !important;
+}
+
+/* 메인 상단: 빨간 네모로 표시한 배너. 실제 콘텐츠는 아래에 그대로 이어짐. */
+/* Streamlit 기본 상단 여백을 줄여 사이드바 브랜드 영역과 배너 시작 높이를 맞춘다. */
+[data-testid="stMainBlockContainer"], .main .block-container {
+    padding-top:3.15rem !important;
+}
+.v1-hero {
+    position:relative; min-height:154px; overflow:hidden; margin:.02rem 0 1.00rem 0;
+    border:1px solid #DDEEE4; border-radius:15px;
+    background-color:#EDF8EC;
+    background-image:
+      radial-gradient(circle at 69% 31%, #FFD85B 0 6px, transparent 7px),
+      url('__HERO_STRIP__');
+    background-repeat:no-repeat, repeat-x;
+    background-position:center, left bottom;
+    background-size:auto, auto 100%;
+    box-shadow:0 5px 18px rgba(76,137,96,.08);
+}
+.v1-hero::before, .v1-hero::after {
+    content:""; position:absolute; background:#FFFFFF; opacity:.93; border-radius:999px;
+}
+.v1-hero::before {width:70px; height:18px; left:31%; top:23px; box-shadow:22px 3px 0 -4px #fff, -19px 5px 0 -6px #fff;}
+.v1-hero::after {width:54px; height:14px; right:31%; top:17px; box-shadow:18px 4px 0 -5px #fff;}
+.v1-hero-copy {position:relative; z-index:3; padding:38px 320px 24px 30px;}
+.v1-hero-title {color:#17344B; font-weight:900; font-size:1.72rem; letter-spacing:-.045em; line-height:1.12;}
+.v1-hero-title span {color:#28A955;}
+.v1-hero-sub {margin-top:.48rem; color:#567166; font-size:.87rem; font-weight:650; letter-spacing:-.02em;}
+.v1-hero-mascot {
+    position:absolute; z-index:4; right:0; left:0; top:0; bottom:0;
+    background-image:url('__HERO_SCENE__'); background-repeat:no-repeat;
+    background-position:right 42px bottom; background-size:auto 90%; pointer-events:none;
+}
+
+/* 좌측 하단 빨간 네모: 설정 바로 위에 실제 공간을 확보해 캐릭터가 절대 잘리지 않게 함 */
+[data-testid="stSidebar"] .v1-side-mascot {
+    width:100%; height:158px; margin:.50rem 0 .16rem 0;
+    background-image:url('__SIDE_MASCOT__'); background-repeat:no-repeat;
+    background-position:center bottom; background-size:130px auto; pointer-events:none;
+}
+
+/* 우측 하단 빨간 네모: 기존 AI 기능은 그대로 두고 캐릭터가 포함된 초록 말풍선 모양만 적용 */
+div.st-key-gai_dock {right:1.15rem !important; bottom:1.05rem !important;}
+div.st-key-gai_dock button {
+    position:relative !important; min-height:52px !important; border-radius:999px !important;
+    padding:.70rem 1.28rem .70rem 3.55rem !important; background:#31BE63 !important;
+    border:1px solid #31BE63 !important; color:#FFFFFF !important;
+    box-shadow:0 8px 22px rgba(42,161,81,.28) !important;
+}
+div.st-key-gai_dock button::before {
+    content:""; position:absolute; left:5px; top:5px; width:41px; height:41px; border-radius:50%;
+    background-color:#FFFFFF; background-image:url('__BADGE_MASCOT__'); background-repeat:no-repeat;
+    background-position:center 54%; background-size:34px auto; box-shadow:0 1px 4px rgba(0,0,0,.08);
+}
+div.st-key-gai_dock button::after {
+    content:"♥"; position:absolute; right:-4px; top:-12px; color:#FF9CB3; font-size:1.25rem;
+    transform:rotate(11deg); text-shadow:0 1px 2px rgba(255,255,255,.9);
+}
+div.st-key-gai_dock button:hover {background:#27AC58 !important; border-color:#27AC58 !important;}
+
+@media (max-width: 900px) {
+    [data-testid="stMainBlockContainer"], .main .block-container {padding-top:3.05rem !important;}
+    .v1-hero {min-height:132px;}
+    .v1-hero-copy {padding:26px 255px 18px 20px;}
+    .v1-hero-title {font-size:1.36rem;}
+    .v1-hero-sub {font-size:.78rem;}
+    .v1-hero-mascot {background-size:auto 92%;}
+}
+@media (max-width: 640px) {
+    [data-testid="stMainBlockContainer"], .main .block-container {padding-top:2.95rem !important;}
+    .v1-hero {min-height:118px;}
+    .v1-hero-copy {padding-right:165px;}
+    .v1-hero-mascot {background-size:auto 86%;}
+    .v1-hero-title {font-size:1.18rem;}
+    .v1-hero-sub {font-size:.72rem; max-width:72%;}
+    [data-testid="stSidebar"] .v1-side-mascot {height:140px; background-size:112px auto;}
+}
+</style>
+""".replace("__TOP_MASCOT__", _V1_MASCOT_TOP).replace("__SIDE_MASCOT__", _V1_MASCOT_SIDE).replace("__BADGE_MASCOT__", _V1_MASCOT_BADGE).replace("__HERO_SCENE__", _V1_HERO_SCENE).replace("__HERO_STRIP__", _V1_HERO_STRIP)
+st.markdown(_V1_REFERENCE_THEME_CSS, unsafe_allow_html=True)
+
+st.sidebar.markdown('<div class="v1-section-label">분석 시작</div>', unsafe_allow_html=True)
 _current_menu = st.session_state.get("menu_choice")
 with st.sidebar.container(key="main_menu_block"):
-    _main_idx = (_MAIN_MENU_OPTIONS.index(_current_menu)
-                 if _current_menu in _MAIN_MENU_OPTIONS else None)
-    st.radio(
-        "주요 기능", _MAIN_MENU_OPTIONS, index=_main_idx, key="menu_main",
-        label_visibility="collapsed", on_change=_menu_from_main,
-    )
+    _main_idx = (_MAIN_MENU_OPTIONS.index(_current_menu) if _current_menu in _MAIN_MENU_OPTIONS else None)
+    st.radio("주요 기능", _MAIN_MENU_OPTIONS, index=_main_idx, key="menu_main",
+             label_visibility="collapsed", on_change=_menu_from_main)
 
-st.sidebar.markdown('<div class="menu-support-title">보조 기능</div>', unsafe_allow_html=True)
+st.sidebar.markdown('<div class="v1-section-label">보조 기능</div>', unsafe_allow_html=True)
 _current_menu = st.session_state.get("menu_choice")
 with st.sidebar.container(key="support_menu_block"):
-    _support_idx = (_SUPPORT_MENU_OPTIONS.index(_current_menu)
-                    if _current_menu in _SUPPORT_MENU_OPTIONS else None)
-    st.radio(
-        "보조 기능", _SUPPORT_MENU_OPTIONS, index=_support_idx, key="menu_support",
-        label_visibility="collapsed", on_change=_menu_from_support,
-    )
+    _support_idx = (_SUPPORT_MENU_OPTIONS.index(_current_menu) if _current_menu in _SUPPORT_MENU_OPTIONS else None)
+    st.radio("보조 기능", _SUPPORT_MENU_OPTIONS, index=_support_idx, key="menu_support",
+             label_visibility="collapsed", on_change=_menu_from_support)
 
 menu = st.session_state.get("menu_choice", _MAIN_MENU_OPTIONS[0])
 
-with st.sidebar.expander("⚙️ 한글 표 서식 설정"):
-    _HWP_FONTS = ["휴먼명조", "함초롬바탕", "함초롬돋움", "바탕", "신명조",
-                  "맑은 고딕", "나눔명조", "나눔고딕", "Noto Sans KR", "돋움", "굴림", "직접 입력…"]
-    st.selectbox("표·보고서 글씨체", _HWP_FONTS, key="hwp_font",
-                 help="한글(hwpx)로 내려받는 표와 보고서 본문에 적용됩니다.")
-    if st.session_state.get("hwp_font") == "직접 입력…":
-        st.text_input("사용할 글꼴 이름", key="hwp_font_custom",
-                      placeholder="예) KoPub바탕체 Medium",
-                      help="한글의 글꼴 목록에 표시되는 이름을 그대로 입력하세요.")
-    st.caption(f"현재 적용 글꼴: **{_selected_hwp_font()}**")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.selectbox("글자 크기(pt)", [8, 9, 10, 11, 12], index=2, key="hwp_size")
-        st.color_picker("머리행 음영", "#D9D9D9", key="hwp_shade")
-    with c2:
-        st.selectbox("선 굵기", ["0.1 mm", "0.12 mm", "0.15 mm", "0.2 mm", "0.4 mm"], key="hwp_lw")
-        st.color_picker("표 선 색", "#000000", key="hwp_line")
-    st.checkbox("좌우 바깥 세로선 표시", value=False, key="hwp_sides",
-                help="끄면 논문에서 흔히 쓰는 형태(양쪽 세로선 없음)가 됩니다.")
-    st.slider("행 높이(mm)", 4.0, 15.0, 6.5, 0.5, key="hwp_rowh",
-              help="값을 줄이면 표의 위아래 간격이 촘촘해집니다.")
-    c3, c4 = st.columns(2)
-    c3.slider("위첨자 크기(%)", 40, 90, 65, 5, key="sup_size")
-    c4.slider("위첨자 올림(%)", 0, 70, 35, 5, key="sup_off",
-              help="값이 클수록 유의성 문자(a,b,c)가 더 위로 올라갑니다.")
-    st.slider("줄글 표 자간(%)", -30, 0, -14, 1, key="hwp_tight",
-              help="부분예산표처럼 글이 긴 표에서 글자를 좁혀 한 줄에 담습니다. "
-                   "0으로 두면 좁히지 않습니다.")
-    st.color_picker("AI 해석 글자색", "#0000FF", key="hwp_aicolor",
-                    help="AI가 만든 문장을 사람이 쓴 문장과 구분하기 위한 색입니다. "
-                         "검정으로 바꾸면 구분 없이 나옵니다.")
-    st.caption("한글에 설치된 글꼴이어야 정확히 표시됩니다.")
+st.sidebar.markdown('<div class="v1-side-mascot" aria-hidden="true"></div>', unsafe_allow_html=True)
 
-with st.sidebar.expander("📈 분석·그래프 설정"):
-    st.radio("오차막대 기준", ["표준편차(SD)", "표준오차(SE)"], key="err_type",
-             help="SD는 '개체들이 얼마나 흩어져 있나', SE는 '평균값이 얼마나 믿을 만한가'를 봅니다.")
-    with st.expander("❓ 표준편차(SD)와 표준오차(SE), 뭐가 다른가요?"):
-        st.markdown(EXPLAIN["sd_se"])
-    st.selectbox("소수점 자릿수", [1, 2, 3, 4], index=2, key="round_n")
-    st.selectbox("그래프 색상", ["파랑", "초록", "주황", "보라", "회색"], key="plot_color")
-    c1, c2 = st.columns(2)
-    c1.number_input("그래프 가로", 3.0, 16.0, 6.0, 0.5, key="fig_w")
-    c2.number_input("그래프 세로", 2.0, 12.0, 4.0, 0.5, key="fig_h")
-    st.checkbox("✨ 깔끔한 스타일 (그라데이션·값 표시)", value=True, key="fig_style",
-                help="막대에 옅은→진한 색을 입히고 값을 표시하며, 전체 그래프의 축·간격을 통일합니다.")
-    st.checkbox("⬛ 막대·원형 조각 검은 테두리", value=True, key="fig_border",
-                help="그래프 전체 외곽선이 아니라 막대와 원형/도넛 조각의 경계선에만 검은색을 적용합니다.")
-    st.checkbox("막대 위에 값 표시", value=True, key="fig_vlabel")
-    st.checkbox("격자선 표시", value=False, key="fig_grid",
-                help="'깔끔한 스타일'을 켜면 가로 격자선은 자동으로 들어갑니다.")
-    st.checkbox("그래프 제목 표시", value=True, key="fig_title")
+with st.sidebar.expander("⚙️ 출력 및 그래프 설정", expanded=False):
+    _set_doc, _set_graph = st.tabs(["문서", "그래프"])
+    with _set_doc:
+        _HWP_FONTS = ["휴먼명조", "함초롬바탕", "함초롬돋움", "바탕", "신명조",
+                      "맑은 고딕", "나눔명조", "나눔고딕", "Noto Sans KR", "돋움", "굴림", "직접 입력…"]
+        st.selectbox("표·보고서 글씨체", _HWP_FONTS, key="hwp_font",
+                     help="한글(hwpx)로 내려받는 표와 보고서 본문에 적용됩니다.")
+        if st.session_state.get("hwp_font") == "직접 입력…":
+            st.text_input("사용할 글꼴 이름", key="hwp_font_custom",
+                          placeholder="예) KoPub바탕체 Medium",
+                          help="한글의 글꼴 목록에 표시되는 이름을 그대로 입력하세요.")
+        st.caption(f"현재 적용 글꼴: **{_selected_hwp_font()}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.selectbox("글자 크기(pt)", [8, 9, 10, 11, 12], index=2, key="hwp_size")
+            st.color_picker("머리행 음영", "#D9D9D9", key="hwp_shade")
+        with c2:
+            st.selectbox("선 굵기", ["0.1 mm", "0.12 mm", "0.15 mm", "0.2 mm", "0.4 mm"], key="hwp_lw")
+            st.color_picker("표 선 색", "#000000", key="hwp_line")
+        st.checkbox("좌우 바깥 세로선 표시", value=False, key="hwp_sides",
+                    help="끄면 논문에서 흔히 쓰는 형태(양쪽 세로선 없음)가 됩니다.")
+        st.slider("행 높이(mm)", 4.0, 15.0, 6.5, 0.5, key="hwp_rowh",
+                  help="값을 줄이면 표의 위아래 간격이 촘촘해집니다.")
+        c3, c4 = st.columns(2)
+        c3.slider("위첨자 크기(%)", 40, 90, 65, 5, key="sup_size")
+        c4.slider("위첨자 올림(%)", 0, 70, 35, 5, key="sup_off",
+                  help="값이 클수록 유의성 문자(a,b,c)가 더 위로 올라갑니다.")
+        st.slider("줄글 표 자간(%)", -30, 0, -14, 1, key="hwp_tight",
+                  help="부분예산표처럼 글이 긴 표에서 글자를 좁혀 한 줄에 담습니다. "
+                       "0으로 두면 좁히지 않습니다.")
+        st.color_picker("AI 해석 글자색", "#0000FF", key="hwp_aicolor",
+                        help="AI가 만든 문장을 사람이 쓴 문장과 구분하기 위한 색입니다. "
+                             "검정으로 바꾸면 구분 없이 나옵니다.")
+        st.caption("한글에 설치된 글꼴이어야 정확히 표시됩니다.")
+    with _set_graph:
+        st.radio("오차막대 기준", ["표준편차(SD)", "표준오차(SE)"], key="err_type",
+                 help="SD는 '개체들이 얼마나 흩어져 있나', SE는 '평균값이 얼마나 믿을 만한가'를 봅니다.")
+        with st.expander("❓ 표준편차(SD)와 표준오차(SE), 뭐가 다른가요?"):
+            st.markdown(EXPLAIN["sd_se"])
+        st.selectbox("소수점 자릿수", [1, 2, 3, 4], index=2, key="round_n")
+        st.selectbox("그래프 색상", ["파랑", "초록", "주황", "보라", "회색"], key="plot_color")
+        c1, c2 = st.columns(2)
+        c1.number_input("그래프 가로", 3.0, 16.0, 6.0, 0.5, key="fig_w")
+        c2.number_input("그래프 세로", 2.0, 12.0, 4.0, 0.5, key="fig_h")
+        st.checkbox("✨ 깔끔한 스타일 (그라데이션·값 표시)", value=True, key="fig_style",
+                    help="막대에 옅은→진한 색을 입히고 값을 표시하며, 전체 그래프의 축·간격을 통일합니다.")
+        st.checkbox("⬛ 막대·원형 조각 검은 테두리", value=True, key="fig_border",
+                    help="그래프 전체 외곽선이 아니라 막대와 원형/도넛 조각의 경계선에만 검은색을 적용합니다.")
+        st.checkbox("막대 위에 값 표시", value=True, key="fig_vlabel")
+        st.checkbox("격자선 표시", value=False, key="fig_grid",
+                    help="'깔끔한 스타일'을 켜면 가로 격자선은 자동으로 들어갑니다.")
+        st.checkbox("그래프 제목 표시", value=True, key="fig_title")
+
+# V2 전문형은 보조 링크로만 안내합니다. 비클릭 안내문은 버튼처럼 꾸미지 않습니다.
+st.sidebar.divider()
+st.sidebar.caption("고급 통계·경제성 분석이 필요하면 Version 2 전문형을 이용하세요.")
+if V2_APP_URL:
+    st.sidebar.link_button("↗ Version 2 전문형 열기", V2_APP_URL, width="stretch")
+else:
+    st.sidebar.caption("V2 주소는 `V2_APP_URL` 설정값으로 연결할 수 있습니다.")
 
 _PALETTE = {"파랑": "#6c8ebf", "초록": "#82b366", "주황": "#d79b00", "보라": "#9673a6", "회색": "#808080"}
 
@@ -5809,7 +6356,7 @@ def get_price(item, default=0.0):
         return default
 
 def run_autopilot_engine(df, ph="Tukey HSD", err_type=None, max_items=8,
-                         trt_override=None, blk_override=None):
+                         trt_override=None, blk_override=None, selected_items=None):
     """원클릭 오토파일럿: 정제 → 설계인지 → 분석 → 그래프 → 문장 → 보고서까지 한 번에.
     반환: dict(ok, blocks, summary, abstract, design, msgs)"""
     msgs = []
@@ -5866,7 +6413,11 @@ def run_autopilot_engine(df, ph="Tukey HSD", err_type=None, max_items=8,
             if uniq <= 2 and len(work) > 6:   # 값이 2종류뿐이면 구분용 열일 가능성
                 continue
             ys.append(c)
-        ys = ys[:max_items]
+        if selected_items is not None:
+            _selected = {str(c) for c in selected_items}
+            ys = [c for c in ys if str(c) in _selected]
+        elif max_items:
+            ys = ys[:int(max_items)]
         if not ys:
             prog.empty()
             return {"ok": False, "msgs": msgs + ["분석할 숫자형 측정항목이 없습니다."]}
@@ -6199,67 +6750,69 @@ def log_action(what):
         {"시각": datetime.datetime.now().strftime("%H:%M:%S"), "작업": what})
     _record_usage(what)
 
-with st.sidebar.expander("🤖 AI 기능 켜기 (API 키 입력)"):
-    st.caption("여기는 **설정 칸**입니다. 키를 넣으면 각 분석 결과 아래에 "
-               "**🤖 AI 해석** 버튼이 생기고, 통계분석 탭의 **🧠 AI도우미**도 쓸 수 있어요. "
-               "키가 없어도 다른 기능은 모두 정상 작동합니다.")
-    provider = st.selectbox("AI 제공사", list(_AI_PROVIDERS.keys()), key="ai_provider")
-    st.caption(f"🔑 {_AI_PROVIDERS[provider]['key_hint']}")
-    st.text_input(f"{provider.split()[0]} API 키", type="password", key="api_key")
-    _models = list(_AI_PROVIDERS[provider]["models"])
-    if st.session_state.get("api_key"):
-        if provider.startswith("Gemini"):
-            _list_fn, _live_key, _btn_label = (
-                list_gemini_models, "gemini_models_live", "🔄 사용 가능한 Gemini 모델 조회")
-        elif provider.startswith("ChatGPT"):
-            _list_fn, _live_key, _btn_label = (
-                list_openai_models, "openai_models_live", "🔄 사용 가능한 OpenAI 모델 조회")
-        else:
-            _list_fn, _live_key, _btn_label = (
-                list_claude_models, "claude_models_live", "🔄 사용 가능한 Claude 모델 조회")
-        if st.button(_btn_label, width="stretch", key=f"list_models_{_live_key}"):
-            with st.spinner("제공사에서 모델 목록을 확인하는 중..."):
-                _live_models, _live_err = _list_fn(st.session_state.get("api_key"))
-            if _live_err:
-                st.warning(_live_err)
-            elif _live_models:
-                st.session_state[_live_key] = _live_models
-                st.success(f"사용 가능한 모델 {len(_live_models)}개를 확인했습니다.")
+def render_ai_connection_settings():
+    """AI 공급사/API 설정은 V1에서 AI 도우미 화면 안에서만 노출한다."""
+    with st.expander("🔌 AI 연결 설정", expanded=not bool(st.session_state.get("api_key"))):
+        st.caption("여기는 **설정 칸**입니다. 키를 넣으면 각 분석 결과 아래에 "
+                   "**🤖 AI 해석** 버튼이 생기고, 오른쪽 아래 **💬 AI에게 물어보기**도 함께 사용할 수 있어요. "
+                   "키가 없어도 다른 기능은 모두 정상 작동합니다.")
+        provider = st.selectbox("AI 제공사", list(_AI_PROVIDERS.keys()), key="ai_provider")
+        st.caption(f"🔑 {_AI_PROVIDERS[provider]['key_hint']}")
+        st.text_input(f"{provider.split()[0]} API 키", type="password", key="api_key")
+        _models = list(_AI_PROVIDERS[provider]["models"])
+        if st.session_state.get("api_key"):
+            if provider.startswith("Gemini"):
+                _list_fn, _live_key, _btn_label = (
+                    list_gemini_models, "gemini_models_live", "🔄 사용 가능한 Gemini 모델 조회")
+            elif provider.startswith("ChatGPT"):
+                _list_fn, _live_key, _btn_label = (
+                    list_openai_models, "openai_models_live", "🔄 사용 가능한 OpenAI 모델 조회")
             else:
-                st.warning("사용 가능한 텍스트 모델을 찾지 못했습니다. 직접 입력을 이용해 주세요.")
-        if st.session_state.get(_live_key):
-            _models = list(st.session_state[_live_key])
+                _list_fn, _live_key, _btn_label = (
+                    list_claude_models, "claude_models_live", "🔄 사용 가능한 Claude 모델 조회")
+            if st.button(_btn_label, width="stretch", key=f"list_models_{_live_key}"):
+                with st.spinner("제공사에서 모델 목록을 확인하는 중..."):
+                    _live_models, _live_err = _list_fn(st.session_state.get("api_key"))
+                if _live_err:
+                    st.warning(_live_err)
+                elif _live_models:
+                    st.session_state[_live_key] = _live_models
+                    st.success(f"사용 가능한 모델 {len(_live_models)}개를 확인했습니다.")
+                else:
+                    st.warning("사용 가능한 텍스트 모델을 찾지 못했습니다. 직접 입력을 이용해 주세요.")
+            if st.session_state.get(_live_key):
+                _models = list(st.session_state[_live_key])
 
-    _labels = {}
-    if len(_models) >= 1:
-        _labels[_models[0]] = f"{_models[0]} (저렴·빠름)"
-    if len(_models) >= 2:
-        _labels[_models[1]] = f"{_models[1]} (정교함)"
-    _opts = list(_models) + ["✏️ 직접 입력"]
-    if not _models:
-        st.caption("설정된 모델 목록이 없습니다. 모델명을 직접 입력해 주세요.")
-        _sel = st.text_input("모델명 직접 입력", value="",
-                             placeholder="예) claude-sonnet-5")
-    else:
-        _sel = st.selectbox("모델", _opts, format_func=lambda m: _labels.get(m, m))
-        if _sel == "✏️ 직접 입력":
-            _sel = st.text_input("모델명 직접 입력", value=_models[0],
-                                 help="새 모델이 나왔을 때 여기에 이름을 넣으면 바로 쓸 수 있습니다.")
-    st.session_state["ai_model_g"] = _sel
-    ai_model = _sel
-    if st.session_state.get("api_key"):
-        st.success(f"✅ {provider.split()[0]} 활성화됨 — 분석 결과 아래 'AI 해석'을 눌러보세요.")
-        if st.button("🔌 API 연결 테스트", width="stretch", key="ai_conn_test"):
-            with st.spinner("연결을 확인하는 중..."):
-                _r = test_ai_connection(provider, st.session_state.get("api_key"), _sel)
-            if _r["ok"]:
-                st.success(f"✅ {_r['provider']} / {_r['model']} 연결 성공")
-                if _r.get("sample"):
-                    st.caption("응답 예시: " + _r["sample"][:60])
-            else:
-                st.error(f"❌ {_r['provider']} / {_r['model']} — {_r['message']}")
-    else:
-        st.info("키를 넣으면 AI 해석이 켜집니다.")
+        _labels = {}
+        if len(_models) >= 1:
+            _labels[_models[0]] = f"{_models[0]} (저렴·빠름)"
+        if len(_models) >= 2:
+            _labels[_models[1]] = f"{_models[1]} (정교함)"
+        _opts = list(_models) + ["✏️ 직접 입력"]
+        if not _models:
+            st.caption("설정된 모델 목록이 없습니다. 모델명을 직접 입력해 주세요.")
+            _sel = st.text_input("모델명 직접 입력", value="",
+                                 placeholder="예) claude-sonnet-5")
+        else:
+            _sel = st.selectbox("모델", _opts, format_func=lambda m: _labels.get(m, m))
+            if _sel == "✏️ 직접 입력":
+                _sel = st.text_input("모델명 직접 입력", value=_models[0],
+                                     help="새 모델이 나왔을 때 여기에 이름을 넣으면 바로 쓸 수 있습니다.")
+        st.session_state["ai_model_g"] = _sel
+        ai_model = _sel
+        if st.session_state.get("api_key"):
+            st.success(f"✅ {provider.split()[0]} 활성화됨 — 분석 결과 아래 'AI 해석'을 눌러보세요.")
+            if st.button("🔌 API 연결 테스트", width="stretch", key="ai_conn_test"):
+                with st.spinner("연결을 확인하는 중..."):
+                    _r = test_ai_connection(provider, st.session_state.get("api_key"), _sel)
+                if _r["ok"]:
+                    st.success(f"✅ {_r['provider']} / {_r['model']} 연결 성공")
+                    if _r.get("sample"):
+                        st.caption("응답 예시: " + _r["sample"][:60])
+                else:
+                    st.error(f"❌ {_r['provider']} / {_r['model']} — {_r['message']}")
+        else:
+            st.info("키를 넣으면 AI 해석이 켜집니다.")
 
 if not _HAS_DOCX:
     st.sidebar.caption("💡 워드(docx) 저장을 쓰려면: pip install python-docx")
@@ -6368,7 +6921,7 @@ def _df_digest(d, budget):
 def _ai_panel(df, menu_name):
     """AI 질문 상자 본체. 떠 있는 창과 사이드바가 같은 내용을 공유한다."""
     if not st.session_state.get("api_key"):
-        st.caption("사이드바 **🤖 AI 기능 켜기**에서 API 키를 넣으면 사용할 수 있어요.")
+        st.caption("`🧠 AI 도우미 → AI 연결 설정`에서 API 키를 연결하면 사용할 수 있어요.")
         return
     st.caption(f"지금 화면: **{menu_name}**"
                + (f" · 데이터: **{st.session_state.get('cur_key')}**"
@@ -6490,63 +7043,29 @@ except Exception as _gex:
         pass
 
 
+st.markdown("""
+<div class="v1-hero" aria-label="스마트 통계 에이전트 Ver1">
+  <div class="v1-hero-copy">
+    <div class="v1-hero-title">스마트 통계 에이전트 <span>Ver1</span></div>
+    <div class="v1-hero-sub">농업 데이터를 쉽고 빠르게, 통계 분석을 더 간단하게!</div>
+  </div>
+  <div class="v1-hero-mascot" aria-hidden="true"></div>
+</div>
+""", unsafe_allow_html=True)
+
 # ================================================================ 공통 가드
-if df is None and menu not in ("📑 보고서", "📖 사용설명서"):
+if df is None and menu not in ("📑 보고서", "📖 사용설명서", "🧠 AI 도우미"):
     st.title("실험 데이터 자동 통계 분석")
-    st.caption("엑셀만 올리면 통계분석부터 한글 보고서까지 한 번에")
-    st.info("👈 왼쪽 **📂 데이터 불러오기**에서 파일을 올리거나, 아래 샘플 데이터로 바로 체험해 보세요.")
-
-    st.markdown("#### 🚀 샘플 데이터로 바로 시작하기")
-    s1, s2, s3 = st.columns(3)
-    if s1.button("🌱 실험 데이터 체험\n\n처리구별 생육·수량", width="stretch"):
-        st.session_state.files["샘플_실험데이터"] = make_sample("실험")
-        st.rerun()
-    if s2.button("💰 경제성 데이터 체험\n\n수량·단가·경영비", width="stretch"):
-        st.session_state.files["샘플_경제성"] = make_sample("경제성")
-        st.rerun()
-    if s3.button("📋 설문 데이터 체험\n\n응답자 60명 만족도", width="stretch"):
-        st.session_state.files["샘플_설문"] = make_sample("설문")
-        st.rerun()
-
-    st.divider()
-    st.markdown("#### 📌 이렇게 사용하세요")
-    w1, w2, w3, w4 = st.columns(4)
-    for col, (n_, t_, d_) in zip([w1, w2, w3, w4], [
-        ("1️⃣", "데이터 올리기", "엑셀·CSV를 올립니다.\n여러 파일·여러 시트도 OK"),
-        ("2️⃣", "전처리·확인", "결측치와 이상값을 정리하고\n파생변수를 만듭니다"),
-        ("3️⃣", "분석 실행", "AI가 추천한 분석을 클릭.\n유의성 문자(a,b,c) 자동"),
-        ("4️⃣", "보고서 생성", "결과를 담아 한글(hwpx)\n보고서로 자동 완성")]):
-        col.markdown(f"### {n_}\n**{t_}**\n\n{d_}")
-
-    st.divider()
-    st.markdown("#### 🧰 주요 기능")
-    f1, f2, f3 = st.columns(3)
-    f1.markdown("""
-**📈 통계 분석**
-- 일원·이원배치 분산분석
-- 사후검정 (Tukey / 던컨 / Bonferroni)
-- 정규성·등분산 가정 검정
-- 비모수 검정 (Kruskal-Wallis 등)
-- 상관분석 · 회귀분석 · PCA
+    st.caption("Excel·CSV뿐 아니라 조사표 이미지와 음성 입력도 사용할 수 있습니다.")
+    st.info("👈 왼쪽 **📂 데이터 불러오기**에서 입력 방식을 선택해 주세요. 자료 형식이 헷갈리면 **📘 데이터 작성 가이드**를 먼저 확인하세요.")
+    st.markdown("### 데이터 작성 핵심")
+    st.markdown("""
+- **한 행 = 한 조사단위**, **한 열 = 한 변수**
+- 처리구와 반복은 각각 별도 열로 입력
+- 숫자에는 단위를 붙이지 않고 단위는 열 이름에 표시
+- 병합셀·중간 제목·평균·합계행은 원자료에서 제외
 """)
-    f2.markdown("""
-**🤖 자동화 · AI**
-- 데이터 구조 분석 → 통계 방법 추천
-- 결과를 쉬운 말로 자동 해석
-- 머신러닝 예측 + 변수 중요도
-- AI 자연어 질의응답 (선택)
-- 연구계획서 기반 분석 추천 (선택)
-""")
-    f3.markdown("""
-**📄 한글 문서 자동화**
-- 결과표를 한글(hwpx)로 바로 저장
-- 표 서식(글꼴·음영·선) 자유 설정
-- 그래프 자동 삽입 + 중앙 정렬
-- `<표 1>` `<그림 1>` 캡션 자동
-- 여러 분석을 하나의 보고서로
-""")
-    st.divider()
-    st.caption("💡 통계를 잘 몰라도 괜찮아요. 각 분석마다 'ℹ️ 이 분석이 뭔가요?' 설명이 준비되어 있습니다.")
+    st.caption("잘못된 작성 예시는 왼쪽 데이터 작성 가이드와 사용설명서에서 비교해서 볼 수 있습니다.")
     st.stop()
 
 if df is not None:
@@ -6557,15 +7076,15 @@ else:
 
 # ================================================================ 통계분석
 # ================================================================ 원클릭 오토파일럿
-if menu == "⚡ 원클릭 보고서":
-    st.title("⚡ 원클릭 보고서")
-    st.caption("데이터만 올리면 **정제 → 설계 인지 → 분석 → 그래프 → 문장 → 보고서**까지 "
+if menu == "⚡ 원클릭 분석":
+    st.title("⚡ 원클릭 분석")
+    st.caption("데이터만 올리면 **데이터 점검 → 설계 인지 → 분석 → 그래프 → 문장 → 보고서**까지 "
                "한 번에 만들어 드립니다.")
     st.info("💡 결과물은 **초안**입니다. 연구 목적과 고찰은 연구자가 확인·보완해 주세요. "
             "세부 조정이 필요하면 '📊 통계분석' 메뉴에서 직접 분석할 수 있습니다.")
 
     if df is None:
-        st.warning("먼저 왼쪽에서 데이터를 올리거나 🧪 샘플 데이터를 눌러 주세요.")
+        st.warning("먼저 왼쪽에서 데이터를 올려 주세요.")
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("행", f"{len(df):,}"); c2.metric("열", len(df.columns))
@@ -6591,18 +7110,20 @@ if menu == "⚡ 원클릭 보고서":
                               help="SD=자료가 흩어진 정도, SE=평균의 정확도. 아래 설명을 참고하세요.")
             with st.expander("❓ 표준편차(SD)와 표준오차(SE), 뭐가 다른가요?"):
                 st.markdown(EXPLAIN["sd_se"])
-            ap_max = st.slider("한 번에 분석할 조사항목 수", 1, 15, key="ap_max",
-                               help="초장·엽수·수량처럼 숫자로 조사한 항목이 여러 개일 때, "
-                                    "앞에서부터 몇 개까지 자동 분석할지 정합니다. "
-                                    "8이면 조사항목이 12개라도 8개만 분석해 보고서가 너무 길어지지 않습니다.")
-            st.caption("💡 '조사항목'은 초장(cm)·수량(kg/10a)처럼 **측정한 숫자 열**을 뜻합니다. "
-                       "수량 관련 항목이 먼저 분석됩니다.")
+
+        _auto_items = list((_pre or {}).get("ys") or [])
+        if len(_auto_items) > 8:
+            st.markdown("**분석할 조사항목 선택**")
+            st.caption(f"숫자형 조사항목이 {len(_auto_items)}개라 필요한 항목만 선택해 주세요. 기본으로 앞의 8개를 선택했습니다.")
+            _auto_selected = st.multiselect("조사항목", _auto_items, default=_auto_items[:8], key="ap_items")
+        else:
+            _auto_selected = _auto_items
 
         if st.button("🚀 원클릭 분석 시작", type="primary", width="stretch"):
             _bsel = st.session_state.get("ap_blk", "(자동)")
             res = run_autopilot_engine(df, ph=st.session_state.get("ap_ph", "Tukey HSD"),
                                        err_type=st.session_state.get("ap_err"),
-                                       max_items=int(st.session_state.get("ap_max", 8)),
+                                       max_items=None, selected_items=_auto_selected,
                                        trt_override=st.session_state.get("ap_trt"),
                                        blk_override=(None if _bsel == "(자동)" else _bsel))
             st.session_state["autopilot"] = res
@@ -6613,7 +7134,7 @@ if menu == "⚡ 원클릭 보고서":
                     "<div style='text-align:center;color:#4b7d3a;font-weight:600;"
                     "padding-bottom:.6rem'>분석이 잘 마무리되었습니다</div>",
                     unsafe_allow_html=True)
-                log_action(f"원클릭 보고서 생성({len(res['summary'])}개 항목)")
+                log_action(f"원클릭 분석 생성({len(res['summary'])}개 항목)")
 
         ap = st.session_state.get("autopilot")
         if ap and not ap.get("ok"):
@@ -6668,16 +7189,20 @@ if menu == "⚡ 원클릭 보고서":
                         st.image(blk["image"], width=640)
 
             st.markdown("### 🧾 통계 처리 문구")
-            st.code(ap["stat_line"], language=None)
+            st.markdown(str(ap["stat_line"]).replace(". ", ".  \n"))
 
 elif menu == "📊 통계분석":
     st.title("실험 데이터 자동 통계 분석")
-    st.markdown("### 🤖 AI 통계 방법 추천")
-    for rec in recommend_analysis(df): st.success(rec)
+    st.markdown("### 분석 방법 추천")
+    st.caption("현재 데이터 구조를 바탕으로 가능한 분석을 안내합니다. 아래 문장은 버튼이 아니라 안내문입니다.")
+    for rec in recommend_analysis(df):
+        st.markdown(f"- {rec}")
     st.divider()
 
-    _SUB = ["📋 데이터", "🧹 전처리", "🧮 파생변수", "🔗 상관분석", "📈 분산분석",
-            "🧪 비모수검정", "🧬 PCA", "📉 회귀분석", "🤖 머신러닝"]
+    _SUB = ["📋 내 데이터 확인", "🌱 처리·품종 간 차이", "🔗 변수 간 관계",
+            "📈 결과에 영향을 주는 요인", "🤖 값 예측"]
+    if st.session_state.get("stat_sub") not in _SUB:
+        st.session_state["stat_sub"] = _SUB[0]
     sub = st.radio("분석 선택", _SUB, horizontal=True, key="stat_sub",
                    label_visibility="collapsed")
     st.markdown("---")
@@ -6688,14 +7213,26 @@ elif menu == "📊 통계분석":
         def __enter__(self): return self
         def __exit__(self, *a): return False
     
-    tab_data = _Show("📋 데이터"); tab_prep = _Show("🧹 전처리")
-    tab_derive = _Show("🧮 파생변수"); tab_corr = _Show("🔗 상관분석")
-    tab_anova = _Show("📈 분산분석"); tab_np = _Show("🧪 비모수검정")
-    tab_pca = _Show("🧬 PCA"); tab_reg = _Show("📉 회귀분석")
-    tab_ml = _Show("🤖 머신러닝")
+    tab_data = _Show("📋 내 데이터 확인"); tab_prep = _Show("__V2_전처리__")
+    tab_derive = _Show("__V2_파생변수__"); tab_corr = _Show("🔗 변수 간 관계")
+    tab_anova = _Show("🌱 처리·품종 간 차이"); tab_np = _Show("__V2_비모수__")
+    tab_pca = _Show("__V2_PCA__"); tab_reg = _Show("📈 결과에 영향을 주는 요인")
+    tab_ml = _Show("🤖 값 예측")
 
     if tab_data.on:
-        st.subheader("데이터 미리보기")
+        st.subheader("내 데이터 확인")
+        _rdy = _v1_data_readiness(df)
+        if _rdy["errors"]:
+            st.error("먼저 수정해야 합니다")
+            for _m in _rdy["errors"]: st.write("• " + _m)
+        elif _rdy["warns"]:
+            st.warning("분석 전 확인할 항목이 있습니다")
+        else:
+            st.success("분석 가능합니다")
+        for _m in _rdy["warns"]: st.write("• " + _m)
+        with st.expander("확인된 정상 항목"):
+            for _m in _rdy["oks"]: st.write("• " + _m)
+        st.markdown("#### 데이터 미리보기")
         smart_table(df, width="stretch")
         c1, c2, c3 = st.columns(3)
         c1.metric("행 개수", df.shape[0]); c2.metric("열 개수", df.shape[1])
@@ -6714,7 +7251,7 @@ elif menu == "📊 통계분석":
                 f"{', '.join(f'{k}({v}%)' for k, v in numlike.items())}"))
         n_miss = int(df.isna().sum().sum())
         if n_miss:
-            issues.append(("warn", f"결측치 {n_miss}개 — '전처리' 탭에서 처리할 수 있습니다."))
+            issues.append(("warn", f"결측치 {n_miss}개 — 원본 조사표에서 누락인지 먼저 확인해 주세요."))
         n_dup = int(df.duplicated().sum())
         if n_dup:
             issues.append(("warn", f"완전히 같은 행이 {n_dup}개 있습니다(중복 입력 가능성)."))
@@ -7039,10 +7576,11 @@ elif menu == "📊 통계분석":
     if tab_anova.on:
         st.subheader("분산분석(ANOVA)")
         with st.expander("ℹ️ 이 분석이 뭔가요?"): st.markdown(EXPLAIN["anova"])
-        mode = st.radio("분석 방식", ["일원배치 (요인 1개)", "이원배치 (요인 2개 + 상호작용)",
-                                   "🌾 분할구법 (Split-plot)",
-                                   "🔁 반복측정 (같은 개체 시기별 조사)", "🎚️ 공분산분석(ANCOVA)",
-                                   "📊 여러 형질 한 표에 (요약표)"])
+        _anova_modes = ["일원배치 (요인 1개)", "이원배치 (요인 2개 + 상호작용)",
+                        "📊 여러 형질 한 표에 (요약표)"]
+        if st.checkbox("고급 시험설계 보기", value=False, key="v1_advanced_design"):
+            _anova_modes += ["🌾 분할구법 (Split-plot)", "🔁 반복측정 (같은 개체 시기별 조사)"]
+        mode = st.radio("시험 형태", _anova_modes, key="anova_mode_v1")
         if mode.startswith("📊"):
             st.caption("여러 측정 항목을 한 번에 분석해, 논문 양식처럼 **하나의 표**로 만듭니다. "
                        "각 수치 옆에 유의성 문자(a, b, c)가 위첨자로 붙습니다.")
@@ -7767,7 +8305,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
     if tab_reg.on:
         st.subheader("회귀분석")
         with st.expander("ℹ️ 이 분석이 뭔가요?"): st.markdown(EXPLAIN["reg"])
-        rt = st.radio("분석 종류", ["단순/다중 회귀분석", "로지스틱 회귀분석", "🧪 프로빗 분석 (LC50/LD50)"])
+        rt = st.radio("분석 종류", ["단순/다중 회귀분석", "로지스틱 회귀분석"])
         if rt.startswith("단순"):
             if len(num_cols) < 2: st.warning("숫자형 변수가 2개 이상 필요합니다.")
             else:
@@ -8027,8 +8565,11 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             _is_reg_choice = task.startswith("회귀")
             _algo_options = _reg_algos if _is_reg_choice else _clf_algos
             if st.session_state.get("ml_algo") not in _algo_options:
-                st.session_state["ml_algo"] = _algo_options[0]
-            algo = st.selectbox("알고리즘", _algo_options, key="ml_algo")
+                st.session_state["ml_algo"] = "랜덤포레스트"
+            algo = "랜덤포레스트"
+            st.caption("기본 예측모형: **랜덤포레스트**")
+            with st.expander("고급 · 다른 예측 알고리즘 사용", expanded=False):
+                algo = st.selectbox("알고리즘", _algo_options, key="ml_algo")
             _algo_help = {
                 "랜덤포레스트": "여러 나무의 결과를 평균/투표합니다. 비선형 관계에 강하고 기본 선택으로 무난합니다.",
                 "Extra Trees": "랜덤포레스트보다 분할을 더 무작위화한 앙상블입니다. 빠르고 변수 관계가 복잡할 때 유용합니다.",
@@ -8225,10 +8766,23 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
 
 # ================================================================ AI 도우미
 elif menu == "🧠 AI 도우미":
-    st.subheader("🧠 AI 도우미 (생성형 AI)")
-    if not st.session_state.get("api_key"):
-        st.warning("사이드바 **🤖 AI 기능 켜기**에서 API 키를 입력하세요. "
-                   "(Claude·Gemini·ChatGPT 중 선택 가능)")
+    st.subheader("🧠 AI 도우미")
+    render_ai_connection_settings()
+    if st.session_state.get("api_key"):
+        st.success("AI가 연결되어 있습니다. 오른쪽 아래 **💬 AI에게 물어보기**에서도 같은 연결을 사용합니다.")
+    else:
+        st.info("AI 기능은 선택 사항입니다. API 키가 없어도 통계분석·설문·보고서는 사용할 수 있습니다.")
+    if df is None:
+        st.markdown("### 데이터 없이 질문하기")
+        _gq = st.text_area("통계나 앱 사용법을 물어보세요", placeholder="예) 난괴법 3반복 데이터는 엑셀을 어떻게 작성해?")
+        if st.button("AI에게 질문", type="primary") and _gq.strip():
+            if not st.session_state.get("api_key"):
+                st.warning("위 AI 연결 설정에서 API 키를 먼저 연결해 주세요.")
+            else:
+                with st.spinner("AI가 답변을 만드는 중..."):
+                    st.markdown(ai_call("농업연구 통계 초보자에게 쉽고 정확하게 한국어로 답하세요. 질문: " + _gq,
+                                        st.session_state.get("api_key"), st.session_state.get("ai_model_g")))
+        st.stop()
     amode = st.radio("기능", ["결과를 자연어로 질문", "📝 데이터 자동 요약(초록 초안)",
                              "연구계획서 기반 통계 추천"], key="ai_mode")
     summary = build_data_overview(df)
@@ -8306,2099 +8860,6 @@ elif menu == "🧠 AI 도우미":
                 ai_disclaimer()
                 log_action("AI 연구계획서 기반 통계 추천")
     st.caption("※ AI 응답은 참고용이며, 호출 시 사용량만큼 소액 비용이 발생할 수 있어요.")
-
-# ================================================================ 경제성 분석
-elif menu == "💰 경제성분석":
-    st.title("💰 경제성 분석")
-    st.info("**경제성 분석이 처음이면 길잡이로 시작하고, 분석방법을 알고 있다면 바로 분석할 수 있습니다.** 필요한 자료와 기준단가는 접어서 확인할 수 있습니다.")
-    st.caption("🧭 경제성 분석 UX v3.6 · 단계형 길잡이 + 간소화 화면 · 2026-08-18 적용")
-
-    # ---------------------------------------------------------------- 경제성 분석 시작 화면 / 길잡이
-    # 기능을 한꺼번에 펼치지 않고, 처음에는 "길잡이"와 "바로 분석" 두 갈래만 보여준다.
-    # 길잡이는 STEP 1~5를 한 단계씩 진행해 초보자도 현재 질문에만 집중할 수 있게 한다.
-    def _render_econ_material_guide(expanded=False):
-        with st.expander("📚 경제성 분석에 어떤 자료를 준비해야 하나요?", expanded=expanded):
-            st.caption("모든 분석에 모든 비용이 필요한 것은 아닙니다. 연구목적에 맞는 자료만 준비하면 됩니다.")
-            _mt1, _mt2, _mt3, _mt4 = st.tabs(["공통자료", "비용 항목", "분석별 자료", "빈 서식"])
-            with _mt1:
-                _base_need = pd.DataFrame([
-                    ["처리구·품종·기술명", "무엇과 무엇을 비교했는지", "대조구, 신품종A, 신품종B", "비교 연구면 필수"],
-                    ["반복(블록)", "같은 처리를 몇 번 반복했는지", "1, 2, 3 또는 Block1~3", "반복시험이면 권장"],
-                    ["조사면적", "원자료가 몇 a 또는 ㎡ 기준인지", "5a, 10a, 1,000㎡", "10a 환산에 필요"],
-                    ["생산량", "실제로 생산·수확한 양", "kg/조사구, kg/10a", "대부분의 분석에 필수"],
-                    ["판매가격", "농가가 실제로 받는 가격", "원/kg, 원/상자", "수입 계산에 필수"],
-                    ["부산물 수입", "주산물 외 판매수입이 있으면 기록", "부산물 판매액", "해당 시"],
-                    ["상품등급별 수량·가격", "등급별 가격차가 크면 분리", "특·상·보통 수량과 단가", "원예작물에서 권장"],
-                ], columns=["자료", "무엇을 뜻하나요?", "예시", "언제 필요한가요?"])
-                smart_table(_base_need, width="stretch", hide_index=True)
-                st.info("💡 한 줄은 보통 **처리구 × 반복 한 조사구**로 적는 것이 가장 안전합니다. "
-                        "5a 자료라면 억지로 10a로 바꾸지 말고 5a 값을 그대로 넣은 뒤 기준면적을 5a로 지정하세요.")
-
-            with _mt2:
-                st.markdown("**소득분석에서는 실제로 발생한 비용만 기록합니다. 없는 항목은 만들 필요가 없습니다.**")
-                _cost_need = pd.DataFrame([
-                    ["종자·종묘비", "종자, 묘, 접목묘 등", "구입액 또는 사용량×단가"],
-                    ["비료비", "기비·추비·액비·엽면시비 등", "비료 종류별 사용액"],
-                    ["농약비", "살균제·살충제·제초제·생물농약 등", "약제별 사용액"],
-                    ["수도·광열비", "전기, 유류, 난방, 관수", "전기료·경유·등유·가스 등"],
-                    ["기타재료비", "멀칭필름, 상토, 트레이, 유인끈, 지주대, 포장재 등", "소모성 자재 사용액"],
-                    ["소농구비", "내용연수가 짧은 소형 농기구", "가위, 호미, 소형도구 등"],
-                    ["대농구상각비", "여러 해 쓰는 농기계의 연간 감가상각액", "트랙터, 관리기, 방제기 등"],
-                    ["영농시설상각비", "여러 해 쓰는 시설의 연간 감가상각액", "하우스, 관수시설, 건조시설 등"],
-                    ["수선비", "농기계·시설 수리 및 유지", "부품·수리비"],
-                    ["임차료", "실제로 지불한 토지·시설·농기계 임차비", "농지·시설·장비 임차료"],
-                    ["위탁영농비", "작업을 외부에 맡긴 비용", "경운·정지·수확·방제 위탁료"],
-                    ["고용노동비", "외부 인력에게 실제 지급한 임금", "정식·유인·수확 인건비"],
-                    ["조성비 상각", "과수·다년생 초기 조성비의 연간 배분", "과원 조성비의 연간 상각액"],
-                ], columns=["비용 항목", "쉽게 말하면", "무엇을 적나요?"])
-                smart_table(_cost_need, width="stretch", hide_index=True)
-                st.markdown("**순수익(생산비)까지 보려면 아래 경제적 비용도 추가합니다.**")
-                _full_cost = pd.DataFrame([
-                    ["자가노동시간", "본인·가족이 일한 시간", "시간으로 입력 → 프로그램이 시간당 노임을 곱함"],
-                    ["유동자본용역비", "재배기간 동안 투입자금이 묶인 비용", "이자율·재포기간으로 자동 계산"],
-                    ["고정자본용역비", "농기계·시설 자본 사용의 기회비용", "부분현재가·작목부담률·이자율로 계산"],
-                    ["토지용역비", "자가토지를 다른 용도로 쓸 수 있었던 가치", "자가토지 기회비용; 실제 임차료와 중복 금지"],
-                ], columns=["추가 항목", "의미", "입력 방법"])
-                smart_table(_full_cost, width="stretch", hide_index=True)
-                st.warning("⚠️ `경영비합계`, `비용합계`, `소득`, `순수익` 같은 계산결과 열을 다시 비용으로 선택하지 마세요. "
-                           "자가노동은 **원(비용)이 아니라 시간**으로 기록합니다.")
-
-            with _mt3:
-                _by_analysis = pd.DataFrame([
-                    ["📕 부분예산법", "대조구·신기술구, 수량/수입, 가격, **신기술 때문에 달라지는 비용만**", "관행과 똑같이 발생한 비용은 조사하지 않아도 됨"],
-                    ["📗 소득분석", "수량, 가격, 조사면적, 실제 발생한 항목별 경영비", "순수익까지 보면 자가노동·자본·토지도 추가"],
-                    ["📘 지배분석·MRR", "비용이 다른 여러 처리, 수량, 가격, 처리별 가변비용, 대조구", "처리 수준에 따라 실제로 달라지는 비용을 구분"],
-                    ["📙 시설·장기투자", "최초투자비, 내용연수, 연간 편익, 운영·유지비, 할인율, 잔존가치", "여러 해의 현금흐름을 평가"],
-                    ["손익분기·민감도", "기준 수량·가격·비용", "수확·선별·포장처럼 수량에 따라 변하는 비용을 구분하면 더 현실적"],
-                ], columns=["분석", "최소한 준비할 자료", "특히 주의할 점"])
-                smart_table(_by_analysis, width="stretch", hide_index=True)
-                st.markdown("**연구질문별 빠른 찾기**")
-                st.markdown("- 현재 작목 10a당 수익성 → **소득분석**\n"
-                            "- 신품종·신기술 vs 기존 방식 → **부분예산법**\n"
-                            "- 비용이 다른 여러 기술 중 최적 대안 → **지배분석·MRR**\n"
-                            "- 시설·농기계 투자 → **NPV·할인 B/C·IRR**\n"
-                            "- 어느 가격·수량부터 손해인지 → **손익분기점**\n"
-                            "- 가격·수량 변동에도 버티는지 → **민감도 분석**")
-
-            with _mt4:
-                _tmpl1 = pd.DataFrame(columns=["처리구", "반복", "조사면적(a)", "수량(kg)", "판매단가(원/kg)",
-                                                "종자종묘비", "비료비", "농약비", "수도광열비", "기타재료비",
-                                                "소농구비", "대농구상각비", "영농시설상각비", "수선비", "임차료",
-                                                "위탁영농비", "고용노동비", "자가노동시간"])
-                _tmpl2 = pd.DataFrame(columns=["처리구", "반복", "조사면적(a)", "수량(kg)", "판매단가(원/kg)",
-                                                "신기술추가비용", "절감비용", "추가노동시간"])
-                _tc1, _tc2 = st.columns(2)
-                _tc1.download_button("📥 소득분석 빈 서식 CSV", _tmpl1.to_csv(index=False).encode("utf-8-sig"),
-                                     "경제성_소득분석_빈서식.csv", mime="text/csv",
-                                     key="p_econ_guide_template_income", width="stretch")
-                _tc2.download_button("📥 신기술 비교 빈 서식 CSV", _tmpl2.to_csv(index=False).encode("utf-8-sig"),
-                                     "경제성_신기술비교_빈서식.csv", mime="text/csv",
-                                     key="p_econ_guide_template_partial", width="stretch")
-
-    _econ_entry = st.session_state.get("econ_entry_mode")
-    if _econ_entry not in ("guide", "direct"):
-        st.markdown("### 어떻게 시작할까요?")
-        _ec1, _ec2 = st.columns(2)
-        with _ec1:
-            with st.container(border=True):
-                st.markdown("### 🧭 경제성 분석이 처음이에요")
-                st.caption("연구내용에 맞는 분석법을 STEP 1~5로 한 단계씩 찾아드립니다.")
-                if st.button("길잡이 시작", type="primary", width="stretch", key="econ_entry_guide"):
-                    st.session_state["econ_entry_mode"] = "guide"
-                    st.session_state["econ_guide_step"] = 1
-                    st.rerun()
-        with _ec2:
-            with st.container(border=True):
-                st.markdown("### 📊 분석방법을 알고 있어요")
-                st.caption("부분예산 · 소득분석 · MRR · 시설투자 중 원하는 분석으로 바로 갑니다.")
-                if st.button("바로 분석하기", width="stretch", key="econ_entry_direct"):
-                    st.session_state["econ_entry_mode"] = "direct"
-                    st.rerun()
-        _render_econ_material_guide(expanded=False)
-        st.stop()
-
-    if _econ_entry == "guide":
-        _top1, _top2 = st.columns([5, 1])
-        with _top1:
-            st.markdown("## 🧭 경제성 분석 길잡이")
-            st.caption("한 번에 한 질문만 답하면 됩니다. 모르는 항목은 '잘 모르겠어요'를 선택해도 됩니다. AI/API 키는 필요하지 않습니다.")
-        with _top2:
-            if st.button("처음으로", width="stretch", key="econ_guide_home"):
-                st.session_state["econ_entry_mode"] = None
-                st.rerun()
-
-        _step = int(st.session_state.get("econ_guide_step", 1))
-        _step = min(max(_step, 1), 5)
-        st.caption(f"STEP {_step} / 5")
-        st.progress(_step / 5)
-
-        if _step == 1:
-            st.markdown("### STEP 1. 이번 연구에서 무엇을 확인하고 싶나요?")
-            _g_goal = st.radio(
-                "가장 가까운 상황을 하나 고르세요.",
-                ["🧪 새로운 품종·기술이 기존 방식보다 경제적인지 알고 싶어요",
-                 "🌱 현재 작목·처리의 한 해 수익성이 궁금해요",
-                 "🏆 여러 기술·처리 중 가장 경제적인 대안을 고르고 싶어요",
-                 "🏗️ 시설·농기계에 투자할 가치가 있는지 알고 싶어요",
-                 "💸 어느 가격·수량부터 손해인지 알고 싶어요",
-                 "📉 가격·수량이 변해도 경제성이 유지되는지 알고 싶어요",
-                 "🔄 여러 품종·작형·처리의 한 해 경영성과를 비교하고 싶어요",
-                 "🏛️ 정책·공공사업의 사회적 효과를 평가하고 싶어요",
-                 "🤔 잘 모르겠어요 — 쉬운 질문으로 찾아주세요"],
-                key="econ_guide_goal_v3", index=None)
-            if st.button("다음 →", type="primary", width="stretch", key="econ_g_next1",
-                         disabled=_g_goal is None):
-                st.session_state["econ_guide_step"] = 2; st.rerun()
-
-        elif _step == 2:
-            st.markdown("### STEP 2. 이번 연구에서 실제로 무엇이 달라지나요?")
-            _g_change = st.radio(
-                "가장 큰 변화 하나를 고르세요.",
-                ["품종·방제·재배법 등 기술이 바뀌어요",
-                 "비료량·농약량·노동량 등 투입수준과 비용이 달라져요",
-                 "시설·농기계를 새로 구입하거나 설치해요",
-                 "판매가격·상품수량·상품률 등이 달라져요",
-                 "특별한 기술변경 없이 현재 경영성과를 평가해요",
-                 "사회적·환경적 편익과 비용을 평가해요",
-                 "잘 모르겠어요"], key="econ_guide_change_v3", index=None)
-            _b1, _b2 = st.columns(2)
-            if _b1.button("← 이전", width="stretch", key="econ_g_prev2"):
-                st.session_state["econ_guide_step"] = 1; st.rerun()
-            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next2",
-                          disabled=_g_change is None):
-                st.session_state["econ_guide_step"] = 3; st.rerun()
-
-        elif _step == 3:
-            st.markdown("### STEP 3. 무엇과 무엇을 비교하나요?")
-            _g_compare = st.radio(
-                "비교 구조를 고르세요.",
-                ["대조구 1개와 신기술·신품종 1~2개를 비교해요",
-                 "비용이 서로 다른 3개 이상 대안을 비교해요",
-                 "여러 품종·작형·처리의 한 해 성과를 나란히 비교해요",
-                 "비교대상 없이 현재 상태 하나만 평가해요",
-                 "잘 모르겠어요"], key="econ_guide_compare_v3", index=None)
-            _b1, _b2 = st.columns(2)
-            if _b1.button("← 이전", width="stretch", key="econ_g_prev3"):
-                st.session_state["econ_guide_step"] = 2; st.rerun()
-            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next3",
-                          disabled=_g_compare is None):
-                st.session_state["econ_guide_step"] = 4; st.rerun()
-
-        elif _step == 4:
-            st.markdown("### STEP 4. 경제효과를 어느 기간까지 보나요?")
-            _g_period = st.radio(
-                "분석기간을 고르세요.",
-                ["한 작기 또는 1년 안에서 평가해요",
-                 "같은 기술의 효과와 비용이 2년 이상 이어져요",
-                 "시설·농기계의 내용연수(사용기간) 전체를 평가해요",
-                 "잘 모르겠어요"], key="econ_guide_period_v3", index=None)
-            _b1, _b2 = st.columns(2)
-            if _b1.button("← 이전", width="stretch", key="econ_g_prev4"):
-                st.session_state["econ_guide_step"] = 3; st.rerun()
-            if _b2.button("다음 →", type="primary", width="stretch", key="econ_g_next4",
-                          disabled=_g_period is None):
-                st.session_state["econ_guide_step"] = 5; st.rerun()
-
-        else:
-            st.markdown("### STEP 5. 지금 어떤 자료가 준비되어 있나요?")
-            _g_df = st.session_state.get("df")
-            _cols = list(map(str, _g_df.columns)) if isinstance(_g_df, pd.DataFrame) and not _g_df.empty else []
-            def _g_find(keys):
-                return [c for c in _cols if any(k.lower() in c.lower() for k in keys)]
-            _cand_trt = _g_find(["처리", "품종", "계통", "작형", "구분", "시험구"])
-            _cand_qty = _g_find(["수량", "생산량", "수확량", "수확중", "상품수량"])
-            _cand_price = _g_find(["단가", "가격", "판매가", "판매액"])
-            _cand_cost = _g_find(["비용", "비료", "농약", "노력", "노동", "노임", "자재", "임차", "연료", "종묘"])
-            _cand_rep = _g_find(["반복", "블록", "rep", "block", "blk"])
-            _auto_data = []
-            if _cand_trt: _auto_data.append("처리구/대조구 구분")
-            if _cand_qty: _auto_data.append("수량·생산량")
-            if _cand_price: _auto_data.append("판매가격/판매액")
-            if _cand_cost: _auto_data.append("항목별 경영비")
-            if _cand_rep: _auto_data.append("반복(블록) 자료")
-            _g_data = st.multiselect(
-                "가지고 있는 자료를 모두 선택하세요. 업로드된 데이터에서 찾은 항목은 자동 체크됩니다.",
-                ["처리구/대조구 구분", "수량·생산량", "판매가격/판매액", "항목별 경영비",
-                 "신기술로 달라지는 비용만", "반복(블록) 자료", "최초 투자비",
-                 "연도별 편익·운영비", "분석기간·할인율·잔존가치",
-                 "아직 거의 준비되지 않았거나 자료가 어떤 것인지 잘 모르겠어요"],
-                default=_auto_data, key="econ_guide_data_v3")
-            _render_econ_material_guide(expanded=False)
-
-            _g_goal = st.session_state.get("econ_guide_goal_v3")
-            _g_change = st.session_state.get("econ_guide_change_v3")
-            _g_compare = st.session_state.get("econ_guide_compare_v3")
-            _g_period = st.session_state.get("econ_guide_period_v3")
-            _g_result = recommend_economic_guide(_g_goal, _g_change, _g_compare, _g_period, _g_data)
-            st.divider()
-            st.markdown("### 🎯 추천 결과")
-
-            if _g_result.get("ambiguous"):
-                st.warning(_g_result.get("title", "추천을 조금 더 좁혀야 합니다."))
-                for _r in _g_result.get("reasons", []): st.markdown(f"- {_r}")
-                st.info("💡 **기존 방식과 다른 처리·기술이 있는지**, 그리고 **효과가 1년인지 여러 해인지**를 다시 확인하면 추천을 좁힐 수 있습니다.")
-            elif _g_result.get("primary_mode") is None:
-                st.warning("현재 농가단위 분석 모듈로 억지 연결하지 않았습니다. 정책·공공사업의 사회적 효과는 별도의 비용편익분석(CBA)이 필요합니다.")
-            else:
-                _r1, _r2 = st.columns([3, 1])
-                _r1.markdown(f"### {_g_result['title']}")
-                _r2.metric("추천 확신도", _g_result.get("confidence", "-"))
-                st.markdown("**추천 이유**")
-                for _r in _g_result.get("reasons", []): st.markdown(f"- {_r}")
-                _gc1, _gc2 = st.columns(2)
-                with _gc1:
-                    st.markdown("**필요한 자료**")
-                    for _x in _g_result.get("needs", []): st.markdown(f"- {_x}")
-                with _gc2:
-                    st.markdown("**함께 보면 좋은 분석**")
-                    for _x in _g_result.get("together", []): st.markdown(f"- {_x}")
-                _missing = _g_result.get("missing_reported") or []
-                if _missing:
-                    st.warning("추가로 준비하면 좋은 자료: **" + ", ".join(_missing) + "**")
-                if _cols:
-                    with st.expander("📋 업로드한 데이터 열 후보", expanded=False):
-                        smart_table(pd.DataFrame([
-                            {"필요 항목":"처리구/비교대상", "현재 데이터 후보":", ".join(_cand_trt[:3]) if _cand_trt else "찾지 못함"},
-                            {"필요 항목":"수량", "현재 데이터 후보":", ".join(_cand_qty[:3]) if _cand_qty else "찾지 못함"},
-                            {"필요 항목":"단가/가격", "현재 데이터 후보":", ".join(_cand_price[:3]) if _cand_price else "찾지 못함"},
-                            {"필요 항목":"비용", "현재 데이터 후보":", ".join(_cand_cost[:4]) if _cand_cost else "찾지 못함"},
-                            {"필요 항목":"반복(선택)", "현재 데이터 후보":", ".join(_cand_rep[:2]) if _cand_rep else "찾지 못함"},
-                        ]), width="stretch", hide_index=True)
-                if st.button("🚀 추천 분석 바로 시작하기", type="primary", width="stretch", key="p_econ_guide_start_v4"):
-                    st.session_state["econ_mode"] = _g_result["primary_mode"]
-                    st.session_state["econ_entry_mode"] = "direct"
-                    st.session_state["_econ_guide_applied"] = {"title": _g_result["title"], "tags": _g_result.get("tags") or []}
-                    st.rerun()
-
-            if st.button("← STEP 4로 돌아가기", width="stretch", key="econ_g_prev5"):
-                st.session_state["econ_guide_step"] = 4; st.rerun()
-
-        st.stop()
-
-    # direct mode: 핵심 분석 화면만 보여주고, 도움말/설정은 접어서 필요할 때만 연다.
-    _direct_head1, _direct_head2 = st.columns([5, 1])
-    with _direct_head1:
-        st.caption("분석방법을 선택하고 필요한 값만 입력하세요. 자료 준비 방법과 기준단가는 필요할 때만 열어볼 수 있습니다.")
-    with _direct_head2:
-        if st.button("🧭 길잡이", width="stretch", key="econ_switch_guide"):
-            st.session_state["econ_entry_mode"] = "guide"
-            st.session_state["econ_guide_step"] = 1
-            st.rerun()
-    _render_econ_material_guide(expanded=False)
-
-    _guide_applied = st.session_state.pop("_econ_guide_applied", None)
-    if _guide_applied:
-        if isinstance(_guide_applied, dict):
-            _focus = " · ".join(_guide_applied.get("tags") or [])
-            _msg = f"✅ 길잡이가 추천한 **{_guide_applied.get('title', '분석')}**을 아래에서 자동 선택했습니다."
-            if _focus:
-                _msg += f" 결과에서 **{_focus}**도 함께 확인하세요."
-            st.success(_msg)
-        else:
-            st.success("✅ 길잡이가 추천한 분석을 아래에서 자동 선택했습니다. 필요한 입력값을 확인하고 분석을 진행하세요.")
-
-    st.markdown("### 분석방법")
-    emode = st.radio("분석 방식",
-                     ["📕 부분예산표 (손실적·이익적 요소)",
-                      "📗 소득분석",
-                      "📘 신기술 경제성 (부분예산·한계수익률)",
-                      "📙 시설·장기투자 경제성 (NPV·B/C·IRR)"],
-                     horizontal=True, key="econ_mode", label_visibility="collapsed")
-    st.caption("선택한 분석에 필요한 입력과 결과만 아래에 표시됩니다.")
-
-    with st.expander("🧪 경제성 계산 자가진단 (개발·점검용)", expanded=False):
-        st.caption("면적 환산, 입력 검증, 유동·고정자본 산식, 부분예산, 장기투자 NPV/B·C까지 즉시 점검합니다.")
-        if st.button("자가진단 실행", key="econ_selftest"):
-            _self = run_economic_self_test()
-            smart_table(_self, width="stretch", hide_index=True)
-            _passed = int(_self["결과"].eq("PASS").sum())
-            if _passed == len(_self):
-                st.success(f"✅ {_passed}/{len(_self)}개 핵심 테스트 통과")
-            else:
-                st.error(f"❌ {_passed}/{len(_self)}개 통과 — FAIL 항목을 확인하세요.")
-    with st.expander("💾 기준단가 관리 (노임·자재비·임차료 등)", expanded=False):
-        st.caption("여기에 저장한 값이 아래 분석의 **기본값으로 자동 입력**됩니다. "
-                   "기관에서 쓰는 공식 단가를 한 번 넣어두면 매번 입력할 필요가 없어요.")
-        if st.session_state.get("price_db") is None:
-            st.session_state["price_db"] = default_price_db()
-        else:   # 옛 형식(메타데이터 없는 표)이면 빠진 열을 채움
-            _pdb = st.session_state["price_db"]
-            import datetime as _dt
-            for _c, _dv in [("조회방식", "사용자 입력"),
-                            ("갱신일", _dt.date.today().isoformat()),
-                            ("환산식", ""), ("사용자수정", False)]:
-                if _c not in _pdb.columns:
-                    _pdb[_c] = _dv
-            st.session_state["price_db"] = _pdb
-        st.session_state["price_db"] = st.data_editor(
-            st.session_state["price_db"], num_rows="dynamic", width="stretch", key="price_editor")
-        for _w in price_db_warnings(st.session_state["price_db"]):
-            st.warning("⚠️ " + _w)
-        pcol1, pcol2 = st.columns(2)
-        pcol1.download_button("📥 기준단가 내려받기(CSV)",
-                              st.session_state["price_db"].to_csv(index=False).encode("utf-8-sig"),
-                              "기준단가.csv", width="stretch")
-        _up = pcol2.file_uploader("📤 기준단가 불러오기(CSV)", type=["csv"], key="price_up")
-        if _up is not None:
-            try:
-                st.session_state["price_db"] = pd.read_csv(_up)
-                st.success("기준단가를 불러왔습니다."); st.rerun()
-            except Exception as ex:
-                st.error(f"불러오기 실패: {ex}")
-        st.markdown("---")
-        st.markdown("###### 🌐 KAMIS 농산물 가격 자동 조회 (선택)")
-        st.caption("KAMIS 오픈API 인증키가 있으면 최근 가격을 자동으로 불러올 수 있습니다. "
-                   "발급: kamis.or.kr → 고객센터 → Open-API 이용안내 (무료)")
-        kc1, kc2 = st.columns(2)
-        k_key = kc1.text_input("KAMIS 인증키 (cert_key)", type="password", key="kamis_key")
-        k_id = kc2.text_input("KAMIS 아이디 (cert_id)", key="kamis_id")
-        kc3, kc4, kc5 = st.columns(3)
-        _ITEMS = {"건고추": ("312", "300", "01"), "풋고추": ("225", "200", "01"),
-                  "마늘": ("258", "200", "00"), "양파": ("245", "200", "00"),
-                  "배추": ("211", "200", "00"), "무": ("231", "200", "00"),
-                  "사과": ("411", "400", "05"), "쌀": ("111", "100", "01")}
-        k_item = kc3.selectbox("품목", list(_ITEMS.keys()), key="kamis_item")
-        k_rank = kc4.selectbox("등급", ["04 (상품)", "05 (중품)"], key="kamis_rank")
-        k_days = kc5.number_input("최근 며칠", 1, 30, 7, key="kamis_days")
-        km1, km2 = st.columns(2)
-        k_market = km1.radio("가격 유형", ["도매", "소매"], horizontal=True, key="kamis_market")
-        _COUNTRIES = {"전체": "", "서울": "1101", "부산": "2100", "대구": "2200",
-                      "광주": "2401", "대전": "2501", "안동": "3714", "포항": "3711"}
-        k_country_name = km2.selectbox("지역", list(_COUNTRIES), key="kamis_country")
-        if st.button("📡 KAMIS 가격 조회", width="stretch"):
-            if not (k_key and k_id):
-                st.warning("인증키와 아이디를 모두 입력하세요.")
-            else:
-                code, category, kind = _ITEMS[k_item]
-                with st.spinner("KAMIS에서 가격을 불러오는 중..."):
-                    dfk, err = kamis_fetch(
-                        k_key, k_id, code, kind, k_rank.split()[0], int(k_days),
-                        country_code=_COUNTRIES[k_country_name], category_code=category,
-                        market_type=k_market, convert_kg=False)
-                if err:
-                    st.error(err)
-                    st.caption("품목·등급 조합에 따라 자료가 없을 수 있습니다. "
-                               "KAMIS 홈페이지에서 코드를 확인해 주세요.")
-                else:
-                    _tr = getattr(dfk, "attrs", {}).get("kamis_transport")
-                    if _tr == "http-fallback":
-                        st.warning("⚠️ HTTPS 연결이 실패하여 공식 HTTP 호환 endpoint로 조회했습니다. "
-                                   "KAMIS 서버의 SSL 상태가 정상화되면 자동으로 HTTPS를 다시 사용합니다.")
-                    elif _tr == "https-legacy":
-                        st.info("ℹ️ KAMIS 서버가 구형 TLS 설정을 사용하고 있어 호환 모드로 조회했습니다. "
-                                "인증서 검증은 정상적으로 수행되었습니다.")
-                    elif _tr == "https-insecure":
-                        st.warning("⚠️ KAMIS 서버 인증서를 검증할 수 없어 검증을 생략하고 조회했습니다. "
-                                   "가격 자료 확인 용도로만 사용하고, 인증키가 노출될 수 있는 환경에서는 "
-                                   "수동 입력을 권장합니다.")
-                    st.session_state["kamis_result"] = dfk
-        if st.session_state.get("kamis_result") is not None:
-            _kres = st.session_state["kamis_result"]
-            smart_table(_kres, width="stretch", hide_index=True)
-            _valid = _kres.dropna(subset=["가격"])
-            if len(_valid):
-                st.markdown("###### 📥 조회 결과를 기준단가에 반영")
-                _rowsel = st.selectbox(
-                    "반영할 행", list(range(len(_valid))),
-                    format_func=lambda i: (f"{_valid.iloc[i]['기준일']} · "
-                                           f"{_valid.iloc[i]['품목']} {_valid.iloc[i]['품종']} · "
-                                           f"{_valid.iloc[i]['가격']:,.0f}원 / "
-                                           f"{_valid.iloc[i]['단위']}"),
-                    key="kamis_rowsel")
-                _row = _valid.iloc[_rowsel]
-                _kgf = _row["kg환산계수"]
-                if pd.isna(_kgf) or not _kgf:
-                    st.error(f"❌ 단위 '{_row['단위']}'는 kg으로 환산할 수 없습니다. "
-                             "경제성 분석 단가로 자동 적용하지 않습니다. "
-                             "포장 단위를 확인한 뒤 직접 입력해 주세요.")
-                else:
-                    _per_kg = float(_row["가격"]) / float(_kgf)
-                    st.info(f"환산: {_row['가격']:,.0f}원 ÷ {_kgf:g}kg = "
-                            f"**{_per_kg:,.0f}원/kg** (근거: 단위 '{_row['단위']}')")
-                    _iname = st.text_input("기준단가 항목 이름",
-                                           value=f"{_row['품목']} {_row['품종']}".strip(),
-                                           key="kamis_itemname")
-                    _existing = st.session_state["price_db"]["항목"].astype(str).eq(_iname).any()
-                    _apply_mode = st.radio(
-                        "같은 이름이 있을 때", ["기존값 유지", "새 값으로 교체", "새 이름으로 추가"],
-                        horizontal=True, key="kamis_apply_mode",
-                        disabled=not _existing) if _existing else "새 이름으로 추가"
-                    if st.button("➕ 기준단가에 반영", key="kamis_apply"):
-                        if _existing and _apply_mode == "기존값 유지":
-                            st.info("기존값을 유지했습니다.")
-                            st.stop()
-                        import datetime as _dt
-                        _db = st.session_state["price_db"].copy()
-                        _new = {"항목": _iname, "단가": round(_per_kg, 2), "단위": "원/kg",
-                                "기준연도": str(_row["기준일"])[:4], "기준일": str(_row["기준일"]), "출처": str(_row["출처"]),
-                                "조회방식": "KAMIS",
-                                "갱신일": _dt.date.today().isoformat(),
-                                "환산식": f"{_row['가격']:,.0f}원 ÷ {_kgf:g}kg",
-                                "사용자수정": False}
-                        if "기준일" not in _db.columns:
-                            _db["기준일"] = ""
-                        _final_name = _iname
-                        if _existing and _apply_mode == "새 이름으로 추가":
-                            _final_name = f"{_iname} ({_row['기준일']})"
-                            _new["항목"] = _final_name
-                        _hit = _db.index[_db["항목"].astype(str) == _final_name]
-                        if len(_hit) and _apply_mode == "새 값으로 교체":
-                            st.warning(f"'{_final_name}' 항목을 "
-                                       f"기존 {_db.loc[_hit[0], '단가']} → 새 값 {_new['단가']}로 "
-                                       "덮어씁니다.")
-                            for k, v in _new.items():
-                                if k in _db.columns:
-                                    _db.loc[_hit[0], k] = v
-                        else:
-                            _db = pd.concat([_db, pd.DataFrame([_new])], ignore_index=True)
-                        st.session_state["price_db"] = _db
-                        log_action(f"KAMIS 단가 반영: {_final_name}")
-                        st.success("기준단가에 반영했습니다."); st.rerun()
-            st.caption("조회 결과를 그대로 덮어쓰지 않고, 위에서 확인 후 반영합니다.")
-
-        st.markdown("---")
-        st.markdown("###### 📊 KOSIS 통계 자동 조회 (농업노임·가격지수)")
-        st.caption("통계청 국가통계포털(KOSIS) 인증키가 있으면 농촌 일용노임·농가구입가격지수를 "
-                   "자동으로 받아올 수 있습니다. 발급: kosis.kr/openapi → 회원가입 → 활용신청(자동승인, 무료)")
-        with st.expander("📖 사용법 (처음이라면 꼭 읽어보세요)"):
-            st.markdown("""
-**가장 쉬운 방법 — KOSIS에서 주소 복사해 오기**
-
-1. KOSIS(kosis.kr)에서 원하는 통계표를 찾습니다.
-   예) 통계청 → 농업 → **농가판매및구입가격조사** → 농촌임료금
-2. 표 화면에서 **[OpenAPI]** 버튼을 누릅니다.
-3. 인증키를 선택하면 **요청 주소(URL)**가 만들어집니다. 그 주소를 통째로 복사하세요.
-4. 아래 칸에 붙여넣고 '조회'를 누르면 값이 표로 나옵니다.
-
-**직접 입력하는 방법**
-- 기관코드(orgId): 통계청은 **101**
-- 통계표ID(tblId): KOSIS 통계표 주소에 있는 `DT_...` 형태의 값
-- 시점(prdSe): Y(연간), Q(분기), M(월간)
-""")
-        _kk1, _kk2 = st.columns([3, 1])
-        kosis_key = _kk1.text_input("KOSIS 인증키 (직접 입력 방식일 때만 필요)",
-                                    type="password", key="kosis_key")
-        kosis_mode = _kk2.radio("방식", ["주소 붙여넣기", "직접 입력"], key="kosis_mode")
-
-        if kosis_mode == "주소 붙여넣기":
-            _kurl = st.text_input("KOSIS OpenAPI 주소",
-                                  placeholder="https://kosis.kr/openapi/Param/statisticsParameterData.do?method=getList&apiKey=...",
-                                  key="kosis_url")
-            if st.button("📡 KOSIS 조회", width="stretch", key="kosis_go1"):
-                if not _kurl.strip():
-                    st.warning("주소를 붙여넣어 주세요.")
-                else:
-                    with st.spinner("KOSIS에서 자료를 불러오는 중..."):
-                        dfk, err = kosis_fetch_url(_kurl.strip())
-                    if err: st.error(err)
-                    else:
-                        st.session_state["kosis_result"] = dfk
-                        log_action("KOSIS 통계 조회")
-        else:
-            _c1, _c2, _c3, _c4 = st.columns(4)
-            _org = _c1.text_input("기관코드", value="101", key="kosis_org")
-            _tbl = _c2.text_input("통계표ID", placeholder="DT_...", key="kosis_tbl")
-            _prd = _c3.selectbox("시점", ["Y", "Q", "M"], key="kosis_prd")
-            _cnt = _c4.number_input("최근 몇 개", 1, 20, 5, key="kosis_cnt")
-            if st.button("📡 KOSIS 조회", width="stretch", key="kosis_go2"):
-                if not (kosis_key and _tbl.strip()):
-                    st.warning("인증키와 통계표ID를 입력하세요.")
-                else:
-                    _u = kosis_build_url(kosis_key, _org.strip(), _tbl.strip(),
-                                         prd_se=_prd, count=int(_cnt))
-                    with st.spinner("KOSIS에서 자료를 불러오는 중..."):
-                        dfk, err = kosis_fetch_url(_u)
-                    if err: st.error(err)
-                    else:
-                        st.session_state["kosis_result"] = dfk
-                        log_action("KOSIS 통계 조회")
-
-        if st.session_state.get("kosis_result") is not None:
-            _kr = st.session_state["kosis_result"]
-            smart_table(_kr, width="stretch", hide_index=True)
-            st.caption("조회된 값을 위 기준단가 표의 '단가' 칸에 입력해 사용하세요. "
-                       "기준연도도 함께 적어두면 나중에 갱신할 때 편합니다.")
-            if st.button("🗑️ 조회 결과 지우기", key="kosis_clear"):
-                st.session_state["kosis_result"] = None; st.rerun()
-
-        st.markdown("""
-**⚠️ 기본값의 기준연도를 반드시 확인하세요.** 표의 '기준연도' 칸을 보고, 최신 자료가 있으면 갱신해 주세요.
-
-**자동으로 받아올 수 있는 자료**
-- **농산물 가격** : KAMIS 오픈API (위에서 조회 가능, 무료·일별 갱신)
-  또는 공공데이터포털 aT '지역별 품목별 도·소매 가격정보'(승인 대기 없음)
-- **농촌 일용노임 / 농가구입가격지수** : KOSIS 공유서비스 오픈API (kosis.kr/openapi, 무료·분기 갱신)
-  → 통계청 기관코드 101, '농가판매 및 구입가격조사'
-- **농지 임차료** : 농지공간포털·KOSIS·공공데이터포털 (연 1회, 7월 공표)
-- **농기계 임대정보** : 공공데이터포털 표준데이터(15017325, 월 갱신)
-
-**사람이 직접 확인해 입력해야 하는 자료**
-- **소득조사 산정계수**(자가노력비 평가노임, 자본용역비 이자율, 감가상각 내용연수)
-  → 농촌진흥청 「농축산물 소득자료집」 부록, 또는 농산업경영과(063-238-1197) 문의
-- **농협 비료·농약 실판매가** (연 1회, 1월경 공표 / 보조금 적용 실구매가 기준 권장)
-- **위탁영농비 표준단가** → 소득자료집 작목별 경영비 항목 참고
-- **지역별(경북) 노임** → 시군 조사 또는 지역 농협 확인
-
-**공식 자료 출처**
-- 농업노임·소득자료 : 농촌진흥청 「농축산물 소득자료집」 (농사로 경영자료실)
-- 농산물 가격 : KAMIS 농산물유통정보 / 통계청 농가판매가격조사
-- 비료·자재 가격 : 농협 자재가격 정보
-- 농기계 임차료 : 지역 농기계은행 임대료표
-- 농지 임차료 : 통계청 농지임차료 조사
-
-⚠️ 이 프로그램은 외부 자료를 자동으로 받아오지 않습니다. 기관 공식 자료를 직접 확인해
-입력하셔야 정확한 결과가 나옵니다.
-""")
-
-    # ---------------- 부분예산표 (손실적/이익적 요소) ----------------
-    if emode.startswith("📕"):
-        st.caption("신기술을 도입했을 때 **늘어나는 비용(손실적 요소 A)**과 **늘어나는 수익(이익적 요소 B)**을 "
-                   "정리해 추정수익액(B−A)을 계산합니다. 시험연구보고서에 그대로 쓰는 형식입니다.")
-        with st.expander("ℹ️ 어떻게 쓰나요?", expanded=False):
-            st.markdown("""
-- **손실적 요소(A)**: 신기술 때문에 **더 들어가는 비용** + 줄어드는 수익
-  - 예) 추가 인건비, 상품성 저하 손실, 추가 농약·비료대, 운송비, 부대경비
-- **이익적 요소(B)**: 신기술 때문에 **늘어나는 수익** + 줄어드는 비용
-  - 예) 판매수익 증가, 절감된 노동비
-- **추정수익액 = B − A** → 양수면 도입할 가치가 있습니다.
-""")
-        with st.expander("🧮 이 숫자가 어떻게 나온 건가요? (예시로 따라가기)", expanded=False):
-            st.markdown("""
-부분예산은 **바뀐 것만** 계산합니다. 관행과 신기술이 똑같이 쓰는 비용(종묘비 등)은
-양쪽에서 지워지므로 **아예 넣지 않습니다.** 그래서 표가 짧습니다.
-
-**① 자료가 이렇다고 합시다** (모두 10a 기준, 반복이 있으면 평균)
-
-| | 관행 | 신기술 | 차이 |
-|---|---|---|---|
-| 수량 | 295 kg | 335 kg | **+40 kg** |
-| 고용노력비 | 600,000원 | 640,000원 | **+40,000원** |
-| 농약비 | 300,000원 | 290,000원 | **−10,000원** |
-
-**② 늘어난 건 A(손실적), 줄어든 건 B(이익적)로 보냅니다**
-
-| 바뀐 것 | 계산 | 어디로 |
-|---|---|---|
-| 수량 +40 kg | 10,000원 × 40 = **400,000원** | 이익적 요소(B) |
-| 고용노력비 +40,000원 | 640,000 − 600,000 = **40,000원** | 손실적 요소(A) |
-| 농약비 −10,000원 | 300,000 − 290,000 = **10,000원** | 이익적 요소(B) |
-
-> 비용이 **줄면 그만큼 번 것**이므로 이익 쪽(B)으로 갑니다. 헷갈리기 쉬운 부분입니다.
-
-**③ 합쳐서 추정수익액을 냅니다**
-
-```
-계(A) = 40,000원
-계(B) = 400,000 + 10,000 = 410,000원
-추정수익액(B − A) = 410,000 − 40,000 = 370,000원/10a
-```
-
-즉 **"이 신기술을 쓰면 10a당 37만원 더 남는다"** 는 뜻입니다.
-
----
-
-**자주 하는 실수**
-
-| 실수 | 왜 안 되나 |
-|---|---|
-| 총수입·총경영비를 통째로 넣음 | 부분예산은 **차이만** 봅니다. 안 바뀐 비용은 넣지 마세요. |
-| 비용 절감을 A(손실)에 넣음 | 절감은 **이익(B)** 입니다. |
-| 30a 포장 값을 그대로 씀 | 10a 기준으로 나눠서 넣거나, 자동채움에서 기준면적을 30으로 지정하세요. |
-| 자가노동을 뺌 | 노동이 늘었으면 **노임 × 늘어난 시간**을 A에 넣어야 실제 이득이 보입니다. |
-| 노동'시간'을 비용 열에 넣음 | 10시간이 10원이 됩니다. 자동채움의 **노동시간 열**에 넣어 노임을 곱하세요. |
-""")
-        with st.expander("📊 올린 데이터에서 자동으로 채우기 (대조구 ↔ 신기술구 비교)",
-                         expanded=False):
-            st.caption("처리구별 수량·비용이 들어 있는 자료를 올렸다면, **대조구 대비 달라진 부분만** "
-                       "뽑아서 아래 표를 자동으로 채워 드립니다. 채운 뒤 손으로 고쳐도 됩니다.")
-            if df is None:
-                st.info("왼쪽에서 데이터를 먼저 올리면 이 기능을 쓸 수 있습니다. "
-                        "(데이터 없이 직접 입력해도 됩니다.)")
-            elif not cat_cols or not num_cols:
-                st.info("처리구(문자) 열과 수량·비용(숫자) 열이 모두 있어야 합니다.")
-            else:
-                a1, a2 = st.columns(2)
-                _pbg = a1.selectbox("처리구 열", cat_cols, key="pbd_g")
-                _lv = df[_pbg].dropna().astype(str).unique().tolist()
-                _pbq = a2.selectbox("수량 열 (주산물)", num_cols,
-                                    index=guess_idx(num_cols, ["수량", "수확량", "생산량", "상품수량"]),
-                                    key="pbd_q")
-                b1, b2 = st.columns(2)
-                _pbc = b1.selectbox("대조구 (관행)", _lv,
-                                    index=guess_idx(_lv, ["대조", "관행", "무처리", "control", "CK"]),
-                                    key="pbd_c")
-                _tv = [v for v in _lv if v != _pbc] or _lv
-                _pbt = b2.selectbox("신기술 처리구", _tv, key="pbd_t")
-                c1_, c2_ = st.columns(2)
-                _pbp = c1_.number_input("단가 (원/수량 1단위)", 0, 100000000, 0, 100,
-                                        key="pbd_price",
-                                        help="수량 열이 kg이면 원/kg, 상자면 원/상자를 넣으세요.")
-                _pba = c2_.number_input("자료 기준면적 (a)", 0.1, 1000.0, 10.0, 0.1,
-                                        key="pbd_area",
-                                        help="자료가 10a 기준이면 10, 1a(=100㎡) 기준이면 1. "
-                                             "10a 기준으로 환산해 계산합니다.")
-                _numopt = [c for c in num_cols if c != _pbq]
-                _hour_guess = [c for c in _numopt if looks_like_hours(c)]
-                _pbhour = st.multiselect(
-                    "노동시간 열 (시간 단위 — 노임을 곱해 금액으로 바꿉니다)",
-                    _numopt, default=_hour_guess, key="pbd_hour",
-                    help="자가노동시간처럼 '원'이 아니라 '시간'으로 적힌 열입니다. "
-                         "여기에 넣지 않으면 10시간이 10원으로 계산됩니다.")
-                _pbwage = 0
-                if _pbhour:
-                    _pbwage = st.number_input(
-                        "시간당 노임 (원/시간)", 0, 1000000,
-                        int(get_price("농업노임(남, 시간)", 19190)), 10, key="pbd_wage",
-                        help="기준단가 관리에 넣어 둔 값을 기본으로 씁니다. "
-                             "여자 노임(15,174원) 등으로 바꿔도 됩니다.")
-                _pbcost = st.multiselect(
-                    "비용 열 (원 단위 — 신기술 때문에 달라지는 비용만)",
-                    [c for c in _numopt if c not in _pbhour], key="pbd_cost",
-                    help="인건비·자재비·농약비처럼 처리구마다 값이 다른 비용 열을 고릅니다. "
-                         "'합계' 같은 계산 결과 열은 넣지 마세요.")
-                _odd = [c for c in _pbcost
-                        if looks_like_hours(c)
-                        or any(k in str(c).replace(" ", "")
-                               for k in ("단가", "가격", "판매가", "수량", "면적", "%"))]
-                if _odd:
-                    st.warning("⚠️ 비용 열로 보기 어려운 열이 섞여 있습니다: "
-                               + ", ".join(map(str, _odd))
-                               + " — 시간 단위면 위 '노동시간 열'로 옮기고, "
-                                 "단가·수량이면 빼 주세요.")
-                if st.button("📥 이 조건으로 아래 표 채우기", key="pbd_fill", width="stretch"):
-                    try:
-                        _L, _G, _D = partial_budget_from_data(
-                            df, _pbg, _pbc, _pbt, _pbq, _pbp,
-                            cost_cols=_pbcost, area_a=_pba,
-                            hour_cols=_pbhour, wage_per_hour=_pbwage)
-                        st.session_state["pb_auto"] = {"loss": _L, "gain": _G, "detail": _D,
-                                                       "control": _pbc, "treated": _pbt}
-                        st.session_state["pb_fill_n"] = st.session_state.get("pb_fill_n", 0) + 1
-                        st.session_state["pb_demo"] = False
-                        st.success(f"'{_pbc}' 대비 '{_pbt}'의 차이를 아래 표에 채웠습니다.")
-                        log_action(f"부분예산표 데이터 자동채움: {_pbc} → {_pbt}")
-                    except Exception as _ex:
-                        st.error(f"❌ {_ex}")
-                if st.session_state.get("pb_auto"):
-                    st.markdown("###### 🔎 10a 환산 비교 (자동 채움 근거)")
-                    smart_table(st.session_state["pb_auto"]["detail"],
-                                 width="stretch", hide_index=True)
-                    if st.button("↩️ 자동 채움 지우고 직접 입력", key="pbd_clear"):
-                        st.session_state.pop("pb_auto", None)
-                        st.session_state["pb_fill_n"] = st.session_state.get("pb_fill_n", 0) + 1
-                        st.rerun()
-
-        _pb_auto = st.session_state.get("pb_auto")
-        if _pb_auto:
-            st.info(f"📊 **'{_pb_auto['control']}' 대비 '{_pb_auto['treated']}'** 자료에서 자동으로 채운 표입니다. "
-                    "빠진 항목(운송비·부대경비 등)은 직접 추가하세요.")
-        else:
-            st.warning("✏️ 지금은 **직접 입력 모드**입니다. 아래 칸에 적은 항목·금액으로만 계산합니다. "
-                       "위 **📊 올린 데이터에서 자동으로 채우기**를 쓰면 자료에서 바로 만들 수 있어요.")
-        _pb_example = st.checkbox("예시 값 채워보기 (연습용)", value=False, key="pb_demo",
-                                  disabled=bool(_pb_auto),
-                                  help="켜면 작성 방법을 보여주는 예시 숫자가 들어갑니다. "
-                                       "실제 분석에서는 끄고 직접 입력하세요.")
-        _pb_key = f"{int(_pb_example)}_{st.session_state.get('pb_fill_n', 0)}"
-        st.markdown("##### ① 손실적 요소(A) — 늘어나는 비용")
-        if _pb_auto:
-            loss_default = _pb_auto["loss"].copy()
-        elif _pb_example:
-            loss_default = pd.DataFrame({
-                "항목": ["인건비", "손실비", "농약·비료대", "운송비", "부대경비(수수료 등)"],
-                "산출근거": ["130,000원 × 10명", "290kg × 0.2(상품율) × 28,000원", "", "", ""],
-                "금액(원)": [1300000, 1624000, 200000, 725000, 435000]})
-        else:
-            loss_default = pd.DataFrame({
-                "항목": ["", "", "", ""],
-                "산출근거": ["", "", "", ""],
-                "금액(원)": [None, None, None, None]})
-        loss_df = st.data_editor(loss_default, num_rows="dynamic", width="stretch",
-                                 key=f"pb_loss_{_pb_key}")
-        st.markdown("##### ② 이익적 요소(B) — 늘어나는 수익")
-        if _pb_auto:
-            gain_default = _pb_auto["gain"].copy()
-        elif _pb_example:
-            gain_default = pd.DataFrame({
-                "항목": ["판매수익 증가"],
-                "산출근거": ["52,000원 × 145상자"],
-                "금액(원)": [7540000]})
-        else:
-            gain_default = pd.DataFrame({
-                "항목": ["", ""], "산출근거": ["", ""], "금액(원)": [None, None]})
-        gain_df = st.data_editor(gain_default, num_rows="dynamic", width="stretch",
-                                 key=f"pb_gain_{_pb_key}")
-        _pb_crop = st.text_input("작목명 (보고서 문장에 사용, 선택)", key="pb_crop",
-                                 placeholder="예) 풋고추").strip()
-
-        if keep_running("pbtable", "부분예산표 만들기"):
-            st.session_state.pop("cap_pbtbl", None)
-            L, _loss_errors, _loss_check = validate_manual_budget_table(
-                loss_df, "손실적 요소")
-            G, _gain_errors, _gain_check = validate_manual_budget_table(
-                gain_df, "이익적 요소")
-            _manual_errors = _loss_errors + _gain_errors
-            if L.empty and G.empty:
-                _manual_errors.append("손실적 요소와 이익적 요소가 모두 비어 있습니다.")
-            if _manual_errors:
-                for _err in _manual_errors:
-                    st.error("❌ " + _err)
-                st.warning("입력 오류를 수정하기 전에는 계산·보고서·AI 해석을 만들지 않습니다.")
-            else:
-                _checks = pd.concat([_loss_check, _gain_check], ignore_index=True)
-                if not _checks.empty:
-                    _check_show = _checks.copy()
-                    for _c in ["산출근거 계산값", "입력 금액", "차이"]:
-                        if _c in _check_show.columns:
-                            _check_show[_c] = _check_show[_c].map(
-                                lambda v: "-" if pd.isna(v) else f"{round_half_up(v):,}")
-                    st.markdown("##### 🔎 산출근거 자동 검산")
-                    smart_table(_check_show, width="stretch", hide_index=True)
-                    _mismatch = _checks["판정"].eq("확인 필요")
-                    if _mismatch.any():
-                        st.warning(f"⚠️ 산출근거와 입력 금액이 다른 항목이 {_mismatch.sum()}개 있습니다. "
-                                   "금액 또는 산출근거를 확인하세요.")
-                    else:
-                        st.success("✅ 입력 금액과 산출근거 검산을 통과했습니다.")
-
-                tot_a = float(L["금액(원)"].sum())
-                tot_b = float(G["금액(원)"].sum())
-                profit = tot_b - tot_a
-                tot_a_show, tot_b_show = round_half_up(tot_a), round_half_up(tot_b)
-                profit_show = round_half_up(profit)
-                c1, c2, c3 = st.columns(3)
-                c1.metric("손실적 요소(A)", f"{tot_a_show:,} 원")
-                c2.metric("이익적 요소(B)", f"{tot_b_show:,} 원")
-                c3.metric("추정수익액(B−A)", f"{profit_show:,} 원",
-                          "입력 조건에서 양수" if profit > 0 else "재검토 필요")
-
-                left = ["○ 증가되는 비용 :"]
-                for _, r in L.iterrows():
-                    base = f" ({r['산출근거']})" if str(r.get("산출근거", "")).strip() else ""
-                    left.append(f"  - {r['항목']}{base} = {round_half_up(r['금액(원)']):,}원")
-                left.append(f"  - 계(A) : {tot_a_show:,}원")
-                right = ["○ 증가되는 이익 :"]
-                for _, r in G.iterrows():
-                    base = f" ({r['산출근거']})" if str(r.get("산출근거", "")).strip() else ""
-                    right.append(f"  - {r['항목']}{base} = {round_half_up(r['금액(원)']):,}원")
-                right.append(f"  - 계(B) : {tot_b_show:,}원")
-                n = max(len(left), len(right))
-                left += [""] * (n - len(left)); right += [""] * (n - len(right))
-                pb_tbl = pd.DataFrame({"손실적 요소(A)": left, "이익적 요소(B)": right})
-                st.markdown("##### ③ 부분예산표 (보고서용)")
-                smart_table(pb_tbl, width="stretch", hide_index=True)
-                concl = f"○ 추정수익액(B-A) : {tot_b_show:,} - {tot_a_show:,} = {profit_show:,}원"
-                st.code(concl, language=None)
-
-                _crop_txt = f"{_pb_crop} " if _pb_crop else ""
-                txt = (f"○ {_crop_txt}신기술 도입에 따른 부분예산 분석 결과\n"
-                       f"  - 증가되는 비용은 {tot_a_show:,}원, 증가되는 이익은 {tot_b_show:,}원이었다.\n"
-                       f"  - 입력한 가격·수량·비용 조건에서 추정수익액은 {profit_show:,}원/10a으로 산출되었다.\n"
-                       + ("  - 추정수익액이 양수이므로 경제성 검토 대상이 될 수 있으나, "
-                          "가격·수량 변동과 현장 적용성을 함께 확인해야 한다."
-                          if profit > 0 else
-                          "  - 추정수익액이 0 이하이므로 현재 조건에서는 도입을 재검토할 필요가 있다."))
-                st.markdown("###### 📋 보고서용 문장")
-                st.code(txt, language=None)
-                out_tbl = pd.concat([pb_tbl,
-                                     pd.DataFrame({"손실적 요소(A)": [concl],
-                                                   "이익적 요소(B)": [""]})],
-                                    ignore_index=True)
-                dl_table(out_tbl, "부분예산 분석표", "pbtbl", "부분예산표")
-                log_action("부분예산표(손실적·이익적) 작성")
-                report_capture("cap_pbtbl", "경제성 분석 (부분예산)", None,
-                               blocks=[{"text": txt},
-                                       {"caption": "부분예산 분석표", "table": out_tbl,
-                                        "plain": True},
-                                       {"caption": "산출근거 검산표", "table": _check_show}])
-                ai_interpret_button("pbtable", "부분예산(손실적·이익적 요소)", pb_tbl,
-                                    f"검증된 추정수익액은 {profit_show:,}원입니다. "
-                                    "수치를 다시 계산하지 말고 제공된 값만 해석하세요. "
-                                    + (f"작목은 {_pb_crop}입니다. " if _pb_crop else
-                                       "작목명은 제공되지 않았으므로 특정 작목을 언급하지 마세요. "),
-                                    capture_slot="cap_pbtbl")
-        report_button("cap_pbtbl")
-
-
-    # ---------------- 소득분석 ----------------
-    elif emode.startswith("📗"):
-        crop = st.selectbox("작목 유형 (농촌진흥청 소득조사 분류)",
-                            ["식량작물", "노지채소", "시설채소", "노지과수", "시설과수", "특용·약용작물", "직접 지정"],
-                            index=1, key="e_crop",
-                            help="작목 유형에 따라 경영비 주요 항목과 분석 관점이 달라집니다.")
-        _CROP_INFO = {
-            "식량작물": ("벼·보리·콩·감자 등. 기계화율이 높아 위탁영농비·광열동력비 비중이 큽니다.",
-                     ["종자비", "비료비", "농약비", "광열동력비", "위탁영농비", "제재료비", "감가상각비"]),
-            "노지채소": ("고추·마늘·양파·배추·무 등. 노동집약적이라 고용노력비·종묘비 비중이 큽니다.",
-                     ["종자비", "종묘비", "비료비", "농약비", "멀칭·피복재비", "지주·유인비", "고용노력비", "제재료비", "감가상각비"]),
-            "시설채소": ("시설고추·토마토·오이·딸기 등. 시설 감가상각비·난방비·전기료가 큰 비중을 차지합니다.",
-                     ["종묘비", "비료비", "농약비", "난방비", "전기료", "양액·배지비", "고용노력비", "시설감가상각비", "제재료비"]),
-            "노지과수": ("사과·배·포도·감귤 등. **다년생**이라 과수원 조성비(묘목·유목기 관리)를 반영해야 합니다.",
-                     ["비료비", "농약비", "봉지·피복재비", "전정·유인 노력비", "수분수·방화곤충비", "고용노력비", "조성비상각", "감가상각비"]),
-            "시설과수": ("하우스 감귤·포도 등. 시설비 + 다년생 조성비가 모두 들어갑니다.",
-                     ["비료비", "농약비", "난방비", "전기료", "봉지·피복재비", "전정·유인 노력비", "고용노력비", "시설감가상각비", "조성비상각"]),
-            "특용·약용작물": ("인삼·약용작물 등. 다년근이 많아 조성비·검사수수료·피복자재비가 특징입니다.",
-                        ["종묘비", "비료비", "농약비", "해가림·피복재비", "검사수수료", "고용노력비", "조성비상각", "감가상각비"]),
-            "직접 지정": ("아래에서 경영비 항목을 직접 선택하세요.", []),
-        }
-        info, suggested = _CROP_INFO[crop]
-        st.caption(f"💡 {info}")
-        is_perennial = crop in ("노지과수", "시설과수", "특용·약용작물")
-        is_facility = crop in ("시설채소", "시설과수")
-
-        with st.expander("ℹ️ 계산 체계 (농촌진흥청 농축산물 소득조사 기준)"):
-            st.markdown("""
-- **총수입(조수입)** = 주산물가액(수량×단가) + **부산물가액**
-- **경영비** = 종묘비·비료비·농약비·광열동력비·수리비·제재료비·소농구비·상각비·임차료·위탁영농비·고용노력비 등 **직접 지출 비용**
-- **생산비** = 경영비 + 자가노력비 + 유동자본용역비 + 고정자본용역비 + 토지용역비
-- **유동자본용역비** = (경영비 − 감가상각성 비용) × 이자율 × 1/2 × 재포기간(월/12)
-- **고정자본용역비** = 고정자산 부분현재가 × 해당 작목 부담률 × 이자율
-- **소득 = 총수입 − 경영비** ／ **순수익 = 총수입 − 생산비**
-- **소득률(%) = (소득 ÷ 총수입) × 100** ／ 순수익률(%) = (순수익 ÷ 총수입) × 100
-- 모든 지표는 **10a(1,000㎡) 기준**으로 환산합니다.
-
-**작목별 추가 고려**
-- 🌳 **과수·약용(다년생)**: 심은 뒤 수확까지 수년이 걸리므로 **과수원 조성비**(묘목비 + 유목기 관리비)를 내용연수로 나눠 매년 상각합니다.
-- 🏠 **시설재배**: 하우스·난방기 등 **시설 감가상각비**와 **난방비·전기료**가 경영비의 큰 부분입니다.
-""")
-        with st.expander("📋 어떤 엑셀을 올려야 하나요? (여기부터 보세요)", expanded=False):
-            st.markdown("""
-**한 줄 = 한 조사구(처리구 × 반복)** 로 적으면 됩니다. 열 이름은 자유롭게 쓰셔도 되고,
-화면에서 어떤 열이 수량인지 단가인지 골라 주면 됩니다.
-
-**규칙은 딱 세 개입니다.**
-1. **모든 값은 10a(1,000㎡) 기준**으로 적습니다. (30a 포장이면 3으로 나눠서 적기)
-2. **비용은 원 단위 숫자**만 적습니다. 쉼표·'원' 글자가 있어도 자동 변환되지만, 빈칸은 0으로 채우세요.
-3. **합계·소득같은 계산 결과 열은 넣지 마세요.** 프로그램이 다시 계산해서 이중으로 잡힙니다.
-""")
-            _samp_inc = pd.DataFrame({
-                "처리": ["관행", "관행", "신기술", "신기술"],
-                "반복": [1, 2, 1, 2],
-                "수량(kg/10a)": [295, 305, 345, 352],
-                "단가(원/kg)": [28000, 28000, 28000, 28000],
-                "종묘비": [180000, 180000, 180000, 180000],
-                "비료비": [210000, 210000, 240000, 240000],
-                "농약비": [400000, 400000, 250000, 250000],
-                "고용노력비": [600000, 600000, 640000, 640000],
-                "자가노동시간": [95, 98, 105, 104]})
-            smart_table(_samp_inc, width="stretch", hide_index=True)
-            st.markdown("""
-- **수량 열** → `수량(kg/10a)`, **단가 열** → `단가(원/kg)` 로 고릅니다.
-- **경영비 열** → `종묘비`·`비료비`·`농약비`·`고용노력비` 를 모두 고릅니다.
-- **자가노동시간** 은 자가노력비(= 시간 × 농촌임료금) 계산에 쓰입니다. 없으면 비워도 됩니다.
-- 단가가 처리구마다 같다면 그냥 같은 값을 반복해 적으면 됩니다.
-- 반복(1, 2, …)이 있으면 **처리구 평균**으로 묶어 계산합니다.
-""")
-            st.download_button("📥 이 서식 그대로 내려받기 (CSV)",
-                               _samp_inc.to_csv(index=False).encode("utf-8-sig"),
-                               "소득분석_입력서식.csv", width="stretch",
-                               key="dl_inc_form")
-            st.caption("내려받아서 우리 시험 숫자로 바꾼 뒤, 왼쪽 사이드바에 다시 올리면 됩니다.")
-
-        if suggested:
-            st.caption(f"이 작목의 대표 경영비 항목: {', '.join(suggested)}")
-
-        allc = df.columns.tolist()
-        # 콤마·단위가 섞여 문자로 읽힌 열도 숫자 후보에 포함 (분석 시 자동 변환)
-        _numlike = list(find_numeric_like(df).keys())
-        num_cols = list(dict.fromkeys(num_cols + _numlike))
-        if _numlike:
-            st.caption("💡 숫자로 보이는 문자 열도 선택할 수 있습니다(분석 시 자동 변환): "
-                       f"{', '.join(_numlike)}")
-        c1, c2, c3 = st.columns(3)
-        trt = c1.selectbox("처리구 열", allc, index=guess_idx(allc, ["처리", "품종", "시험구", "구분"]), key="e_t")
-        yq = c2.selectbox("수량 열 (kg/10a)", num_cols, index=guess_idx(num_cols, ["수량", "생산량", "수확량"]), key="e_y")
-        pr = c3.selectbox("단가 열 (원/kg)", num_cols, index=guess_idx(num_cols, ["단가", "가격", "판매가"], 1), key="e_p")
-        if yq == pr:
-            st.warning("⚠️ 수량 열과 단가 열이 같습니다. 서로 다른 열을 선택하세요.")
-        byp_opts = ["(없음)"] + [c for c in num_cols if c not in (yq, pr)]
-        byp = st.selectbox("부산물가액 열 (선택)", byp_opts,
-                           index=guess_idx(byp_opts, ["부산물"]), key="e_by")
-
-        _ac1, _ac2 = st.columns([1, 2])
-        area_val = _ac1.number_input("자료의 기준 면적", 0.1, 10000.0, 10.0, 0.1,
-                                     key="e_area",
-                                     help="입력 자료가 몇 a 기준인지 적으세요. 10a면 그대로 둡니다.")
-        area_factor = 10.0 / float(area_val) if area_val else 1.0
-        if abs(area_factor - 1.0) > 1e-9:
-            _ac2.info(f"📐 자료가 {area_val}a 기준이므로 모든 수입·비용을 "
-                      f"**10a 기준으로 {area_factor:.3f}배 환산**합니다.")
-        else:
-            _ac2.caption("모든 지표는 10a(1,000㎡) 기준으로 계산합니다.")
-
-        st.markdown("##### 1️⃣ 경영비 비목")
-        _cand_all = [c for c in num_cols if c not in (yq, pr, byp)]
-        # ⑦ 합계열·별도 계산 항목은 자동 선택에서 제외 (중복계상 방지)
-        _blocked = [c for c in _cand_all if is_excluded_cost(c)]
-        _safe = [c for c in _cand_all if c not in _blocked]
-        _auto = [c for c in _safe if str(c).endswith("비") or "비용" in str(c)]
-        cost_cols = st.multiselect("경영비에 포함할 열", _cand_all, default=_auto, key="e_c")
-        if _blocked:
-            st.warning("⚠️ **중복계상 위험으로 자동 선택에서 뺀 열**: "
-                       + ", ".join(map(str, _blocked))
-                       + " — 이미 합계이거나(경영비합계 등) 아래에서 따로 계산되는 항목"
-                         "(자가노력비·자본용역비·토지용역비)입니다.")
-        _dup_sel = [c for c in cost_cols if is_excluded_cost(c)]
-        if _dup_sel:
-            st.error("❗ 선택한 열에 **중복 가능성**이 있습니다: " + ", ".join(map(str, _dup_sel))
-                     + " — 경영비가 실제보다 크게 계산될 수 있습니다.")
-        with st.expander("📋 비용 구성 확인 (계산 전 점검)"):
-            st.markdown("**경영비에 합산될 열** (" + str(len(cost_cols)) + "개)\n\n"
-                        + (", ".join(map(str, cost_cols)) if cost_cols else "(선택 없음)")
-                        + "\n\n**아래에서 따로 계산되는 항목** (위에 중복 선택 금지)\n"
-                        + "- 자가노력비 = 자가노동시간 × 농촌임료금\n"
-                        + "- 유동·고정자본용역비 = 자본액 × 이자율\n"
-                        + "- 토지용역비 = 직접 입력값\n\n"
-                        + "**제외된 열**: "
-                        + (", ".join(map(str, _blocked)) if _blocked else "없음"))
-        # ⑨ 부가가치 계산을 위한 비용 분류 (자동 결정하지 않고 확인 요청)
-        with st.expander("🏷️ 비용 분류 확인 (부가가치·손익분기 계산용)", expanded=False):
-            st.caption("부가가치 = 총수입 − 중간재비. 아래에서 **중간재비가 아닌 항목**을 "
-                       "골라 주세요. 자동으로 판단하지 않습니다.")
-            def _guess(keys):
-                return [c for c in cost_cols if any(k in str(c) for k in keys)]
-            # '임차'가 들어갔다고 모두 토지 임차료는 아니다. '스마트장비임차비'처럼
-            # 기계·장비 임차료가 토지 임차료로 잡히면, 아래 토지용역비와 중복이라는
-            # 경고가 잘못 뜨면서 분석이 막힌다.
-            _MACH_HINT = ["농기계", "기계", "장비", "시설", "하우스", "트랙터",
-                          "관리기", "드론", "로봇", "스마트", "설비", "차량"]
-            _LAND_HINT = ["토지", "농지", "지대", "밭", "논", "경지", "부지", "전답"]
-            _rentish = _guess(["임차", "임대", "리스"])
-            _g_mach = [c for c in _rentish if any(k in str(c) for k in _MACH_HINT)]
-            _g_rent = [c for c in _guess(["임차", "임대", "지대"])
-                       if c not in _g_mach
-                       and (any(k in str(c) for k in _LAND_HINT)
-                            or str(c).strip() in ("임차료", "임대료", "지대", "임차비", "임대비"))]
-            _g_hire = _guess(["고용", "노력", "노임", "인건"])
-            _g_trust = _guess(["위탁", "대행"])
-            _g_dep = _guess(["상각", "감가"])
-            cls1, cls2 = st.columns(2)
-            rent_col = cls1.multiselect("토지 임차료", cost_cols, default=_g_rent, key="e_rent")
-            hire_col = cls2.multiselect("고용노력비", cost_cols, default=_g_hire, key="e_hire")
-            cls3, cls4 = st.columns(2)
-            mach_col = cls3.multiselect("농기계·시설 임차료", cost_cols,
-                                        default=_g_mach, key="e_mach")
-            trust_col = cls4.multiselect("위탁영농비", cost_cols, default=_g_trust, key="e_trust")
-            dep_col = st.multiselect("감가상각비", cost_cols, default=_g_dep, key="e_dep")
-            st.markdown("---")
-            _g_yv = _guess(["수확", "선별", "포장", "상자", "박스", "운송", "운반",
-                            "출하", "유통", "선과", "저장"])
-            yield_var_col = st.multiselect(
-                "📦 수량에 비례하는 비용 (손익분기 계산용)", cost_cols,
-                default=_g_yv, key="e_yieldvar",
-                help="수확·선별·포장·운송비처럼 '수량이 줄면 같이 줄어드는' 비용만 고르세요. "
-                     "종묘비·비료비·토지용역비처럼 면적에 대해 정해지는 비용은 고르지 "
-                     "않습니다. 아무것도 고르지 않으면 손익분기수량 = "
-                     "(생산비 − 부산물가액) ÷ 단가 가 됩니다.")
-            _excl_va = list(dict.fromkeys(rent_col + hire_col + mach_col + trust_col + dep_col))
-            _inter_cols = [c for c in cost_cols if c not in _excl_va]
-            _amb = [c for c in cost_cols
-                    if c not in _excl_va and any(k in str(c) for k in
-                                                 ("료", "임", "용역", "수수료"))]
-            st.markdown("**중간재비로 계산될 항목** (" + str(len(_inter_cols)) + "개)\n\n"
-                        + (", ".join(map(str, _inter_cols)) if _inter_cols else "(없음)")
-                        + "\n\n**중간재비에서 제외될 항목**\n\n"
-                        + (", ".join(map(str, _excl_va)) if _excl_va else "(없음)"))
-            if _amb:
-                st.warning("⚠️ 분류가 애매한 항목이 있습니다: " + ", ".join(map(str, _amb))
-                           + " — 위 분류에 넣을지 직접 확인해 주세요.")
-        c4, c5 = st.columns(2)
-
-
-        with st.expander("2️⃣ 자가 요소 (생산비·순수익 계산용)"):
-            c6, c7 = st.columns(2)
-            _lab = ["(없음)"] + [c for c in num_cols if c not in (yq, pr)]
-            labor_col = c6.selectbox("자가노동시간 열", _lab,
-                                     index=guess_idx(_lab, ["노동시간", "자가노동", "노력시간"]), key="e_l")
-            wage = c7.number_input("농촌임료금 (원/시간)", 0, 200000,
-                                   int(get_price("농업노임(남, 시간)", 19190)), 500,
-                                   key="e_wage",
-                                   help="자가노력비 = 자가노동시간 × 농촌임료금. 연도·지역별 실제 임료금을 입력하세요.")
-            c8, c9 = st.columns(2)
-            rate = c9.number_input("자본 이자율 (%)", 0.0, 20.0,
-                                   float(get_price("자본이자율", 5.0)), 0.1, key="e_rate")
-            _fa_mode = c8.radio("고정자산 입력", ["부분현재가 직접 입력", "신조가에서 자동 계산"],
-                                horizontal=False, key="e_fixed_mode")
-            _fixed_input_error = None
-            if _fa_mode == "부분현재가 직접 입력":
-                _fa1, _fa2 = st.columns(2)
-                fixed_asset = _fa1.number_input(
-                    "고정자산 부분현재가/평가액 (원/10a)", 0, 500000000, 0, 100000,
-                    key="e_fixedasset",
-                    help="대농구·영농시설의 현재 가치(부분현재가)를 해당 자산의 10a 기준으로 입력하세요.")
-                fixed_asset_use_rate = _fa2.number_input(
-                    "해당 작목 부담률 (%)", 0.0, 100.0, 100.0, 5.0, key="e_fixed_use",
-                    help="이 자산을 여러 작목에 함께 쓰면 해당 작목이 부담할 비율만 입력합니다.")
-            else:
-                _fa1, _fa2, _fa3, _fa4 = st.columns(4)
-                _new_value = _fa1.number_input("신조가 (원/10a)", 0, 1000000000, 0, 100000,
-                                              key="e_fixed_new")
-                _residual = _fa2.number_input("잔존가치 (원/10a)", 0, 1000000000, 0, 100000,
-                                             key="e_fixed_residual")
-                _life = _fa3.number_input("내용연수(년)", 1, 50, 10, 1, key="e_fixed_life")
-                _used = _fa4.number_input("사용연수(년)", 0, 50, 0, 1, key="e_fixed_used")
-                _fixed_input_error = None
-                if _residual > _new_value:
-                    _fixed_input_error = "잔존가치는 신조가보다 클 수 없습니다."
-                    st.error("❌ " + _fixed_input_error)
-                    fixed_asset = 0.0
-                elif _used > _life:
-                    _fixed_input_error = "사용연수는 내용연수보다 클 수 없습니다."
-                    st.error("❌ " + _fixed_input_error)
-                    fixed_asset = 0.0
-                else:
-                    _annual_dep = ((_new_value - _residual) / float(_life)) if _life else 0.0
-                    fixed_asset = max(float(_new_value) - _annual_dep * float(_used), float(_residual))
-                    st.caption(f"부분현재가 = 신조가 − (연간 감가상각비 × 사용연수) = **{fixed_asset:,.0f}원/10a**")
-                fixed_asset_use_rate = st.number_input(
-                    "해당 작목 부담률 (%)", 0.0, 100.0, 100.0, 5.0, key="e_fixed_use_auto",
-                    help="이 자산을 여러 작목에 함께 쓰면 해당 작목이 부담할 비율만 입력합니다.")
-            months = st.slider("재포기간 (개월)", 1, 12, 6, key="e_months",
-                               help="유동자본용역비 = 유동자본 기준액 × 연이자율 × 1/2 × 재포기간(월/12). "
-                                    "감가상각비와 조성비상각은 유동자본 기준액에서 제외합니다.")
-            st.caption("유동자본은 경영비 전액에 이자를 붙이지 않습니다. 감가상각성 비용을 제외하고 "
-                       "농촌진흥청 방식의 산출계수 1/2와 재포기간을 적용합니다.")
-            # ⑧ 토지 이용 형태에 따라 토지비 산정 방식을 나눔
-            st.markdown("**토지 이용 형태**")
-            land_type = st.radio("토지 이용", ["자가 소유", "임차", "자가·임차 혼합", "토지비 제외"],
-                                 horizontal=True, key="e_landtype", label_visibility="collapsed")
-            _base_land = int(get_price("토지용역비(밭)", 260) * 1000)
-            if land_type == "토지비 제외":
-                land_opp = 0
-                land_cash = 0
-                st.caption("토지 관련 비용을 별도로 추가하지 않습니다.")
-            elif land_type == "자가 소유":
-                land_opp = st.number_input("자가토지 기회비용 (원/10a)", 0, 20000000,
-                                           _base_land, 10000, key="e_land_own",
-                                           help="자가토지를 빌려줬다면 받을 수 있는 임차료 수준. 생산비에만 반영합니다.")
-                land_cash = 0
-            elif land_type == "임차":
-                land_cash = st.number_input("실제 토지 임차료 (원/10a)", 0, 20000000,
-                                            _base_land, 10000, key="e_land_rent",
-                                            help="실제로 지급한 임차료이므로 경영비에 반영합니다.")
-                land_opp = 0
-                st.warning("⚠️ 경영비 항목에 **토지 임차료 열이 이미 포함**되어 있다면 여기서는 0으로 두세요. "
-                           "그렇지 않으면 임차료가 두 번 계산됩니다.")
-            else:   # 혼합
-                _lc1, _lc2 = st.columns(2)
-                _own_ratio = _lc1.slider("자가 비율(%)", 0, 100, 50, 5, key="e_ownratio")
-                _own_cost = _lc2.number_input("자가 기회비용 (원/10a, 자가 100% 가정)", 0, 20000000,
-                                              _base_land, 10000, key="e_owncost")
-                _rent_cost = st.number_input("임차료 (원/10a, 임차 100% 가정)", 0, 20000000,
-                                             _base_land, 10000, key="e_rentcost")
-                land_opp = round_half_up(_own_cost * _own_ratio / 100)
-                land_cash = round_half_up(_rent_cost * (100 - _own_ratio) / 100)
-                st.caption(f"자가토지 용역비 **{land_opp:,}원/10a**(생산비에만 반영) + "
-                           f"실제 임차료 **{land_cash:,}원/10a**(경영비에 반영)")
-            land = land_opp
-
-        # 작목별 특수 항목
-        estab_amort = 0
-        if is_perennial:
-            with st.expander("🌳 과수·다년생 작물 — 과수원 조성비 상각 (중요)", expanded=True):
-                st.caption("과수·약용작물은 심은 뒤 수확까지 수년이 걸립니다. 그동안 든 조성비를 "
-                           "성목 이후 매년 나눠서 비용으로 반영(상각)합니다.")
-                cc1, cc2 = st.columns(2)
-                estab_total = cc1.number_input("총 조성비 (원/10a)", 0, 200000000, 0, 100000,
-                                               key="e_estabtotal",
-                                               help="묘목비 + 유목기(미결실기) 관리비 합계")
-                useful_years = cc2.number_input("성목 이후 내용연수 (년)", 1, 40, 15, 1,
-                                                key="e_usefulyears",
-                                                help="과수원을 경제적으로 이용하는 총 기간")
-                estab_amort = round_half_up(estab_total / useful_years) if useful_years else 0
-                if estab_amort:
-                    st.info(f"연간 조성비 상각액 = {estab_total:,.0f} ÷ {useful_years}년 "
-                            f"= **{estab_amort:,.0f} 원/10a** (경영비에 매년 포함)")
-        if is_facility:
-            st.caption("🏠 시설재배는 하우스·난방기 감가상각비, 난방비, 전기료를 경영비 항목에 꼭 포함하세요.")
-
-        ctrl = st.selectbox("대조구(비교 기준)", ["(없음)"] + df[trt].astype(str).unique().tolist(), key="e_ctrl")
-        _unit_confirm = st.checkbox(
-            "수량=kg/입력 기준면적, 단가=원/kg, 비용·부산물가액=원/입력 기준면적임을 확인했습니다.",
-            key="e_unit_confirm",
-            help="단위가 다르면 금액이 10배·1000배 틀릴 수 있습니다. 원/10kg, ton, 천원 단위는 먼저 환산하세요.")
-
-        _econ_errors = validate_economic_inputs(
-            df, trt, yq, pr, cost_cols,
-            labor_col=(None if labor_col == "(없음)" else labor_col),
-            byproduct_col=(None if byp == "(없음)" else byp),
-            wage_per_hour=wage, interest_rate=rate, capital_months=months,
-            fixed_asset_per_10a=fixed_asset, fixed_asset_use_rate_percent=fixed_asset_use_rate,
-            establishment_amort_per_10a=estab_amort, depreciation_cost_cols=dep_col,
-            land_cost_per_10a=land_opp, land_cash_rent_per_10a=land_cash,
-            land_type=land_type, source_area_a=area_val)
-        if _fixed_input_error:
-            _econ_errors.append(_fixed_input_error)
-        if not _unit_confirm:
-            _econ_errors.append("입력 열의 단위를 확인해야 계산할 수 있습니다.")
-        _econ_errors = list(dict.fromkeys(_econ_errors))
-        # 계산 엔진(economic_core)은 열 이름에 '임차'가 있으면 토지 임차료로 보고
-        # 별도 토지용역비와 중복이라고 알린다. 그러나 '스마트장비임차비'처럼 기계·장비
-        # 임차료는 토지와 무관하다. 위 '비용 분류 확인'에서 사용자가 **토지 임차료로
-        # 지정한 열**이 있을 때만 진짜 중복이므로, 그 기준으로 다시 판정한다.
-        _kept = []
-        for _err in _econ_errors:
-            if (("토지용역비" in _err and ("임차" in _err or "임대" in _err))
-                    or ("토지 임차료" in _err and "경영비" in _err)):
-                _listed = [t.strip() for t in _err.split(":")[-1].split(",") if t.strip()]
-                _hit = [t for t in _listed if t in rent_col]
-                if not _hit:
-                    continue                     # 기계·장비 임차료였다 → 중복 아님
-                _err = ("경영비에 토지 임차료(" + ", ".join(_hit) + ")가 들어 있어 "
-                        "별도 입력한 토지 임차료와 중복 계산됩니다. 별도 토지 임차료를 0으로 두거나, "
-                        "해당 열을 경영비에서 빼 주세요.")
-            _kept.append(_err)
-        _econ_errors = _kept
-        for _err in _econ_errors:
-            st.error("❌ " + _err)
-
-        if keep_running("econ", "소득분석 실행", disabled=bool(_econ_errors)):
-            st.session_state.pop("cap_econ", None)
-            for _key in ["_econ_rowlevel", "_econ_test_소득", "_econ_test_순수익",
-                         "_econ_test_수량", "_econ_signature"]:
-                st.session_state.pop(_key, None)
-            try:
-                _row, _summary = calculate_row_economics(
-                    df, trt, yq, pr, cost_cols,
-                    byproduct_col=(None if byp == "(없음)" else byp),
-                    labor_col=(None if labor_col == "(없음)" else labor_col),
-                    wage_per_hour=wage, interest_rate=rate, capital_months=months,
-                    fixed_asset_per_10a=fixed_asset, fixed_asset_use_rate_percent=fixed_asset_use_rate,
-                    land_cost_per_10a=land_opp, land_cash_rent_per_10a=land_cash,
-                    establishment_amort_per_10a=estab_amort,
-                    source_area_a=area_val, depreciation_cost_cols=dep_col)
-            except ValueError as _ex:
-                st.error(f"경제성 계산을 중단했습니다: {_ex}")
-                st.stop()
-
-            _validation_errors = validate_economic_results(_row, _summary)
-            if _validation_errors:
-                for _err in _validation_errors:
-                    st.error("❌ " + _err)
-                st.error("계산 결과 역산 검증에 실패하여 결과를 표시하지 않습니다.")
-                st.stop()
-            st.success("✅ 입력·면적 환산·수입·비용·소득·순수익 역산 검증을 통과했습니다.")
-
-            _rep = _row.groupby(trt).size()
-            _aggregated = bool((_rep > 1).any())
-            if _aggregated:
-                _n = int(_rep.max())
-                st.session_state["_econ_rowlevel"] = _row[[trt, "_소득", "_순수익",
-                                                           "_총수입", "_경영비"]].copy()
-                st.session_state["_econ_signature"] = dataframe_signature(df)
-                st.info(f"🔁 반복 자료가 확인되어(최대 {_n}반복) 각 반복의 수입·비용을 먼저 계산한 뒤 "
-                        "처리구 평균으로 집계했습니다.")
-
-            _rename = {
-                "_수량10a": yq, "_주산물가액": "주산물가액",
-                "_부산물가액": "부산물가액", "_경영비": "경영비",
-                "_조성비상각": "조성비상각", "_토지임차료": "토지임차료(별도입력)",
-                "_자가노력비": "자가노력비", "_유동자본기준액": "유동자본기준액",
-                "_유동자본용역비": "유동자본용역비", "_고정자본기준액": "고정자본기준액",
-                "_고정자본용역비": "고정자본용역비", "_토지용역비": "토지용역비",
-                "_총수입": "총수입", "_생산비": "생산비",
-                "_소득": "소득", "_순수익": "순수익",
-            }
-            e = _summary.rename(columns=_rename).reset_index(drop=True)
-            if estab_amort and "조성비상각" not in e.columns:
-                e["조성비상각"] = float(estab_amort)
-
-            # ---------- 통계 유의성 연동 (수량 ANOVA, 블록 지정 가능) ----------
-            yield_p, yield_src = None, ""
-            yield_test = {"source": "미검정", "status": "unknown", "p_value": None}
-            _blk_for_test = None
-            if (_rep > 1).any() and _rep.size >= 2:
-                _blk_opts = ["(없음)"] + [c for c in df.columns if c not in (trt, yq, pr)]
-                _bsel = st.selectbox("수량 검정에 쓸 반복(블록) 열", _blk_opts,
-                                     index=guess_idx(_blk_opts, ["반복", "블록", "block", "rep"]),
-                                     key="econ_blk",
-                                     help="난괴법이면 블록을 지정해야 정확한 검정이 됩니다.")
-                _blk_for_test = None if _bsel == "(없음)" else _bsel
-                # 반복별 소득·순수익 검정도 수량 ANOVA와 같은 블록을 사용하도록 보관한다.
-                if _blk_for_test and st.session_state.get("_econ_rowlevel") is not None:
-                    _erl = st.session_state["_econ_rowlevel"].copy()
-                    try:
-                        _erl[_blk_for_test] = df.loc[_erl.index, _blk_for_test]
-                        st.session_state["_econ_rowlevel"] = _erl
-                    except Exception:
-                        st.caption("소득 검정용 블록 열을 연결하지 못해 소득 검정은 블록 없이 수행됩니다.")
-                try:
-                    _cols_t = [trt, yq] + ([_blk_for_test] if _blk_for_test else [])
-                    _raw = df[_cols_t].copy()
-                    _raw[yq] = (_raw[yq] if pd.api.types.is_numeric_dtype(_raw[yq])
-                                else to_numeric_clean(_raw[yq]))
-                    _raw = _raw.dropna()
-                    _okv, _ = validate_anova_data(_raw, trt, yq)
-                    if _okv:
-                        _f = safe_formula(yq, [trt] + ([_blk_for_test] if _blk_for_test else []))
-                        _m = ols(_f, data=_raw).fit()
-                        _a = sm.stats.anova_lm(_m, typ=2)
-                        _k = f"C({q_ref(trt)})"
-                        yield_p = float(_a.loc[_k, "PR(>F)"]) if _k in _a.index else float(_a["PR(>F)"].iloc[0])
-                        yield_src = "반복 자료로 자동 검정"
-                        yield_test = {"source": "ANOVA 자동 검정",
-                                      "status": "significant" if yield_p < 0.05 else "not_significant",
-                                      "p_value": round(yield_p, 6),
-                                      "model": ("수량 ~ 처리구 + 블록" if _blk_for_test
-                                                else "수량 ~ 처리구")}
-                except Exception as _ex:
-                    yield_p = None
-                    st.caption(f"수량 자동 검정을 하지 못했습니다: {str(_ex)[:60]}")
-            if yield_p is None:
-                st.markdown("###### 🔬 수량의 통계적 유의성")
-                st.caption("반복 자료가 없어 자동 검정을 못 했습니다. "
-                           "분산분석 결과를 알고 있다면 알려 주세요. (경제성 해석의 신뢰도에 영향)")
-                _sig_choice = st.radio("처리 간 수량 차이가 통계적으로 유의했나요?",
-                                       ["모름 / 검정 안 함", "유의함 (p < 0.05)", "유의하지 않음 (p ≥ 0.05)"],
-                                       horizontal=True, key="econ_sig")
-                # ⑩ 사용자가 고른 '상태'만 기록하고 가짜 p값은 만들지 않는다
-                if _sig_choice.startswith("유의함"):
-                    yield_test = {"source": "사용자 입력", "status": "significant", "p_value": None}
-                elif _sig_choice.startswith("유의하지"):
-                    yield_test = {"source": "사용자 입력", "status": "not_significant", "p_value": None}
-                else:
-                    yield_test = {"source": "미검정", "status": "unknown", "p_value": None}
-            sig_warn = ""
-            if yield_p is not None:
-                if yield_p >= 0.05:
-                    sig_warn = ("⚠️ 처리 간 수량 차이는 통계적으로 유의하지 않았습니다. "
-                                "경제성 결과는 관측된 수량·가격·비용의 점추정치이며, "
-                                "소득 차이 자체의 통계적 유의성은 별도로 검정하지 않았습니다.")
-                    st.warning(f"{sig_warn} ({yield_src}"
-                               + (f", p = {yield_p:.4f}" if yield_src.startswith("반복") else "") + ")")
-                else:
-                    st.success("✅ 수량에서 처리 간 유의한 차이가 확인되었습니다"
-                               + (f" (p = {yield_p:.4f}, {yield_src})." if yield_src.startswith("반복")
-                                  else f" ({yield_src})."))
-
-            # 계산 엔진의 원값을 유지하고, 화면 표시 단계에서만 반올림한다.
-            _rev = e["총수입"].where(e["총수입"] != 0)
-            # 나눗셈 결과는 소수점이 끝없이 이어지므로(52.266666...), 만들 때 바로 반올림한다.
-            # (표시 직전에만 반올림하면 다운로드·AI 해석 경로가 이 반올림을 매번 건너뛰기 쉽다)
-            e["소득률(%)"] = (e["소득"] / _rev * 100).round(2)
-            e["순수익률(%)"] = (e["순수익"] / _rev * 100).round(2)
-            _va_excl = list(dict.fromkeys(rent_col + hire_col + mach_col + trust_col + dep_col))
-            _va_excl = [c for c in _va_excl if c in e.columns]
-            # 선택한 비용 열은 계산 엔진에서 이미 10a 기준으로 환산되어 있다.
-            _non_intermediate = (e[_va_excl].sum(axis=1) if _va_excl else pd.Series(0.0, index=e.index))
-            if "토지임차료(별도입력)" in e.columns:
-                _non_intermediate = _non_intermediate + e["토지임차료(별도입력)"]
-            if "조성비상각" in e.columns:
-                _non_intermediate = _non_intermediate + e["조성비상각"]
-            inter = (e["경영비"] - _non_intermediate).clip(lower=0)
-            e["부가가치"] = e["총수입"] - inter
-            e["가족노동보수"] = (e["총수입"] - e["경영비"] - e["유동자본용역비"]
-                            - e["고정자본용역비"] - e["토지용역비"])
-            e["단년도 총수입/생산비"] = (e["총수입"] / e["생산비"].where(e["생산비"] != 0)).round(2)
-            e["kg당 생산비"] = (e["생산비"] / e[yq].where(e[yq] != 0)).round(0)
-            # 손익분기수량 — CVP 공식 Q* = 고정비 ÷ (단가 − 단위당 변동비).
-            # 핵심은 '무엇이 변동비인가'다. 변동비는 **산출량(수량)에 비례하는** 비용만
-            # 해당한다. 10a 기준 작물 예산에서 경영비 대부분(종묘·비료·농약·고용노력비)과
-            # 자가노력비·토지용역비는 면적에 대해 정해지는 비용이라, 그해 수량이 줄어도
-            # 같이 줄지 않는다. 이걸 전부 변동비로 넣으면 단위당 변동비가 부풀고 고정비가
-            # 거의 남지 않아 손익분기수량이 비현실적으로 작게 나온다
-            # (예: 실제 318kg인데 손익분기 23kg → 어떤 처리든 무조건 흑자로 보임).
-            # 그래서 기본은 '수량비례비 없음' = 생산비 전액을 회수 대상으로 보고,
-            # 수확·선별·포장·운송처럼 실제로 수량에 비례하는 비용만 사용자가 지정한다.
-            _yield_var_cost_cols = [c for c in yield_var_col if c in e.columns]
-            _vc_total = (e[_yield_var_cost_cols].sum(axis=1) if _yield_var_cost_cols
-                         else pd.Series(0.0, index=e.index))
-            # 부산물가액은 주산물 수량과 무관하게 들어오는 수입이므로 회수 대상에서 뺀다.
-            _fc = (e["생산비"] - _vc_total - e["부산물가액"]).clip(lower=0)
-            e["손익분기수량"] = break_even_qty(_fc, _vc_total, e[yq], e[pr]).round(1)
-            e["손익분기가격"] = ((e["생산비"] - e["부산물가액"])
-                                / e[yq].where(e[yq] != 0)).round(0)
-            e["손익분기수량 계산불가"] = (e[pr] - _vc_total / e[yq].where(e[yq] != 0)) <= 0
-            if labor_col != "(없음)":
-                e["시간당 소득"] = (e["소득"] / e[labor_col].where(e[labor_col] != 0)).round(0)
-            _zero_den = []
-            if e["총수입"].eq(0).any(): _zero_den.append("총수입")
-            if e["생산비"].eq(0).any(): _zero_den.append("생산비")
-            if e[yq].eq(0).any(): _zero_den.append("수량")
-            if e[pr].eq(0).any(): _zero_den.append("단가")
-            if labor_col != "(없음)" and e[labor_col].eq(0).any(): _zero_den.append("자가노동시간")
-            if _zero_den:
-                st.warning("⚠️ " + ", ".join(_zero_den)
-                           + "이 0인 처리구의 비율 지표는 계산 불가로 표시합니다.")
-            # ---- 대조구 대비 증수 분석 (시험연구보고서 핵심 지표) ----
-            # ③ 열을 먼저 NaN으로 만들어 두어 KeyError·ZeroDivisionError 방지
-            qty_effect_ok = False
-            for _c in ["증수량", "증수율(%)", "증수액", "추가투입비", "경영비증가액",
-                       "소득증가액", "순수익증가액", "총수입증가액",
-                       "수량효과 기준 순증가수익", "소득지수", "투자효율", "대조구대비 소득(%)"]:
-                e[_c] = np.nan
-            has_ctrl = False
-            if ctrl != "(없음)":
-                cmask = e[trt].astype(str) == ctrl
-                if not cmask.any():
-                    st.warning(f"⚠️ 대조구 '{ctrl}'을(를) 자료에서 찾지 못해 증수 분석을 생략합니다.")
-                else:
-                    def _safe_mean(series):
-                        v = pd.to_numeric(series, errors="coerce").mean()
-                        return None if (v is None or pd.isna(v)) else float(v)
-                    b_inc = _safe_mean(e.loc[cmask, "소득"])
-                    b_yld = _safe_mean(e.loc[cmask, yq])
-                    b_cost = _safe_mean(e.loc[cmask, "경영비"])
-                    b_prof = _safe_mean(e.loc[cmask, "순수익"])
-                    b_rev = _safe_mean(e.loc[cmask, "총수입"])
-                    if b_inc not in (None, 0):
-                        e["대조구대비 소득(%)"] = ((e["소득"] - b_inc) / abs(b_inc) * 100).round(1)
-                        e["소득지수"] = (e["소득"] / b_inc * 100).round(1)
-                    elif b_inc == 0:
-                        st.warning("⚠️ 대조구의 소득이 0이어서 소득지수·대조구대비 소득은 계산하지 않았습니다.")
-                    if b_yld in (None, 0):
-                        st.warning("⚠️ 대조구의 수량이 0이거나 비어 있어 증수율을 계산할 수 없습니다. "
-                                   "증수량·증수액만 표시합니다."
-                                   if b_yld == 0 else
-                                   "⚠️ 대조구 수량이 비어 있어 증수 분석을 생략합니다.")
-                        if b_yld == 0:
-                            has_ctrl = True
-                            e["증수량"] = e[yq] - 0
-                            e["증수액"] = e["증수량"] * e[pr]
-                            if b_cost is not None:
-                                e["경영비증가액"] = e["경영비"] - b_cost
-                                e["추가투입비"] = e["경영비증가액"]
-                            if b_inc is not None:
-                                e["소득증가액"] = e["소득"] - b_inc
-                    else:
-                        has_ctrl = True
-                        e["증수량"] = e[yq] - b_yld
-                        e["증수율(%)"] = ((e[yq] - b_yld) / b_yld * 100).round(1)
-                        e["증수액"] = e["증수량"] * e[pr]
-                        # ④ 기본 판단지표 = 실제 차이 (가격·부산물 차이까지 모두 반영)
-                        if b_inc is not None:
-                            e["소득증가액"] = e["소득"] - b_inc
-                        if b_prof is not None:
-                            e["순수익증가액"] = e["순수익"] - b_prof
-                        if b_rev is not None:
-                            e["총수입증가액"] = e["총수입"] - b_rev
-                        if b_cost is not None:
-                            e["경영비증가액"] = e["경영비"] - b_cost
-                            e["추가투입비"] = e["경영비증가액"]
-                        # 보조지표: 단가·부산물이 모두 같을 때만 계산 (조건 불충족 시 미표시)
-                        _same_price = e[pr].nunique(dropna=True) <= 1
-                        _same_byp = (e["부산물가액"].nunique(dropna=True) <= 1
-                                     if "부산물가액" in e.columns else True)
-                        qty_effect_ok = bool(_same_price and _same_byp)
-                        if qty_effect_ok and b_cost is not None:
-                            e["수량효과 기준 순증가수익"] = e["증수액"] - e["경영비증가액"]
-                            with np.errstate(divide="ignore", invalid="ignore"):
-                                e["투자효율"] = np.where(
-                                    pd.to_numeric(e["추가투입비"], errors="coerce") > 0,
-                                    e["증수액"] / e["추가투입비"].replace(0, np.nan),
-                                    np.nan)
-                                e["투자효율"] = pd.Series(e["투자효율"], index=e.index).round(2)
-
-            st.markdown("#### 1) 소득 · 순수익")
-            m1 = [trt, "총수입", "경영비", "생산비", "소득", "순수익", "소득률(%)", "순수익률(%)"]
-            smart_table(money_table(e[m1]), width="stretch", hide_index=True)
-
-            st.markdown("#### 2) 생산비 구성")
-            m2 = [trt, "경영비", "자가노력비", "유동자본용역비", "고정자본용역비", "토지용역비", "생산비"]
-            smart_table(money_table(e[m2]), width="stretch", hide_index=True)
-            _dep_txt = ", ".join(map(str, dep_col)) if dep_col else "지정 없음(열 이름으로 자동 판별)"
-            st.caption(f"유동자본용역비는 감가상각비({ _dep_txt })와 조성비상각을 제외한 유동자본 기준액에 "
-                       f"이자율 {rate:g}% × 1/2 × 재포기간 {months}/12를 적용했습니다. "
-                       f"고정자본용역비는 부분현재가 {fixed_asset:,.0f}원/10a × 작목부담률 "
-                       f"{fixed_asset_use_rate:g}% × 이자율 {rate:g}%로 계산했습니다.")
-
-            st.markdown("#### 3) 경영 지표")
-            m3 = [trt, "부가가치", "가족노동보수", "단년도 총수입/생산비",
-                  "kg당 생산비", "손익분기수량", "손익분기가격"]
-            if "시간당 소득" in e.columns: m3.append("시간당 소득")
-            if "대조구대비 소득(%)" in e.columns: m3.append("대조구대비 소득(%)")
-            smart_table(money_table(e[m3]), width="stretch", hide_index=True)
-            if e["손익분기수량 계산불가"].any():
-                _bad = ", ".join(str(g) for g in e.loc[e["손익분기수량 계산불가"], trt])
-                st.warning(f"⚠️ {_bad}: 단위당 수량비례비가 판매단가 이상이라 "
-                           "아무리 많이 팔아도 손익분기점에 도달할 수 없습니다(손익분기수량 계산 불가). "
-                           "'수량에 비례하는 비용' 선택이 맞는지 확인해 주세요.")
-            _mean_mgmt = float(e["경영비"].mean())
-            _mgmt_bc = (float(e["총수입"].mean()) / _mean_mgmt) if _mean_mgmt > 0 else np.nan
-            _mgmt_bc_txt = f"{_mgmt_bc:.2f}" if pd.notna(_mgmt_bc) else "계산 불가"
-            _yv_txt = (", ".join(map(str, _yield_var_cost_cols)) if _yield_var_cost_cols else "지정 안 함")
-            st.caption("**손익분기수량 = (생산비 − 부산물가액 − 수량비례비) ÷ "
-                       "(단가 − 단위당 수량비례비)**입니다. "
-                       f"수량에 비례하는 비용: **{_yv_txt}** — 지정하지 않으면 "
-                       "**(생산비 − 부산물가액) ÷ 단가**가 되어 '그해 들어간 비용을 "
-                       "회수하려면 몇 kg을 수확해야 하는가'를 뜻합니다. "
-                       "실제 수량이 이보다 많으면 이익입니다. "
-                       "**손익분기가격 = (생산비 − 부산물가액) ÷ 실제 수량**으로, 현재 수량에서 최소 얼마를 받아야 하는지 보여줍니다. "
-                       "**단년도 총수입/생산비 = 총수입 ÷ 생산비**(자가노력비·용역비 포함)입니다. "
-                       "1을 넘으면 해당 연도의 입력 가격·수량·비용 조건에서 총수입이 생산비보다 큰 상태입니다. "
-                       "이 값은 여러 해의 현금흐름을 할인하는 시설투자용 B/C와는 다릅니다. "
-                       "통계적 유의성이나 가격 변동 위험도 별도로 확인해야 합니다. "
-                       f"참고로 처리 평균값 기준 총수입/경영비는 {_mgmt_bc_txt}입니다.")
-
-            # ---------- ⑩ 반복별 소득·순수익 통계 검정 (선택) ----------
-            _rowlv = st.session_state.get("_econ_rowlevel")
-            if st.session_state.get("_econ_signature") != dataframe_signature(df):
-                _rowlv = None
-            if _rowlv is not None and len(_rowlv) > len(e):
-                with st.expander("🔬 소득·순수익의 통계 검정 (반복 자료가 있을 때)", expanded=False):
-                    st.caption("경제성 결과는 기본적으로 관측값의 점추정치입니다. "
-                               "반복 자료가 있으면 소득·순수익 차이 자체를 검정할 수 있습니다.")
-                    _mt = st.multiselect("검정할 지표", ["_소득", "_순수익"],
-                                         default=["_소득"],
-                                         format_func=lambda x: x.lstrip("_"),
-                                         key="econ_test_metrics")
-                    if st.button("검정 실행", key="econ_test_run"):
-                        for _mcol in _mt:
-                            _res = econ_metric_test(
-                                _rowlv, trt, _mcol,
-                                control=(None if ctrl == "(없음)" else ctrl),
-                                blk_col=(_blk_for_test if _blk_for_test in _rowlv.columns else None))
-                            _label = _mcol.lstrip("_")
-                            st.markdown(f"**{_label}**")
-                            if _res is None:
-                                st.warning(f"{_label}: 반복이 부족해 검정할 수 없습니다.")
-                                continue
-                            _p = _res.get("anova_p")
-                            if _p is not None:
-                                st.metric(f"{_label} ANOVA p", f"{_p:.4f}",
-                                          "유의함" if _p < .05 else "유의하지 않음")
-                            if _res.get("dunnett") is not None:
-                                smart_table(_res["dunnett"], width="stretch", hide_index=True)
-                                st.caption("95% 구간이 0을 포함하지 않으면 대조구와 유의한 차이가 있습니다.")
-                            if _res.get("bootstrap"):
-                                _br = pd.DataFrame([
-                                    {"처리구": k, "차이": round(v["diff"], 1),
-                                     "95% 하한": round(v["low"], 1),
-                                     "95% 상한": round(v["high"], 1)}
-                                    for k, v in _res["bootstrap"].items()])
-                                st.markdown("부트스트랩 신뢰구간 (소표본·비정규 대비)")
-                                smart_table(_br, width="stretch", hide_index=True)
-                            st.session_state[f"_econ_test_{_label}"] = {
-                                "anova_p": _p,
-                                "dunnett": (_res["dunnett"].to_dict("records")
-                                            if _res.get("dunnett") is not None else None),
-                                "bootstrap": _res.get("bootstrap")}
-                            log_action(f"경제성 {_label} 통계 검정")
-            elif _rowlv is None:
-                st.caption("💡 반복 자료(처리구별 여러 행)를 넣으면 소득·순수익 차이도 검정할 수 있습니다.")
-
-            # ---- 대조구 대비 증수 분석 ----
-            inc_txt = ""
-            if has_ctrl:
-                st.markdown("#### 4) 대조구 대비 증수 분석 ⭐")
-                st.caption(f"'{ctrl}'을(를) 기준으로 각 처리의 증수 효과와 경제성을 계산했습니다. "
-                           "시험연구보고서 경제성 항목에 바로 쓸 수 있는 지표입니다.")
-                mi = [trt, yq, "증수량", "증수율(%)", "총수입증가액", "경영비증가액",
-                      "소득증가액", "순수익증가액", "소득지수"]
-                if qty_effect_ok and "수량효과 기준 순증가수익" in e.columns:
-                    mi.append("수량효과 기준 순증가수익")
-                mi = [c for c in mi if c in e.columns]
-                if "투자효율" in e.columns: mi.append("투자효율")
-                inc_df = e[mi].copy()
-                smart_table(money_table(inc_df), width="stretch", hide_index=True)
-                if not qty_effect_ok:
-                    st.info("ℹ️ 처리별 가격 또는 부산물 수입이 달라 "
-                            "**수량 효과만을 이용한 순증가수익은 계산하지 않았습니다.** "
-                            "경제성 판단은 실제 차이인 **소득증가액**을 사용하세요.")
-                st.caption("**소득증가액 = 처리구 소득 − 대조구 소득** ← 경제성 판단의 기본 지표\n\n"
-                           "**순수익증가액** = 처리구 순수익 − 대조구 순수익\n\n"
-                           "**총수입·경영비증가액** = 각각 대조구와의 차이\n\n"
-                           "**수량효과 기준 순증가수익**(보조) = 증수액 − 경영비증가액 — "
-                           "처리별 가격·부산물이 모두 같을 때만 표시됩니다.\n\n"
-                           "**소득지수** = 대조구를 100으로 본 상대값")
-                _ni = pd.to_numeric(e["소득증가액"], errors="coerce")
-                _cand = _ni[(e[trt].astype(str) != ctrl) & _ni.notna()]
-                if len(_cand):
-                    best_i = e.loc[_cand.idxmax()]
-                    _rate = best_i.get("증수율(%)")
-                    _rate_s = f"{_rate}%" if pd.notna(_rate) else "-"
-                    _add = best_i.get("추가투입비")
-                    _add_s = f"{_add:,.0f}원" if pd.notna(_add) else "산출 불가"
-                    _inc_v = float(best_i["소득증가액"])
-                    _prof_v = best_i.get("순수익증가액")
-                    inc_txt = ("○ " + f"'{ctrl}' 대비 '{best_i[trt]}'의 경제성\n"
-                               + f"  - 수량은 {_rate_s} 증수되었다.\n"
-                               + f"  - 경영비는 {_add_s} 증가하였다.\n"
-                               + f"  - 실제 소득증가액은 {_inc_v:,.0f}원/10a이었다"
-                               + (f"(순수익증가액 {float(_prof_v):,.0f}원/10a)."
-                                  if pd.notna(_prof_v) else ".") + "\n"
-                               + "  - " + ("입력 조건에서 대조구 대비 소득증가액이 양수로 산출되었다."
-                                           if _inc_v > 0
-                                           else "대조구 대비 소득 증가가 확인되지 않았다."))
-                    if sig_warn:
-                        inc_txt += "\n  - " + sig_warn.replace("⚠️ ", "")
-                    st.markdown("###### 📋 보고서용 문장 (복사해서 쓰세요)")
-                    st.code(inc_txt, language=None)
-                else:
-                    st.caption("대조구 외 처리의 소득증가액을 계산할 수 없어 요약 문장을 생략합니다.")
-                dl_table(money_table(inc_df), f"{ctrl} 대비 증수 및 경제성 분석", "econinc", "증수분석")
-
-            st.markdown("#### 5) 경영비 비목 구성")
-            _cost_component_cols = list(cost_cols)
-            if "토지임차료(별도입력)" in e.columns and float(land_cash) > 0:
-                _cost_component_cols.append("토지임차료(별도입력)")
-            if "조성비상각" in e.columns and float(estab_amort) > 0:
-                _cost_component_cols.append("조성비상각")
-            _cost_component_cols = list(dict.fromkeys(_cost_component_cols))
-            comp = e.groupby(trt)[_cost_component_cols].mean()
-            _comp_total = comp.sum(axis=1)
-            _comp_share = comp.div(_comp_total.where(_comp_total != 0), axis=0) * 100
-            smart_table(_comp_share.round(1).reset_index(), width="stretch")
-            _comp_means = comp.mean(axis=0)
-            if not _comp_means.empty and _comp_means.notna().any() and float(_comp_means.fillna(0).sum()) > 0:
-                st.caption(f"평균적으로 '{_comp_means.idxmax()}'가 경영비에서 가장 큰 비중을 차지합니다.")
-            else:
-                st.caption("모든 경영비가 0이어서 비용 비중을 계산할 수 없습니다.")
-
-            st.markdown("#### 6) 가격 민감도 (단가 변동 시 소득)")
-            rates = [-20, -10, 0, 10, 20]
-            sens = pd.DataFrame({trt: e[trt].astype(str)})
-            for r in rates:
-                sens[f"{r:+d}%"] = ((e["주산물가액"]*(1+r/100) + e["부산물가액"]) - e["경영비"]).round(0).values
-            smart_table(sens, width="stretch")
-
-            # ⑪ 같은 행에서 처리구·소득·소득률을 가져와야 함(다른 행 값이 섞이면 안 됨)
-            _bi = e["소득"].idxmax()
-            best = e.loc[_bi, trt]
-            best_income = float(e.loc[_bi, "소득"])
-            best_rate = float(e.loc[_bi, "소득률(%)"])
-            _best_rate_txt = f"{best_rate:.1f}%" if np.isfinite(best_rate) else "계산 불가"
-            _ni = e["순수익"].idxmax()
-            bestn = e.loc[_ni, trt]
-            bestn_profit = float(e.loc[_ni, "순수익"])
-            _valid_bc = pd.to_numeric(e["단년도 총수입/생산비"], errors="coerce").dropna()
-            _bc_count = int((_valid_bc > 1).sum())
-            _sig_note = ("\n  - " + sig_warn.replace("⚠️ ", "")) if sig_warn else ""
-            txt = ("○ 처리구별 경제성 분석 결과\n"
-                   f"  - 소득이 가장 높은 처리구는 '{best}'로 {best_income:,.0f}원/10a"
-                   f"(소득률 {_best_rate_txt})였으며, "
-                   f"순수익이 가장 높은 처리구는 '{bestn}'({bestn_profit:,.0f}원/10a)이었다.\n"
-                   f"  - 입력한 가격·수량·비용 조건에서 전체 {len(e)}개 처리구 중 "
-                   f"{_bc_count}개가 단년도 총수입/생산비 1을 초과하였다. "
-                   "최종 보급 판단에는 통계적 유의성·가격 변동·현장 적용성을 함께 검토해야 한다."
-                   + _sig_note)
-            st.markdown("###### 📋 보고서용 문장")
-            st.code(txt, language=None)
-
-            fw, fh = figsize()
-            x = e[trt].astype(str).reset_index(drop=True)
-            _xp = np.arange(len(x), dtype=float)
-            _bw = 0.36
-
-            # ① 소득·순수익: 겹치지 않는 그룹 막대
-            fig_income, ax0 = plt.subplots(figsize=(max(9.5, fw*1.6), max(4.4, fh*1.05)))
-            _income_plot = e["소득"].astype(float).values / 10000.0
-            _profit_plot = e["순수익"].astype(float).values / 10000.0
-            b1 = ax0.bar(_xp - _bw/2, _income_plot, width=_bw,
-                         label="소득", color="#3D6F9F", edgecolor="#000000", linewidth=.55)
-            b2 = ax0.bar(_xp + _bw/2, _profit_plot, width=_bw,
-                         label="순수익", color="#A3C4E2", edgecolor="#000000", linewidth=.55)
-            ax0.set_xticks(_xp, x.tolist())
-            ax0.set_ylabel("만원/10a")
-            deco(ax0, "처리구별 소득 · 순수익")
-            ax0.tick_params(axis="x", rotation=0 if len(x) <= 6 else 18)
-            ax0.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=2,
-                       frameon=False, borderaxespad=0)
-            if len(x) <= 10:
-                for bars in (b1, b2):
-                    for _b in bars:
-                        _v = float(_b.get_height())
-                        _va, _off = ("bottom", 5) if _v >= 0 else ("top", -5)
-                        ax0.annotate(f"{_v:,.0f}", (_b.get_x()+_b.get_width()/2, _v),
-                                     xytext=(0, _off), textcoords="offset points", ha="center",
-                                     va=_va, fontsize=8, color="#23394D", fontweight="bold")
-                ax0.margins(y=.17)
-            fig_income.subplots_adjust(bottom=.23, top=.88, left=.10, right=.98)
-            png_income = fig_to_png(fig_income)
-
-            st.markdown("##### 비용 구조와 가격 위험")
-            _ec1, _ec2 = st.columns(2)
-            with _ec1:
-                fig_cost, ax1 = plt.subplots(figsize=(max(5.8, fw), max(4.5, fh)))
-                # 경영비 구성: 오래된 Office식 다색 조합 대신, 서로 구분되면서도
-                # 한 화면에서 튀지 않는 차분한 cool-tone 팔레트로 통일한다.
-                _cost_palette = ["#25577A", "#3F7FA6", "#62A1C1", "#7DBBC9",
-                                 "#8FC8BF", "#B8D3DE", "#6F94AA", "#4D728E"]
-                _comp_plot = comp.astype(float) / 10000.0
-                _comp_plot.plot(kind="bar", stacked=True, ax=ax1,
-                          color=[_cost_palette[i % len(_cost_palette)] for i in range(len(comp.columns))],
-                          width=.62, edgecolor="white", linewidth=.7)
-                # 충분히 큰 구간에는 금액(만원/10a)과 구성비를 함께 표시한다.
-                # 너무 작은 구간은 억지로 글자를 넣지 않아 가독성을 지킨다.
-                _bottom = np.zeros(len(_comp_plot), dtype=float)
-                for _ci, _cname in enumerate(_comp_plot.columns):
-                    _vals = _comp_plot[_cname].to_numpy(dtype=float)
-                    _shares = _comp_share[_cname].to_numpy(dtype=float)
-                    _rgb = _cost_palette[_ci % len(_cost_palette)].lstrip('#')
-                    _r, _g, _b = [int(_rgb[k:k+2], 16) for k in (0,2,4)]
-                    _lum = 0.2126*_r + 0.7152*_g + 0.0722*_b
-                    _tc = "white" if _lum < 145 else "#20384D"
-                    for _xi, (_vv, _ss, _bb) in enumerate(zip(_vals, _shares, _bottom)):
-                        if np.isfinite(_vv) and np.isfinite(_ss) and _vv > 0 and _ss >= 5.5:
-                            ax1.text(_xi, _bb + _vv/2, f"{_vv:,.0f}\n({_ss:.0f}%)",
-                                     ha="center", va="center", fontsize=6.9,
-                                     color=_tc, fontweight="bold")
-                    _bottom += np.nan_to_num(_vals, nan=0.0)
-                ax1.set_ylabel("만원/10a")
-                ax1.set_xlabel("")
-                deco(ax1, "경영비 구성")
-                ax1.tick_params(axis="x", rotation=0 if len(comp.index) <= 5 else 18)
-                # 범례는 그래프 아래 한 줄/두 줄로 정돈해 막대와 겹치지 않게 한다.
-                ax1.legend(fontsize=7.3, ncol=min(3, max(1, len(comp.columns))),
-                           loc="upper center", bbox_to_anchor=(0.5, -0.15),
-                           frameon=False, borderaxespad=0, columnspacing=1.1,
-                           handlelength=1.5, handletextpad=.45)
-                # 상단/우측 축선은 숨기고, 왼쪽·아래쪽만 옅게 유지한다.
-                ax1.spines["top"].set_visible(False)
-                ax1.spines["right"].set_visible(False)
-                ax1.spines["left"].set_color("#B9C7D3")
-                ax1.spines["bottom"].set_color("#B9C7D3")
-                fig_cost.subplots_adjust(bottom=.27, top=.86, left=.14, right=.98)
-                png_cost = fig_to_png(fig_cost)
-
-            with _ec2:
-                fig_sens, ax2 = plt.subplots(figsize=(max(5.8, fw), max(4.5, fh)))
-                _line_palette = ["#274C77", "#4F83B6", "#79A9D1", "#4F8A8B",
-                                 "#8D6E63", "#7D6AA5", "#5D8A66", "#B07D4F"]
-                _sens_raw = np.array([
-                    [float(sens.iloc[i][f"{r:+d}%"]) for r in rates]
-                    for i in range(len(e))], dtype=float)
-                _sens_plot = _sens_raw / 10000.0
-                for i in range(len(e)):
-                    _col = _line_palette[i % len(_line_palette)]
-                    ax2.plot(rates, _sens_plot[i], marker="o", markersize=5, linewidth=2.0,
-                             color=_col, label=str(x.iloc[i]))
-                # 각 x지점(-20,-10,0,+10,+20)마다 숫자끼리 실제로 겹치는지 계산해
-                # y좌표를 최소 간격만큼 벌린다. 처리별 고정 오프셋 방식보다 훨씬 자연스럽다.
-                _all_y = _sens_plot[np.isfinite(_sens_plot)]
-                _yr = float(np.nanmax(_all_y) - np.nanmin(_all_y)) if _all_y.size else 1.0
-                _min_gap = max(_yr * 0.030, 5.0)
-                _base_gap = max(_yr * 0.010, 2.5)
-                for _j, _rx in enumerate(rates):
-                    _ys = [(float(_sens_plot[_i, _j]), _i) for _i in range(len(e))
-                           if np.isfinite(_sens_plot[_i, _j])]
-                    _ys.sort(key=lambda z: z[0])
-                    _placed = []
-                    for _yval, _i in _ys:
-                        _ly = _yval + _base_gap
-                        if _placed and _ly - _placed[-1][0] < _min_gap:
-                            _ly = _placed[-1][0] + _min_gap
-                        _placed.append((_ly, _i, _yval))
-                    for _ly, _i, _yval in _placed:
-                        _col = _line_palette[_i % len(_line_palette)]
-                        # 점과 숫자가 멀어진 경우에만 아주 얇은 연결선을 보여준다.
-                        if abs(_ly - _yval) > _base_gap * 1.7:
-                            ax2.plot([_rx, _rx], [_yval, _ly - _base_gap*0.25],
-                                     color=_col, lw=.45, alpha=.55, zorder=2)
-                        ax2.text(_rx, _ly, f"{_yval:,.0f}",
-                                 ha="center", va="bottom", fontsize=7.2,
-                                 color=_col, fontweight="bold",
-                                 bbox=dict(facecolor="white", edgecolor="none",
-                                           alpha=.78, pad=.35), zorder=5)
-                ax2.margins(y=.16)
-                ax2.axhline(0, color="#000000", lw=.8, linestyle="--")
-                ax2.set_xlabel("단가 변동(%)")
-                ax2.set_ylabel("소득(만원/10a)")
-                deco(ax2, "가격 민감도")
-                ax2.set_xticks(rates)
-                ax2.spines["top"].set_visible(False)
-                ax2.spines["right"].set_visible(False)
-                ax2.spines["left"].set_color("#B9C7D3")
-                ax2.spines["bottom"].set_color("#B9C7D3")
-                ax2.legend(fontsize=7.5, ncol=min(4, max(1, len(e))),
-                           loc="lower center", bbox_to_anchor=(0.5, 1.19),
-                           frameon=False, borderaxespad=0, columnspacing=.9)
-                fig_sens.subplots_adjust(top=.74, bottom=.16, left=.15, right=.98)
-                png_sens = fig_to_png(fig_sens)
-
-            _gd1, _gd2, _gd3 = st.columns(3)
-            _gd1.download_button("🖼️ 소득·순수익 그래프", png_income, "econ_income.png", "image/png",
-                                 key="dl_econ_income", width="stretch")
-            _gd2.download_button("🖼️ 경영비 구성 그래프", png_cost, "econ_cost.png", "image/png",
-                                 key="dl_econ_cost", width="stretch")
-            _gd3.download_button("🖼️ 가격 민감도 그래프", png_sens, "econ_sensitivity.png", "image/png",
-                                 key="dl_econ_sens", width="stretch")
-
-            # ---------- 7) 수량·단가 동시 변동 ----------
-            st.markdown("#### 7) 수량과 단가가 함께 변하면 소득은?")
-            st.caption("풍흉으로 **수량**이 ±20% 변하고 시세로 **단가**가 ±20% 변하는 경우를 "
-                       "조합해 소득을 계산한 표입니다. 두 가지 위험을 동시에 보기 때문에 "
-                       "'최악의 경우에도 적자가 아닌지'를 확인할 수 있습니다. "
-                       "초록색이면 흑자, 빨간색이면 적자입니다.")
-            st.caption("수량과 단가가 **동시에** 변할 때 소득이 어떻게 달라지는지 봅니다. "
-                       "앞에서 지정한 수확·선별·포장·운송 등 **수량비례비용은 수량 변동률에 맞춰 함께 변동**시키고, "
-                       "나머지 경영비는 고정한 상태로 계산합니다. 붉을수록 위험, 푸를수록 안전입니다.")
-            tw1, tw2 = st.columns(2)
-            _tsel = tw1.selectbox("기준 처리구", e[trt].astype(str).tolist(), key="tw_trt")
-            _tstep = tw2.selectbox("변동 간격", [5, 10], index=1, key="tw_step")
-            _row = e[e[trt].astype(str) == _tsel].iloc[0]
-            _row_yvc = (float(_row[_yield_var_cost_cols].sum())
-                        if _yield_var_cost_cols else 0.0)
-            hm = two_way_sensitivity(float(_row[yq]), float(_row[pr]),
-                                     float(_row["경영비"]),
-                                     float(_row["부산물가액"]) if "부산물가액" in e.columns else 0,
-                                     yield_variable_cost=_row_yvc, step=int(_tstep))
-            fig_h = plot_sensitivity_heatmap(hm, f"'{_tsel}' — 수량·단가 변동에 따른 소득")
-            png_h = fig_to_png(fig_h)
-            _neg = int((hm < 0).sum().sum()); _tot = hm.size
-            _base = hm.loc["+0%", "+0%"]
-            if _neg:
-                st.warning(f"⚠️ 총 {_tot}개 경우 중 **{_neg}개에서 소득이 적자**가 됩니다. "
-                           "가격·수량 하락 위험에 대비가 필요합니다.")
-            else:
-                st.success("✅ 수량·단가가 ±20% 범위에서 변해도 소득이 (+)로 유지됩니다. "
-                           "가격 변동 위험에 비교적 안정적입니다.")
-            _tw_txt = ("○ 수량·단가 동시 변동에 따른 소득 변화 분석\n"
-                       f"  - 기준({_tsel}) 소득은 {_base:,.0f}원/10a이었다.\n"
-                       "  - 수량과 단가가 각각 20% 하락할 경우 소득은 "
-                       f"{hm.loc['-20%', '-20%']:,.0f}원/10a으로 감소하였다.\n"
-                       f"  - 분석한 {_tot}개 시나리오 중 적자가 발생하는 경우는 {_neg}개였다.")
-            st.markdown("###### 📋 보고서용 문장")
-            st.code(_tw_txt, language=None)
-            st.download_button("🖼️ 히트맵 다운로드", png_h, "sensitivity_heatmap.png",
-                               "image/png", key="dl_hm")
-            _hm_out = hm.round(0).astype(int).reset_index().rename(columns={"index": "수량변동"})
-            _hm_show = _hm_out.copy()
-            for _c in _hm_show.columns:
-                if pd.api.types.is_numeric_dtype(_hm_show[_c]):
-                    _hm_show[_c] = _hm_show[_c].map(lambda v: f"{v:,.0f}")
-            log_action("소득분석(소득조사 방식) 실행")
-            _econ_blocks = [
-                {"text": txt},
-                {"caption": "처리구별 소득·순수익",
-                 "table": money_table(e[m1]), "image": png_income},
-                {"caption": "처리구별 생산비 구성",
-                 "table": money_table(e[m2])},
-                {"caption": "경영비 구성 금액(만원/10a)",
-                 "table": _comp_plot.round(2).reset_index(), "image": png_cost},
-                {"caption": "경영비 구성 비율(%)",
-                 "table": _comp_share.round(1).reset_index()},
-                {"caption": "가격 민감도",
-                 "table": sens, "image": png_sens},
-                {"text": _tw_txt},
-                {"caption": f"{_tsel} 수량·단가 변동별 소득",
-                 "table": _hm_show, "image": png_h},
-            ]
-            report_capture("cap_econ", "경제성 분석", None, blocks=_econ_blocks)
-            _ctx_cols = list(dict.fromkeys(
-                m1 + m3 + [yq, pr, "주산물가액", "부산물가액", "소득증가액",
-                           "순수익증가액", "총수입증가액", "경영비증가액"]))
-            _ctx_cols = [c for c in _ctx_cols if c in e.columns]
-            _used_price_db = st.session_state.get("price_db")
-            _econ_ctx = build_econ_context(
-                base_area="10a", control=(None if ctrl == "(없음)" else ctrl),
-                treatments=e[_ctx_cols],
-                prices={"농촌임료금(원/시간)": wage, "자본이자율(%)": rate,
-                        "고정자산 부분현재가(원/10a)": fixed_asset,
-                        "고정자산 작목부담률(%)": fixed_asset_use_rate,
-                        "토지이용형태": land_type,
-                        "자가토지 용역비(원/10a)": land_opp,
-                        "토지 임차료 별도입력(원/10a)": land_cash,
-                        "재배기간(개월)": months,
-                        "사용 기준단가 DB": _used_price_db},
-                cost_cols=list(cost_cols), excluded_cols=list(_blocked),
-                sensitivity={"가격민감도": sens, "수량×단가민감도": hm,
-                             "기준처리": _tsel},
-                yield_test=yield_test,
-                income_test=st.session_state.get("_econ_test_소득"),
-                profit_test=st.session_state.get("_econ_test_순수익"),
-                cautions=([sig_warn] if sig_warn else [])
-                         + ([] if qty_effect_ok else
-                            ["처리별 가격·부산물이 달라 수량효과 기준 순증가수익은 계산하지 않음"]))
-            ai_interpret_advanced("econ", "경제성(소득) 분석", e[m1],
-                                  "소득증가액이 경제성 판단의 기본 지표입니다.",
-                                  context=_econ_ctx, capture_slot="cap_econ")
-
-            # 경제성분석의 한글/Excel은 중간중간 흩어 놓지 않고 분석의 맨 아래에서
-            # 현재 화면의 모든 표·그래프를 한 번에 내려받게 한다.
-            st.markdown("---")
-            st.markdown("### 📥 경제성 분석 전체 결과 다운로드")
-            st.caption("처리구별 소득·순수익, 생산비 구성, 경영비 금액·비율, "
-                       "가격 민감도, 수량×단가 민감도까지 한 파일에 모두 담습니다.")
-            _ed1, _ed2 = st.columns(2)
-            try:
-                _econ_hwp = build_report_hwpx(
-                    [{"heading": "경제성 분석", "blocks": _econ_blocks}],
-                    doc_title="경제성 분석 결과")
-                _ed1.download_button(
-                    "📘 한글 전체 보고서(hwpx)", _econ_hwp,
-                    "경제성분석_전체결과.hwpx",
-                    key="dl_econ_all_hwp", width="stretch")
-            except Exception as _ex:
-                _ed1.caption(f"한글 파일 생성 실패 ({type(_ex).__name__})")
-            try:
-                _econ_xls = make_xlsx_multi(_econ_blocks, doc_title="경제성 분석 결과")
-                _ed2.download_button(
-                    "📈 Excel 전체 결과(xlsx)", _econ_xls,
-                    "경제성분석_전체결과.xlsx",
-                    key="dl_econ_all_xlsx", width="stretch",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except Exception as _ex:
-                _ed2.caption(f"Excel 파일 생성 실패 ({type(_ex).__name__})")
-
-        report_button("cap_econ")
-
-    # ---------------- 부분예산 · MRR ----------------
-    elif emode.startswith("📘"):
-        with st.expander("ℹ️ 부분예산분석이란? (CIMMYT 방식)"):
-            st.markdown("""
-새 기술(신품종·신자재 등)을 **농가에 권장할 만한가**를 판단하는 국제 표준 방법입니다.
-1. **조정수량** — 시험포장 수량은 농가 조건보다 높게 나오므로 보통 **10% 낮춰** 보정합니다.
-2. **순편익** = 조정 조수입 − 가변비용(처리마다 달라지는 비용만)
-3. **지배분석** — 비용이 더 드는데 순편익이 낮은 처리는 탈락(D 표시)
-4. **한계수익률(MRR)** = 순편익 증가분 ÷ 비용 증가분 × 100
-5. **판정** — MRR을 사용자가 정한 최소수용기준과 비교합니다. 100%는 보수적으로 쓸 수 있는 기본값일 뿐 절대 기준은 아닙니다.
-""")
-        allc = df.columns.tolist()
-        c1, c2, c3 = st.columns(3)
-        trt = c1.selectbox("처리구 열", allc, index=guess_idx(allc, ["처리", "품종", "시험구"]), key="pb_t")
-        yq = c2.selectbox("수량 열", num_cols, index=guess_idx(num_cols, ["수량", "생산량"]), key="pb_y")
-        pr = c3.selectbox("단가 열", num_cols, index=guess_idx(num_cols, ["단가", "가격"], 1), key="pb_p")
-        _pb_candidates = [c for c in num_cols if c not in (yq, pr) and not is_excluded_cost(c)]
-        var_cols = st.multiselect("가변비용 항목 (처리마다 달라지는 비용만)",
-                                  _pb_candidates, key="pb_v")
-        _pb_by_opts = ["(없음)"] + [c for c in num_cols if c not in (yq, pr) + tuple(var_cols)]
-        pb_by = st.selectbox("부산물 편익 열 (선택)", _pb_by_opts, key="pb_by")
-        _pb_levels = df[trt].dropna().astype(str).unique().tolist()
-        pb_control = st.selectbox("기준 처리(관행·대조구)", _pb_levels, key="pb_control")
-        pb_area = st.number_input("부분예산 자료 기준 면적(a)", 0.1, 10000.0, 10.0, 0.1, key="pb_area")
-        c4, c5 = st.columns(2)
-        adj = c4.slider("수량 조정률(%)", 0, 30, 10, 5, key="pb_adj",
-                       help="시험포장→농가 조건 보정. 보통 10%")
-        minmrr = c5.number_input("최소수용 MRR 기준(%)", 0, 500, 100, 10, key="pb_minmrr",
-                                 help="기본값 100%는 보수적인 출발점입니다. 기술의 위험도·추가자본·농가 여건에 따라 조정하세요.")
-        _pb_unit_confirm = st.checkbox(
-            "수량=kg/입력 기준면적, 단가=원/kg, 가변비용·부산물=원/입력 기준면적임을 확인했습니다.",
-            key="pb_unit_confirm")
-        _pb_errors = []
-        if trt in (yq, pr):
-            _pb_errors.append("처리구 열을 수량 또는 단가 열로 사용할 수 없습니다.")
-        if yq == pr:
-            _pb_errors.append("수량 열과 단가 열은 서로 달라야 합니다.")
-        if not var_cols:
-            _pb_errors.append("가변비용 항목을 하나 이상 선택해 주세요.")
-        if any(is_excluded_cost(c) for c in var_cols):
-            _pb_errors.append("합계·소득·생산비 등 계산 결과 열은 가변비용으로 사용할 수 없습니다.")
-        if not _pb_unit_confirm:
-            _pb_errors.append("입력 열의 단위를 확인해야 계산할 수 있습니다.")
-        for _msg in _pb_errors:
-            st.error("❌ " + _msg)
-
-        if keep_running("partbudget", "부분예산 분석 실행", disabled=bool(_pb_errors)):
-            st.session_state.pop("cap_pb", None)
-            # ⑤ 행(반복)별 계산 → 처리 평균. 순수 함수로 분리해 자동 검산과 UI가 같은 로직을 사용한다.
-            try:
-                _row, b, _pb_excluded = calculate_partial_budget(
-                    df, trt, yq, pr, var_cols,
-                    byproduct_col=(None if pb_by == "(없음)" else pb_by),
-                    source_area_a=pb_area, adjustment_percent=adj)
-            except ValueError as _ex:
-                st.error(f"부분예산 계산을 중단했습니다: {_ex}")
-                st.stop()
-            _pb_validation = validate_partial_budget_results(_row)
-            if _pb_validation:
-                for _err in _pb_validation:
-                    st.error("❌ " + _err)
-                st.error("부분예산 역산 검증에 실패하여 결과를 표시하지 않습니다.")
-                st.stop()
-            st.success("✅ 부분예산의 조정수량·총편익·순편익 역산 검증을 통과했습니다.")
-            _nrep = _row.groupby(trt).size()
-            if (_nrep > 1).any():
-                st.info(f"🔁 반복 자료가 확인되어(최대 {int(_nrep.max())}반복) "
-                        "**각 반복별 편익·비용을 계산한 뒤 처리 평균**으로 집계했습니다.")
-
-            # 반올림 전에 지배분석과 MRR을 계산해야 작은 차이가 사라지지 않는다.
-            b_raw = perform_dominance_analysis(
-                b, trt, cost_col="가변비용", benefit_col="순편익", control=pb_control)
-            und_raw = calculate_mrr_table(
-                b_raw, trt, cost_col="가변비용", benefit_col="순편익",
-                minimum_mrr=minmrr, control=pb_control)
-            mrr_num = [None if pd.isna(v) else float(v) for v in und_raw["MRR(%)"]]
-
-            b = b_raw.copy()
-            und = und_raw.copy()
-            for _c in ["조정 전 수량", "조정수량"]:
-                if _c in b.columns:
-                    b[_c] = b[_c].round(1)
-            for _c in ["주산물 편익", "부산물 편익", "총편익", "가변비용", "순편익"]:
-                if _c in b.columns:
-                    b[_c] = b[_c].map(lambda v: round_half_up(v) if pd.notna(v) else np.nan)
-            for _c in ["가변비용", "순편익", "비용 증가액", "순편익 증가액"]:
-                if _c in und.columns:
-                    und[_c] = und[_c].map(lambda v: round_half_up(v) if pd.notna(v) else np.nan)
-            if "MRR(%)" in und.columns:
-                und["MRR(%)"] = pd.to_numeric(und["MRR(%)"], errors="coerce").round(1)
-
-            st.markdown("#### 1) 부분예산표 (지배분석 포함)")
-            smart_table(money_table(b[[trt, "기준 처리", "조정 전 수량", "조정수량",
-                                       "주산물 편익", "부산물 편익", "총편익",
-                                       "가변비용", "순편익", "지배"]],
-                                     dec_overrides={"조정 전 수량": 1, "조정수량": 1}),
-                        width="stretch", hide_index=True)
-            st.caption("'D'는 비용이 더 들면서 순편익은 낮아 탈락한 처리입니다.")
-
-            st.markdown("#### 2) 한계수익률(MRR) 분석")
-            _mcols = [trt, "가변비용", "순편익", "비용 증가액", "순편익 증가액",
-                      "MRR(%)", "권장 여부 및 근거"]
-            _mcols = [c for c in _mcols if c in und.columns]
-            smart_table(money_table(und[_mcols]), width="stretch", hide_index=True)
-            st.caption("**MRR(%) = 순편익 증가액 ÷ 비용 증가액 × 100** — "
-                       "비용을 1원 더 썼을 때 순편익이 몇 % 늘어나는지를 뜻합니다.\n\n"
-                       f"현재 사용자가 설정한 최소수용 기준: **{minmrr}%**. 이 값은 절대 기준이 아니며, 기준을 넘더라도 "
-                       "① 반복수·자료 신뢰도 ② 가격·수량 변동 시에도 유지되는지 "
-                       f"③ 조정수량 가정({adj}% 감액)의 타당성을 함께 확인하세요.")
-
-            ok_idx = [i for i in range(1, len(und_raw))
-                      if mrr_num[i] is not None and mrr_num[i] >= minmrr
-                      and float(und_raw.loc[i, "순편익 증가액"]) > 0
-                      and float(und_raw.loc[i, "순편익"]) > 0]
-            _ctrl_rows = b_raw[b_raw[trt].astype(str) == str(pb_control)]
-            _ctrl_dom = (str(_ctrl_rows.iloc[0]["지배"]) if len(_ctrl_rows) else "기준 처리 없음")
-            if _ctrl_dom:
-                _start = und.iloc[0][trt] if len(und) else "없음"
-                txt = (f"선택한 기준 처리 '{pb_control}'은 지배분석에서 {_ctrl_dom}로 분류되었습니다. "
-                       f"따라서 관행 유지를 자동 권장하지 않으며, 효율경계 시작 처리 '{_start}'부터 "
-                       "비용·순편익과 현장 적용성을 다시 검토해야 합니다.")
-            elif ok_idx:
-                last = ok_idx[-1]
-                pick = und_raw.loc[last, trt]
-                txt = (f"지배분석 후 남은 처리 중 MRR이 기준({minmrr}%)을 넘는 최상위 처리는 '{pick}'입니다. "
-                       f"추가 투입 1원당 약 {mrr_num[last]/100:.1f}원의 순편익 증가가 기대됩니다. "
-                       "다만 반복수와 가격·수량 민감도도 함께 확인해야 합니다.")
-            else:
-                txt = (f"MRR이 기준({minmrr}%)을 넘는 추가 처리 단계가 없습니다. "
-                       f"선택한 기준 처리 '{pb_control}'이 비지배 처리이므로 현재 자료에서는 기준 처리 유지가 "
-                       "상대적으로 합리적이지만, 통계적 불확실성과 민감도 결과를 함께 확인해야 합니다.")
-            st.info("💡 " + txt)
-
-            fig, ax = plt.subplots(figsize=figsize())
-            ax.plot(b_raw["가변비용"], b_raw["순편익"], "o--", color="#9AAABB", label="전체", linewidth=1.4, markersize=5)
-            ax.plot(und_raw["가변비용"], und_raw["순편익"], "o-", color="#3D6F9F", lw=2.2, markersize=6, label="비지배(효율경계)")
-            for _, r in b_raw.iterrows():
-                ax.annotate(str(r[trt]), (r["가변비용"], r["순편익"]), fontsize=8,
-                            xytext=(3, 4), textcoords="offset points")
-            ax.set_xlabel("가변비용(원/10a)"); ax.set_ylabel("순편익(원/10a)")
-            ax.legend(fontsize=8); deco(ax, "부분예산 효율경계")
-            plt.tight_layout(); png = fig_to_png(fig)
-            st.download_button("🖼️ 그래프 다운로드", png, "mrr.png", "image/png")
-            out = und[[c for c in [trt, "가변비용", "순편익", "비용 증가액",
-                                   "순편익 증가액", "MRR(%)", "권장 여부 및 근거"]
-                       if c in und.columns]]
-            out_show = money_table(out)
-            dl_table(out_show, "부분예산 한계수익률 분석", "mrr16", "mrr")
-            log_action("부분예산·MRR 분석 실행")
-            ai_interpret_button("pb", "부분예산·한계수익률(MRR)", out, f"검증된 계산값입니다. 수치를 다시 계산하지 마세요. 사용자가 설정한 최소 MRR 기준은 {minmrr}%이고 기준 처리구는 {pb_control}입니다.", capture_slot="cap_pb")
-            report_capture("cap_pb", "신기술 경제성(부분예산·MRR)", txt, out_show, png)
-        report_button("cap_pb")
-
-    # ---------------- 시설·장기투자 ----------------
-    else:
-        st.markdown("### 📙 시설·장기투자 경제성")
-        st.caption("비가림시설·하우스·건조기·선별기·스마트팜 장비처럼 여러 해 사용하는 투자는 "
-                   "단년도 소득분석이 아니라 미래 편익과 비용을 현재가치로 환산해 판단합니다.")
-        with st.expander("ℹ️ 지표 읽는 법", expanded=True):
-            st.markdown("""
-- **NPV(순현재가치)** = 할인된 편익 − 할인된 비용. **0보다 크면** 입력한 할인율 기준 경제성이 있습니다.
-- **할인 B/C** = 편익 현재가 ÷ 비용 현재가. **1보다 크면** 할인된 편익이 할인된 비용보다 큽니다.
-- **IRR(내부수익률)** = NPV를 0으로 만드는 수익률. 기준 할인율보다 높을수록 유리합니다.
-- **회수기간** = 누적 순현금흐름으로 최초투자비를 회수하는 데 걸리는 기간입니다.
-
-※ 이 화면의 **할인 B/C**가 시설투자에서 사용하는 정식 B/C입니다. 📗 소득분석의 `단년도 총수입/생산비`와 구분합니다.
-""")
-        _iv1, _iv2, _iv3 = st.columns(3)
-        _initial = _iv1.number_input("최초 투자비 (원)", 0, 5000000000, 50000000, 1000000,
-                                    key="inv_initial")
-        _life = _iv2.number_input("내용연수 (년)", 1, 50, 10, 1, key="inv_life")
-        _disc = _iv3.number_input("할인율 (%)", 0.0, 30.0, 5.0, 0.1, key="inv_disc")
-        _iv4, _iv5, _iv6 = st.columns(3)
-        _annual_b = _iv4.number_input("연간 추가 편익/수입 (원/년)", 0, 5000000000, 10000000, 100000,
-                                     key="inv_benefit",
-                                     help="시설 도입으로 매년 추가되는 판매수입·비용절감 등 금전 편익")
-        _annual_c = _iv5.number_input("연간 추가 운영비 (원/년)", 0, 5000000000, 2000000, 100000,
-                                     key="inv_cost",
-                                     help="유지보수·전기·소모품·추가노동비 등 매년 추가로 발생하는 비용")
-        _salvage = _iv6.number_input("내용연수 말 잔존가치 (원)", 0, 5000000000, 0, 100000,
-                                    key="inv_salvage")
-        with st.expander("📈 연도별 증가율을 반영하려면"):
-            _ig1, _ig2 = st.columns(2)
-            _bg = _ig1.number_input("연간 편익 증가율 (%)", -50.0, 50.0, 0.0, 0.5, key="inv_bg")
-            _cg = _ig2.number_input("연간 운영비 증가율 (%)", -50.0, 50.0, 0.0, 0.5, key="inv_cg")
-            st.caption("가격상승·생산성 변화·운영비 상승을 가정할 때만 입력하세요. 모르면 0%로 두는 것이 안전합니다.")
-
-        if keep_running("investment", "장기투자 경제성 분석 실행"):
-            try:
-                _inv_table, _inv = calculate_investment_analysis(
-                    _initial, _life, _disc, _annual_b, _annual_c,
-                    salvage_value=_salvage,
-                    annual_benefit_growth_percent=_bg,
-                    annual_cost_growth_percent=_cg)
-            except ValueError as _ex:
-                st.error(f"장기투자 계산을 중단했습니다: {_ex}")
-                st.stop()
-
-            _npv = float(_inv["NPV"])
-            _bcr = _inv["할인 B/C"]
-            _irr = _inv["IRR(%)"]
-            _dpb = _inv["할인 회수기간(년)"]
-            _mc1, _mc2, _mc3, _mc4 = st.columns(4)
-            _mc1.metric("NPV", f"{_npv:,.0f}원")
-            _mc2.metric("할인 B/C", f"{_bcr:.2f}" if pd.notna(_bcr) else "계산 불가")
-            _mc3.metric("IRR", f"{_irr:.1f}%" if pd.notna(_irr) else "계산 불가")
-            _mc4.metric("할인 회수기간", f"{_dpb:.1f}년" if pd.notna(_dpb) else "내용연수 내 미회수")
-            if _npv > 0 and (pd.isna(_bcr) or _bcr > 1):
-                st.success(f"✅ 할인율 {_disc:g}% 기준 NPV가 양수여서 입력 조건에서는 경제성이 있습니다.")
-            elif _npv < 0:
-                st.warning(f"⚠️ 할인율 {_disc:g}% 기준 NPV가 음수여서 입력 조건에서는 경제성이 없습니다.")
-            else:
-                st.info("NPV가 0에 가까워 경제성 판단이 경계에 있습니다.")
-
-            _show_inv = _inv_table.copy()
-            for _c in ["편익", "비용", "순현금흐름", "편익현재가", "비용현재가", "순현재가"]:
-                _show_inv[_c] = _show_inv[_c].map(lambda v: round_half_up(v))
-            _show_inv["할인계수"] = _show_inv["할인계수"].round(4)
-            st.markdown("#### 연도별 할인 현금흐름")
-            smart_table(money_table(_show_inv), width="stretch", hide_index=True)
-
-            st.markdown("#### 민감도 — 편익·운영비가 달라지면 NPV는?")
-            _inv_sens = investment_sensitivity_table(
-                _initial, _life, _disc, _annual_b, _annual_c, _salvage,
-                change_rates=(-20, -10, 0, 10, 20))
-            _inv_sens_show = _inv_sens.copy()
-            for _c in _inv_sens_show.columns[1:]:
-                _inv_sens_show[_c] = _inv_sens_show[_c].map(lambda v: round_half_up(v))
-            smart_table(money_table(_inv_sens_show), width="stretch", hide_index=True)
-
-            _inv_txt = ("○ 시설·장기투자 경제성 분석 결과\n"
-                        f"  - 최초투자비 {_initial:,.0f}원, 내용연수 {_life}년, 할인율 {_disc:g}%를 적용하였다.\n"
-                        f"  - NPV는 {_npv:,.0f}원, 할인 B/C는 "
-                        f"{(_bcr if pd.notna(_bcr) else float('nan')):.2f}로 산출되었다.\n"
-                        + (f"  - IRR은 {_irr:.1f}%로 산출되었다.\n" if pd.notna(_irr)
-                           else "  - 현금흐름 구조상 IRR은 계산되지 않았다.\n")
-                        + (f"  - 할인 회수기간은 {_dpb:.1f}년이었다.\n" if pd.notna(_dpb)
-                           else "  - 내용연수 안에는 할인 기준 투자비를 회수하지 못하였다.\n")
-                        + ("  - 입력한 가정에서는 경제성이 있는 것으로 판단된다."
-                           if _npv > 0 else "  - 입력한 가정에서는 경제성이 없는 것으로 판단된다."))
-            st.markdown("###### 📋 보고서용 문장")
-            st.code(_inv_txt, language=None)
-            _inv_blocks = [
-                {"text": _inv_txt},
-                {"caption": "장기투자 연도별 할인 현금흐름", "table": _show_inv},
-                {"caption": "장기투자 NPV 민감도", "table": _inv_sens_show},
-            ]
-            report_capture("cap_inv", "시설·장기투자 경제성", None, blocks=_inv_blocks)
-            log_action("시설·장기투자 경제성 분석 실행")
-            st.markdown("### 📥 장기투자 결과 다운로드")
-            _id1, _id2 = st.columns(2)
-            try:
-                _h = build_report_hwpx([{"heading":"시설·장기투자 경제성", "blocks":_inv_blocks}],
-                                       doc_title="시설·장기투자 경제성 분석 결과")
-                _id1.download_button("📘 한글 보고서(hwpx)", _h, "장기투자_경제성분석.hwpx",
-                                     key="dl_inv_hwp", width="stretch")
-            except Exception as _ex:
-                _id1.caption(f"한글 파일 생성 실패 ({type(_ex).__name__})")
-            try:
-                _x = make_xlsx_multi(_inv_blocks, doc_title="시설·장기투자 경제성 분석 결과")
-                _id2.download_button("📈 Excel 결과(xlsx)", _x, "장기투자_경제성분석.xlsx",
-                                     key="dl_inv_xlsx", width="stretch",
-                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except Exception as _ex:
-                _id2.caption(f"Excel 파일 생성 실패 ({type(_ex).__name__})")
-        report_button("cap_inv")
 
 # ================================================================ 설문 분석
 elif menu == "📋 설문조사 분석":
@@ -10993,37 +9454,156 @@ elif menu == "👑 관리자":
 
 elif menu == "📖 사용설명서":
     st.title("📖 사용설명서")
-    _MANUAL = "# 스마트 통계 에이전트 — 사용설명서\n\n농업연구사·지도사를 위한 실험데이터 통계분석 자동화 도구\n\n---\n\n## 1. 웹에서 시작하기\n\n별도 설치 없이 **스마트 통계 에이전트 웹주소에 접속**해서 사용합니다.\n로그인 기능이 켜져 있으면 회원가입/로그인 후 아래 순서대로 진행하세요.\n\n```\n① 데이터 넣기  →  ② 분석하기  →  ③ 결과 내려받기·보고서 만들기\n```\n\n**① 데이터 올리기**\n- 왼쪽 사이드바 위쪽에서 엑셀(xlsx)·CSV를 올리거나, 이미지·카메라·음성 입력을 선택합니다.\n- 엑셀에 시트가 여러 개면 **시트별로 자동 분리**됩니다.\n- 파일이 없으면 **🧪 샘플 데이터** 버튼으로 먼저 체험해 보세요.\n\n**② 분석하기**\n- 왼쪽 메뉴에서 원하는 분석을 고릅니다.\n- 결과 아래 **➕ 이 결과를 보고서에 담기**를 누릅니다.\n\n**③ 결과 내려받기·보고서 만들기**\n- 각 분석 화면에서 한글(hwpx)·Excel(xlsx) 결과를 바로 내려받거나,\n- 📑 보고서 메뉴에 여러 분석 결과를 모아 한글(hwpx)·워드(docx) 보고서를 만듭니다.\n\n> 💡 **결과는 사라지지 않습니다.** 다른 메뉴에 갔다 와도 분석 결과가 그대로 남아 있습니다.\n\n---\n\n## 2. 메뉴 한눈에 보기\n\n| 메뉴 | 무엇을 하나요 |\n|---|---|\n| 📊 **통계분석** | 데이터 정리 · 분산분석 · 상관 · 회귀 등 |\n| 🧠 **AI 도우미** | 궁금한 걸 물어보고, 어떤 분석을 할지 추천받기 |\n| 💰 **경제성분석** | 소득·순수익 계산, 부분예산표, 증수 효과 |\n| 📋 **설문조사 분석** | 만족도·의견 조사 결과 정리 |\n| 📑 **보고서** | 담아둔 결과를 문서로 만들기 |\n\n---\n\n## 3. 통계분석 메뉴\n\n### 📋 데이터\n- 올린 데이터를 확인하고 **🩺 데이터 검진** 결과를 봅니다.\n- 숫자인데 문자로 읽힌 열(`1,200`, `120kg`)이 있으면 **원클릭 변환** 버튼이 나타납니다.\n- 실험설계(난괴법 등)를 자동으로 추정해 알려줍니다.\n\n### 🧹 전처리\n데이터를 정리합니다. **화면 위에 현재 데이터가 항상 보이므로** 작업 결과를 바로 확인할 수 있습니다.\n\n| 작업 | 언제 쓰나요 |\n|---|---|\n| 결측치 처리 | 조사 누락으로 빈칸이 있을 때 |\n| 이상값 처리 | 입력 실수(15.0 → 150)가 의심될 때 |\n| 중복 행 제거 | 같은 자료가 두 번 들어갔을 때 |\n| 자료형 변환 | 숫자가 문자로 읽혔을 때 |\n| 열 삭제/이름변경 | 필요 없는 열을 뺄 때 |\n| 표준화·정규화 | 단위가 다른 변수를 비교할 때 |\n\n> ↩️ **실행취소** 버튼으로 최대 10단계까지 되돌릴 수 있습니다.\n\n### 🧮 파생변수\n기존 열을 조합해 새 열을 만듭니다.\n- **두 열 사칙연산**: `수량 × 단가 = 조수입`\n- **조건 열**: `기온 ≥ 33` → 폭염일 표시\n- **그룹별 집계**: 연도별 합계·평균\n\n### 🔗 상관분석\n두 변수가 함께 변하는 정도를 봅니다.\n- **Pearson**(직선 관계) / **Spearman**(순위·비정규분포)\n- 논문용 **유의성 별표 표**(`0.826***`)가 자동 생성됩니다.\n\n### 📈 분산분석 — 가장 많이 쓰는 기능\n\n**분석 방식 6가지**\n\n| 방식 | 언제 |\n|---|---|\n| **일원배치** | 처리구 하나 비교 (가장 기본) |\n| **이원배치** | 두 요인 + 상호작용 (품종 × 시비량) |\n| **🌾 분할구법** | 관수·경운처럼 큰 구역 요인이 있을 때 |\n| **🔁 반복측정** | 같은 개체를 시기별로 반복 조사 |\n| **🎚️ ANCOVA** | 초기 생육 차이를 보정하고 싶을 때 |\n| **📊 여러 형질 요약표** | 여러 항목을 한 표로 (논문 표 형식) |\n\n**⚠️ 꼭 확인하세요 — 반복(블록) 열**\n포장시험에서 반복을 두었다면 **반복 열을 반드시 지정**하세요.\n지정하지 않으면 블록 간 토양·경사 차이가 오차에 섞여, 실제로는 있는 처리 효과를 놓칠 수 있습니다.\n\n**사후검정 4가지**\n\n| 방법 | 특징 |\n|---|---|\n| **Tukey HSD** | 국제 표준. 논문 투고에 안전 |\n| **던컨(DMRT)** | 농업 논문 관행. 차이를 잘 잡아냄 |\n| **Bonferroni** | 매우 엄격 |\n| **던넷(Dunnett)** | 대조구와만 비교 (신품종 vs 대비품종) |\n\n**결과 읽기**\n- **유의성 문자**: 같은 문자를 공유하면 차이 없음 (`a`, `ab`, `b`)\n- **CV(%)**: 시험 정밀도. 포장시험 10~20% 양호, 20% 초과 시 재검토\n- **LSD**: 두 평균의 차이가 이 값보다 크면 유의한 차이\n- **논문용 표 각주**가 자동 생성되니 복사해서 쓰세요.\n\n### 🧪 비모수검정\n정규성·등분산 가정이 깨졌을 때 사용합니다.\n(분산분석에서 가정이 위배되면 **자동으로 결과를 함께 보여줍니다.**)\n\n### 🧬 PCA (주성분분석)\n형질이 많을 때 2개 축으로 압축해 그림 하나로 봅니다.\n- 누적 설명분산 **70% 이상**이면 신뢰할 만합니다.\n\n### 📉 회귀분석\n- **단순/다중 회귀**: X로 Y를 설명 (VIF 다중공선성 진단 포함)\n- **로지스틱**: Y가 두 가지 값일 때 (발병/미발병)\n- **🧪 프로빗**: 농약 시험의 **LC50/LD50** 산출\n- **잔차 진단**으로 모형이 적절한지 확인할 수 있습니다.\n\n### 🤖 머신러닝\n수량 예측·등급 판정 등. **🔮 새 데이터 예측** 기능으로 값을 넣으면 바로 예측합니다.\n\n> ⚠️ 표본이 30개 미만이면 쓰지 마세요. 처리 효과 검정은 **분산분석**을 쓰세요.\n\n---\n\n## 4. 🧠 AI 도우미 (선택)\n\nAPI 키를 넣으면 쓸 수 있습니다. **키가 없어도 나머지 기능은 모두 정상 작동합니다.**\n\n**키 넣는 법**: 사이드바 → 🤖 AI 기능 켜기 → 제공사 선택(Claude·Gemini·ChatGPT) → 키 입력\n\n**할 수 있는 것**\n- 결과를 자연어로 질문하기\n- 데이터 자동 요약\n- 연구계획서를 올리면 어떤 분석을 할지 추천\n- 각 분석 결과 아래 **🤖 AI 해석**으로 보고서 문장(`○`·`-` 형식) 생성\n\n> ⚠️ AI가 만든 문장은 **반드시 연구자가 수치와 해석을 확인**한 뒤 사용하세요.\n\n---\n\n## 5. 💰 경제성분석\n\n### 🧭 경제성 분석 길잡이 v3.6 — 처음이면 여기부터\n경제성 분석을 배운 적이 없어도 **STEP 1~5를 한 단계씩** 답하면 적합한 분석방법을 규칙 기반으로 추천합니다. 처음 화면에서는 길잡이와 바로 분석하기 중 하나만 선택하므로 화면이 복잡하지 않습니다. API 키 없이 작동합니다.\n\n1. **STEP 1 연구목적** — 신기술 비교, 현재 수익성, 여러 대안 선택, 시설투자, 손익분기, 위험평가 등\n2. **STEP 2 변화요인** — 품종·방제·재배법, 투입수준, 시설·농기계, 가격·수량 등\n3. **STEP 3 비교구조** — 대조구 vs 신기술, 비용이 다른 여러 대안, 여러 처리의 한 해 성과, 비교대상 없음\n4. **STEP 4 분석기간** — 한 작기·1년, 2년 이상, 시설·기계 내용연수 전체\n5. **STEP 5 보유자료** — 처리구, 수량, 가격, 경영비, 변화비용, 반복, 투자비, 연도별 편익·비용, 할인율 등\n\n모르는 항목은 **잘 모르겠어요**를 골라도 나머지 답으로 판단하며, 답이 너무 불확실하면 임의로 분석을 연결하지 않고 **추천 보류 + 확인할 두 가지**를 안내합니다.\n- 현재 작목의 수익성 → **소득분석**\n- 대조구와 신품종·신기술 비교 → **부분예산법**\n- 비용이 다른 여러 기술 중 추천대안 선택 → **지배분석·MRR**\n- 시설·농기계 장기투자 → **NPV·할인 B/C·IRR**\n- 손익분기 가격·수량 / 가격·수량 변동 위험 → **소득분석 안의 손익분기점·민감도**\n- 정책사업의 사회적 효과(CBA)는 현재 직접 계산하지 않으며 별도 분석이 필요하다고 안내합니다.\n\n추천 결과에는 **추천 확신도, 추천 이유, 필요한 자료, 함께 볼 분석, 자료 준비도**가 표시됩니다. STEP 5 앞의 **📦 자료 준비 가이드**에서는 공통자료, 농촌진흥청 소득조사 체계에 맞춘 비용 항목, 분석별 추가자료와 빈 CSV 서식을 제공합니다. 올린 데이터가 있으면 처리구·수량·단가·비용·반복 열 후보를 자동으로 찾아 STEP 5와 데이터 점검에 활용합니다. **🚀 추천 분석 바로 시작하기**를 누르면 해당 분석 방식이 자동 선택됩니다.\n\n### 💾 기준단가 관리 (먼저 설정)\n노임·자재비·임차료를 한 번 넣어두면 분석에 자동 반영됩니다.\nCSV로 내려받아 보관하고, 다음 해에 갱신해 다시 올릴 수 있습니다.\n\n**기본으로 들어있는 공식 수치** (기준연도 확인 후 사용하세요)\n\n| 항목 | 단가 | 기준연도 | 출처 |\n|---|---|---|---|\n| 농업노임(남) | 153,520원/일 | 2025년 | 통계청 KOSIS 농가판매·구입가격조사 |\n| 농업노임(여) | 121,392원/일 | 2025년 | 통계청 KOSIS |\n| 농업노임(남·시간) | 19,190원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 농업노임(여·시간) | 15,174원/시간 | 2025년 | 일당 ÷ 8시간 |\n| 요소비료(20kg) | 17,900원 | 2026년 | 농협 (보조금 적용 시 16,250원) |\n| 토지용역비(밭) | 260원/㎡ | 2024년 | 농지임차료실태조사 |\n| 토지용역비(논) | 275원/㎡ | 2024년 | 농지임차료실태조사 |\n\n**자동으로 받아올 수 있는 자료**\n- **🌐 KAMIS** : 농산물 가격 (일별) — kamis.or.kr에서 인증키 발급(무료)\n- **📊 KOSIS** : 농촌 일용노임·농가구입가격지수 (분기) — kosis.kr/openapi에서 인증키 발급(무료)\n  - 가장 쉬운 방법: KOSIS 통계표 화면에서 [OpenAPI] 버튼 → 주소 복사 → 앱에 붙여넣기\n\n**직접 확인해 입력해야 하는 자료**\n- 자본용역비 이자율, 감가상각 내용연수 → 농촌진흥청 「농축산물 소득자료집」 부록\n  또는 농산업경영과(063-238-1197) 문의\n- 농협 자재 실판매가(연 1회), 위탁영농비, 지역별 노임\n\n### 📕 부분예산표 (손실적·이익적 요소) — 가장 많이 쓰는 기능\n신기술 도입 시 **바뀐 것만** 모아 늘어난 비용(A)과 늘어난 이익(B)을 비교하고 **추정수익액(B−A)** 을 구합니다. 관행·신기술이 똑같이 쓰는 비용은 넣지 않습니다.\n\n| 자료에서 바뀐 것 | 어디로 |\n|---|---|\n| 수량이 늘었다 (× 단가) | 이익적 요소(B) |\n| 수량이 줄었다 (× 단가) | 손실적 요소(A) |\n| 비용이 늘었다 | 손실적 요소(A) |\n| 비용이 줄었다 | **이익적 요소(B)** — 절감은 번 것입니다 |\n| 노동시간이 늘었다 (× 시간당 노임) | 손실적 요소(A) |\n\n> ⚠️ **자가노동시간처럼 값이 '시간'인 열**은 비용 열이 아니라 **노동시간 열**에 넣으세요. 비용 열에 넣으면 10시간이 10원으로 계산됩니다. 이름에 '시간'이 들어가면 자동으로 골라 줍니다.\n\n**두 가지 방법으로 만들 수 있습니다.**\n1. 화면에서 항목·산출근거·금액을 직접 입력\n2. **📊 올린 데이터에서 자동으로 채우기** — 처리구 열, 수량 열, 대조구, 신기술구, 단가, 비용 열을 고르면 대조구 대비 달라진 값만 뽑아 표를 채워 줍니다(10a 기준 자동 환산). 채운 뒤 손으로 고치거나 항목을 더할 수 있습니다.\n\n> 💡 화면의 **🧮 이 숫자가 어떻게 나온 건가요?** 에 예시 숫자로 따라가는 계산 과정과 자주 하는 실수가 정리되어 있습니다.\n\n### 📗 소득분석\n```\n총수입 = 주산물가액 + 부산물가액\n소득   = 총수입 − 경영비\n순수익 = 총수입 − 생산비\n소득률(%) = 소득 ÷ 총수입 × 100\n```\n**어떤 엑셀을 올리나요** — 화면의 `📋 어떤 엑셀을 올려야 하나요?` 에서 예시 서식을 CSV로 내려받아 숫자만 바꿔 올리면 됩니다.\n- **한 줄 = 한 조사구**(처리구 × 반복)로 적습니다.\n- 모든 값은 **10a(1,000㎡) 기준**으로 환산해 적습니다.\n- 합계·소득같은 **계산 결과 열은 넣지 마세요.** 이중으로 잡힙니다.\n- **작목 유형**(식량작물·노지채소·시설채소·과수 등)을 고르면 그에 맞는 항목을 안내합니다.\n- **과수·다년생**은 과수원 조성비를 내용연수로 나눠 매년 상각합니다.\n- **대조구를 지정하면** 증수율·증수액·순증가소득이 자동 계산됩니다.\n\n### 📘 신기술 경제성 (부분예산·MRR)\nCIMMYT의 부분예산 원칙을 참고해 지배분석과 한계수익률을 계산합니다.\n권장 여부는 사용자가 설정한 최소 MRR과 반복수·가격·수량 민감도를 함께 확인합니다.\n\n---\n\n## 6. 📋 설문조사 분석\n\n**🤖 자동 인식**을 쓰면 문항 유형을 스스로 판별해 한 번에 분석합니다.\n\n| 유형 | 결과 |\n|---|---|\n| 리커트 척도 | 평균·표준편차, 긍정률, **크론바흐 α**, 다이버징 차트 |\n| 객관식 | 빈도·비율 표 + 원형/도넛 그래프 (%·인원 표시) |\n| 다중응답 | 응답률 (합계가 100%를 넘는 것이 정상) |\n| 주관식 | 의견 목록 표, AI 요약 |\n| 교차분석 | 교차표 + 카이제곱 검정 |\n\n**크론바흐 α**: 0.7 이상이면 신뢰할 만합니다.\n\n**🤖 AI 해석**: 객관식·다중응답·리커트·교차분석·자동인식 결과 아래에서 보고서 문장을 만들 수 있습니다.\n설문은 실험과 달라서, 검정하지 않은 결과에 '유의하다'고 쓰지 않도록 AI에게 미리 일러 둡니다.\n\n---\n\n## 7. 📑 보고서\n\n**만드는 순서**\n1. 각 분석에서 **➕ 보고서에 담기**\n2. 📑 보고서 메뉴로 이동\n3. 필요하면 **표지·재료및방법**, **적요**, **표·그림 목차** 추가\n4. 한글(hwpx) 또는 워드(docx)로 내려받기\n\n**자동으로 만들어지는 것**\n- `□` 항목 제목, `◦` 불릿 (시험연구보고서 양식)\n- `<표 1>`, `<그림 1>` 캡션 (왼쪽 정렬)\n- **통계처리 문구** — 어떤 분석·사후검정을 썼는지 자동 서술\n- **적요 초안** — 담긴 결과를 요약\n\n**계획서 첨부**: 연구계획서 파일(hwpx·docx·pdf)을 올리면 내용을 보고서 앞에 넣을 수 있습니다.\n\n---\n\n## 8. 자주 겪는 문제\n\n| 증상 | 해결 |\n|---|---|\n| 한글 파일이 안 열림 | 구버전 한글은 hwpx 미지원 → **워드(docx)로 받으세요** |\n| 워드(docx) 버튼이 비활성화됨 | 현재 배포 서버에서 Word 생성 기능이 꺼진 상태입니다. 관리자에게 문의하세요. |\n| 그래프 글자가 □로 깨짐 | 유의성 문자는 서버 글꼴에 의존하지 않는 수식 위첨자로 표시됩니다. 일반 한글이 깨지면 배포 서버 글꼴을 확인하세요. |\n| 결과가 안 보임 | 분석 실행 버튼을 눌렀는지 확인 |\n| 숫자 열인데 분석이 안 됨 | 데이터 탭에서 **숫자로 변환** 실행 |\n| 반복 열을 안 넣었는데 결과가 이상함 | 분산분석에서 **반복(블록) 열**을 지정하세요 |\n| 빨간 오류 상자가 떴음 | 그 아래 **🆘 이 오류, 도움받기**에서 `🤖 앱 안에서 바로 물어보기` |\n\n---\n\n## 9. 꼭 기억할 것\n\n1. **반복(블록) 열을 지정하세요** — 포장시험 결과가 달라집니다.\n2. **CV(%)를 확인하세요** — 20% 넘으면 시험 정밀도를 점검하세요.\n3. **AI 문장은 반드시 검토하세요** — 그대로 제출하지 마세요.\n4. **분석 결과는 바로 보고서에 담으세요** — 나중에 한 번에 문서가 됩니다.\n5. **기준단가는 기관 공식 자료로 입력하세요** — 자동으로 받아오지 않습니다.\n\n---\n\n*스마트 통계 에이전트*\n"
-    def _manual_html(md_text):
-        """설명서를 어느 컴퓨터에서나 열리는 HTML로 변환"""
-        try:
-            import markdown as _md
-            body = _md.markdown(md_text, extensions=["tables", "fenced_code"])
-        except Exception:
-            body = "<pre>" + md_text.replace("<", "&lt;") + "</pre>"
-        return """<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
-<title>스마트 통계 에이전트 사용설명서</title><style>
-body{{font-family:'맑은 고딕','Malgun Gothic',sans-serif;max-width:900px;margin:40px auto;
-padding:0 20px;line-height:1.7;color:#222}}
-h1{{border-bottom:3px solid #6c8ebf;padding-bottom:8px}}
-h2{{margin-top:36px;border-left:5px solid #6c8ebf;padding-left:10px}}
-h3{{margin-top:24px;color:#365f91}}
-table{{border-collapse:collapse;width:100%;margin:14px 0}}
-th,td{{border:1px solid #ccc;padding:8px;text-align:left}}
-th{{background:#eef3fa}}
-code{{background:#f4f4f4;padding:2px 5px;border-radius:3px}}
-pre{{background:#f7f7f7;padding:12px;border-radius:5px;overflow-x:auto}}
-blockquote{{border-left:4px solid #d79b00;background:#fff8ec;margin:12px 0;padding:8px 14px}}
-@media print{{body{{margin:0}}}}
-</style></head><body>{body}</body></html>""".format(body=body)
-    d1, d2 = st.columns(2)
-    d1.download_button("🌐 설명서 내려받기 (HTML — 바로 열림)",
-                       _manual_html(_MANUAL).encode("utf-8"),
-                       "사용설명서.html", mime="text/html", width="stretch")
-    d2.download_button("📄 설명서 내려받기 (텍스트)", _MANUAL.encode("utf-8"),
-                       "사용설명서.txt", mime="text/plain", width="stretch")
-    st.caption("HTML 파일은 더블클릭하면 웹브라우저에서 바로 열립니다. 인쇄도 가능해요.")
+    _MANUAL = r"""# 스마트 통계 에이전트 V1 — 사용설명서
+
+V1은 통계를 처음 접하는 연구자도 **데이터 작성 → 분석 선택 → 결과 확인 → 보고서 저장** 순서로 사용할 수 있도록 구성한 간편형입니다.
+
+---
+
+## 1. 데이터는 이렇게 작성하세요
+
+1. 첫 번째 행에는 변수명만 적습니다.
+2. 한 열에는 한 가지 변수만 적습니다.
+3. 한 행에는 한 조사단위만 적습니다. 포장시험이면 보통 `처리구 × 반복` 한 칸이 한 행입니다.
+4. 숫자 셀에는 숫자만 적습니다. `120kg`, `약 15`, `30개`처럼 문자나 단위를 붙이지 않습니다.
+5. 단위는 열 이름에 적습니다. 예: `초장(cm)`, `수량(kg/10a)`.
+6. 병합셀, 중간 제목, 소계·합계행, 빈 구분행은 넣지 않습니다.
+
+### ❌ 잘못된 예: 처리구를 가로로 펼침
+
+| 반복 | 대조구 | 처리1 | 처리2 |
+|---|---:|---:|---:|
+| 1 | 100 | 120 | 130 |
+| 2 | 105 | 118 | 128 |
+
+### ✅ 권장 예: 처리구·반복·측정값을 각각 열로 입력
+
+| 처리구 | 반복 | 수량 |
+|---|---:|---:|
+| 대조구 | 1 | 100 |
+| 대조구 | 2 | 105 |
+| 처리1 | 1 | 120 |
+| 처리1 | 2 | 118 |
+| 처리2 | 1 | 130 |
+| 처리2 | 2 | 128 |
+
+### 자주 틀리는 형식
+- `120kg`, `35cm`, `결측` → 값에는 `120`, `35`, 빈칸만 입력합니다.
+- 품종명을 여러 행에 걸쳐 병합 → 병합을 풀고 각 행에 품종명을 반복 입력합니다.
+- `처리1 평균`, `합계`, `소계` 행 → 실제 관측값 행만 남깁니다.
+- `반복1 수량`, `반복2 수량`, `반복3 수량` → `반복` 열 하나와 `수량` 열 하나로 바꿉니다.
+
+왼쪽 **데이터 작성 가이드**에서 값이 비어 있는 엑셀 서식을 내려받을 수 있습니다.
+
+---
+
+## 2. 데이터 입력 방법
+
+왼쪽 `📂 데이터 불러오기`에서 세 가지 방법을 선택할 수 있습니다.
+
+- **Excel/CSV**: 일반적인 분석 파일 업로드
+- **이미지/사진**: 조사야장·표 사진이나 엑셀 화면 캡처를 AI가 표로 인식. 인식 후 반드시 미리보기에서 값을 확인한 뒤 적용합니다.
+- **음성**: `처리구 A, 반복 1, 초장 72.3, 수량 615.4`처럼 한 행씩 말해 표로 추가합니다.
+
+이미지·음성 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 연결해야 합니다.
+
+---
+
+## 3. 메뉴 한눈에 보기
+
+| 메뉴 | 이런 때 사용합니다 |
+|---|---|
+| ⚡ **원클릭 분석** | 처리구·반복이 정리된 실험자료를 자동 분석 |
+| 📊 **통계분석** | 처리 비교, 상관, 회귀, 예측을 직접 선택 |
+| 📋 **설문조사 분석** | 만족도·객관식·다중응답·교차분석 |
+| 📑 **보고서** | 담아둔 표·그래프를 문서로 생성 |
+| 🧠 **AI 도우미** | API 연결, 결과 설명, 통계 질문 |
+| 📖 **사용설명서** | 데이터 작성법과 사용법 확인 |
+
+---
+
+## 4. 통계분석은 질문으로 고르세요
+
+### 📋 내 데이터 확인
+업로드 직후 행·열, 결측치, 중복행, 숫자처럼 보이는 문자 열, 처리구·반복 후보와 잘못된 가로형 구조 가능성을 점검합니다.
+
+### 🌱 처리·품종 간 차이
+`처리구나 품종의 평균이 서로 다른가?`를 확인합니다. 기본은 일원배치·이원배치·여러 형질 요약이며, 필요할 때 `고급 시험설계 보기`에서 분할구법과 반복측정을 선택합니다.
+
+포장시험에서 반복을 두었다면 **반복(블록) 열을 반드시 지정**하세요.
+
+- `p < 0.05`: 처리 간 차이가 우연으로 보기 어려움
+- 같은 유의성 문자를 공유하면 통계적으로 뚜렷한 차이가 없음 (`a`, `ab`, `b`)
+- 정규성·등분산 가정이 맞지 않으면 가능한 경우 비모수 대안을 함께 확인합니다.
+
+### 🔗 변수 간 관계
+`초장이 큰 개체가 수량도 높은가?`처럼 숫자형 변수들이 함께 변하는 정도를 봅니다. Pearson 또는 Spearman을 사용합니다. 상관은 인과관계를 증명하지 않습니다.
+
+### 📈 결과에 영향을 주는 요인
+결과값(Y)을 어떤 변수들이 설명하는지 단순·다중 회귀 또는 로지스틱 회귀로 확인합니다. 계수, p-value, R²와 VIF를 함께 봅니다.
+
+### 🤖 값 예측
+기본 모형은 **랜덤포레스트**입니다. 다른 알고리즘은 고급 옵션에서만 선택합니다. 표본이 매우 적은 포장시험의 처리효과 검정은 머신러닝보다 분산분석이 우선입니다.
+
+---
+
+## 5. Excel 다운로드는 그래프 수정용입니다
+
+분석 결과의 `Excel(xlsx)` 파일에는 **실제 Excel 차트**가 들어갑니다. 그림을 붙여 넣은 파일이 아닙니다.
+
+Excel에서 차트를 클릭해 다음을 직접 바꿀 수 있습니다.
+- 막대 색상
+- 글꼴과 글자 크기
+- 축 범위와 눈금
+- 차트 종류
+- 제목·범례·레이블 위치
+
+표는 기존 스마트 블루 디자인을 유지하고, 화면 그래프의 평균값·오차막대·유의성 표기도 기존 검증 버전을 유지합니다.
+
+---
+
+## 6. 오른쪽 아래 AI 질문
+
+어느 화면에서든 오른쪽 아래 **💬 AI에게 물어보기**를 사용할 수 있습니다. API 설정은 사이드바가 아니라 `🧠 AI 도우미` 안에서 합니다. 연결된 설정은 오른쪽 아래 질문창과 각 분석의 AI 해석 버튼이 함께 사용합니다.
+
+---
+
+## 7. 보고서
+
+각 분석에서 `➕ 이 결과를 보고서에 담기`를 누른 뒤 `📑 보고서`에서 한글(hwpx)·워드(docx) 문서를 만듭니다. 각 분석의 Excel(xlsx)은 그래프를 직접 수정할 때 사용합니다. 통계처리 문구는 화면에서 가로로 잘리지 않도록 일반 문장으로 표시됩니다.
+
+---
+
+## 8. 로그인
+
+Firebase 설정을 넣고 `AUTH_REQUIRED=true`로 설정하면 기관 이메일로 회원가입·로그인할 수 있습니다. 가입하면 인증 메일이 발송되며, 메일의 링크를 눌러야 로그인됩니다. 비밀번호를 잊으면 `🔑 비밀번호 찾기`에서 재설정 메일을 받아 새 비밀번호를 정합니다. 인증·재설정 메일이 보이지 않으면 스팸함을 확인하세요. 로그인 기능을 끄면 기존처럼 바로 앱에 들어갑니다.
+
+---
+
+## 9. V1과 Version 2
+
+V1은 자주 쓰는 분석과 쉬운 선택에 집중합니다. **경제성 분석·PCA·전처리 전용 화면·파생변수·ANCOVA·프로빗 등 고급 기능은 Version 2 전문형**에서 사용합니다.
+
+---
+
+## 10. 꼭 기억할 것
+
+1. 분석 전에 원자료 구조를 먼저 확인하세요.
+2. 포장시험의 반복을 두었다면 반복 열을 지정하세요.
+3. p-value만 보지 말고 평균·오차·사후검정을 함께 보세요.
+4. 이미지 인식 결과는 분석 전 사람이 확인하세요.
+5. AI 해석은 연구자가 숫자와 결론을 다시 확인하세요.
+"""
+    st.download_button("📄 설명서 내려받기 (텍스트)", _MANUAL.encode("utf-8"),
+                       "사용설명서.txt", mime="text/plain")
     st.markdown(_MANUAL)
+    st.divider()
+    st.markdown("### Version 2 전문형")
+    st.caption("경제성 분석·PCA 등 고급 기능이 필요하면 V2 전문형을 이용하세요.")
+    if V2_APP_URL:
+        st.link_button("↗ Version 2 전문형 열기", V2_APP_URL, width="stretch")
+    else:
+        st.info("V2 배포 주소가 정해지면 `V2_APP_URL` 설정값만 입력하면 버튼이 연결됩니다.")
 
 # ================================================================ 보고서
 else:
@@ -11082,7 +9662,7 @@ else:
         stat_text = build_stat_method_text(
             logs, {"design": None if m_design.startswith("(") else m_design,
                    "cv": auto_cv.strip() or None})
-        st.code(stat_text, language=None)
+        st.markdown(str(stat_text).replace(". ", ".  \n"))
         st.caption("분석 이력을 바탕으로 자동 작성되었습니다. 필요하면 복사해 수정하세요.")
 
         if st.button("➕ 표지·재료및방법을 보고서 맨 앞에 넣기", width="stretch"):
