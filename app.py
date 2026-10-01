@@ -6606,34 +6606,64 @@ def _voice_process(binary, mime_type):
     return row, tr, list(warn or [])
 
 
-_VOICE_LIVE_LOADER = """from streamlit.components.v1 import declare_component
+_VOICE_COMP_LOADER = """from streamlit.components.v1 import declare_component
 
 
 def make(path):
-    return declare_component("ssa_voice_live", path=path)
+    return declare_component("{name}", path=path)
+"""
+
+# 휴대폰 '뒤로' 버튼 감지용 보이지 않는 부품. 음성 화면에서 뒤로를 누르면 주소만 원래대로 바뀌고
+# 화면은 그대로 남아(사이드바도 숨긴 채) 갇히므로, 주소가 바뀌면 파이썬에 알려 전체 화면으로 돌린다.
+_VOICE_NAV_HTML = r"""<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0"><script>
+function post(t, x) { var m = { isStreamlitMessage: true, type: t }; for (var k in (x || {})) m[k] = x[k]; window.parent.postMessage(m, "*"); }
+function onPop() {
+  try {
+    if (!/[?&]mode=voice(&|$)/.test(window.parent.location.search || ""))
+      post("streamlit:setComponentValue", { value: { back: Date.now() }, dataType: "json" });
+  } catch (e) {}
+}
+try {
+  window.parent.addEventListener("popstate", onPop);
+  window.addEventListener("pagehide", function () { try { window.parent.removeEventListener("popstate", onPop); } catch (e) {} });
+} catch (e) {}
+post("streamlit:componentReady", { apiVersion: 1 });
+post("streamlit:setFrameHeight", { height: 0 });
+</script></body></html>
 """
 
 
-def _voice_live_declare(html):
+def _voice_component(name, html):
     """부품 HTML을 임시 폴더에 써서 Streamlit 부품으로 등록한다(저장소에 폴더를 따로 올릴 필요 없음).
 
-    declare_component는 호출한 모듈 이름으로 부품을 구분하므로, 작은 로더 모듈을 만들어 그 안에서 호출한다.
+    declare_component는 호출한 모듈 이름으로 부품을 구분하므로, 부품마다 작은 로더 모듈을 만들어
+    그 안에서 호출한다.
     """
     import hashlib, importlib.util, os, sys, tempfile
-    d = os.path.join(tempfile.gettempdir(), "ssa_voice_live_" + hashlib.sha1(html.encode("utf-8")).hexdigest()[:10])
-    page, loader = os.path.join(d, "index.html"), os.path.join(d, "ssa_voice_live_loader.py")
+    d = os.path.join(tempfile.gettempdir(), f"{name}_" + hashlib.sha1(html.encode("utf-8")).hexdigest()[:10])
+    mod_name = f"{name}_loader"
+    page, loader = os.path.join(d, "index.html"), os.path.join(d, mod_name + ".py")
     if not os.path.exists(page) or not os.path.exists(loader):
         os.makedirs(d, exist_ok=True)
-        for fp, text in ((page, html), (loader, _VOICE_LIVE_LOADER)):
+        for fp, text in ((page, html), (loader, _VOICE_COMP_LOADER.replace("{name}", name))):
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(text)
-    mod = sys.modules.get("ssa_voice_live_loader")
+    mod = sys.modules.get(mod_name)
     if mod is None or os.path.dirname(getattr(mod, "__file__", "")) != d:
-        spec = importlib.util.spec_from_file_location("ssa_voice_live_loader", loader)
+        spec = importlib.util.spec_from_file_location(mod_name, loader)
         mod = importlib.util.module_from_spec(spec)
-        sys.modules["ssa_voice_live_loader"] = mod
+        sys.modules[mod_name] = mod
         spec.loader.exec_module(mod)
     return mod.make(d)
+
+
+def _voice_nav_widget():
+    v = _voice_component("ssa_voice_nav", _VOICE_NAV_HTML)(key="voice_nav_comp", default=None, height=0)
+    back = v.get("back") if isinstance(v, dict) else None
+    if back and back != st.session_state.get("_voice_nav_done"):
+        st.session_state["_voice_nav_done"] = back
+        st.query_params.clear()
+        st.rerun()
 
 
 def _voice_records(df):
@@ -6701,7 +6731,7 @@ def _voice_live_widget():
             "rows": _voice_jsonable(rows[-3:]),
             "total": len(rows),
             "seen": dict(st.session_state.get("_voice_live_seen") or {})}
-    val = _voice_live_declare(_VOICE_LIVE_HTML)(key=key, default=None, height=330, **args)
+    val = _voice_component("ssa_voice_live", _VOICE_LIVE_HTML)(key=key, default=None, height=330, **args)
     if _voice_live_absorb(val):
         st.rerun()                                       # 부품 아래 표에 새 행이 바로 보이도록
 
@@ -6825,6 +6855,8 @@ def _voice_use_as_data():
 def render_voice_mode():
     st.markdown(_VOICE_PAGE_CSS, unsafe_allow_html=True)
     st.markdown("### 🎤 음성 데이터 입력")
+    st.button("← 전체 기능 화면으로", key="voice_m_full_top", on_click=_voice_close,
+              help="입력한 표는 그대로 남아 있어요. 휴대폰의 '뒤로' 버튼을 눌러도 돌아갑니다.")
 
     # 첫 접속: PC/다른 기기에서 입력하던 행과 열 이름을 이어서 불러온다.
     if not st.session_state.get("_voice_draft_loaded"):
@@ -6929,6 +6961,7 @@ def render_voice_mode():
     st.divider()
     st.button("← 전체 기능 화면으로", width="stretch", key="voice_m_full", on_click=_voice_close,
               help="입력한 표는 그대로 남아 있어요. 왼쪽 📂 데이터 불러오기 → 🎤 음성에서 다시 볼 수 있어요.")
+    _voice_nav_widget()                     # 맨 끝에 둔다(위에 두면 받아쓰기 부품 위치가 바뀜)
 
 
 def _is_voice_mode():
