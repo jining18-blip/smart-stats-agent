@@ -4,7 +4,8 @@
 음성 입력 구간만 잘라 AppTest로 돌리고, AI 전사·Firestore는 가짜로 바꾼다.
 검증 범위: 열 이름 적용, 행 누적·계정별 저장·다른 기기에서 이어 불러오기,
 마지막 행 취소, Claude 선택 시 음성 가능한 제공사로 전환, 전체 화면 복귀,
-실시간 받아쓰기 부품이 보낸 행 반영(중복 없음·취소한 행이 되살아나지 않음).
+실시간 받아쓰기 부품이 보낸 행 반영(중복 없음·취소한 행이 되살아나지 않음),
+열 이름 고치기(표에도 반영·되돌리기), 이 표로 바로 분석.
 """
 from pathlib import Path
 import textwrap
@@ -100,14 +101,14 @@ def test_live_mode_is_default_and_needs_no_key():
     at = _app()
     assert not at.exception
     assert at.radio(key="voice_m_way").value.startswith("⚡")
-    assert [t.key for t in at.text_input] == ["voice_cols_text"]   # API 키 칸 없음
+    assert [t.key for t in at.text_input] == ["voice_cols_box"]   # API 키 칸 없음
     assert not at.expander                                        # 설정 펼침도 없음
 
 
 def test_record_mode_renders_with_settings_open_when_no_key():
     at = _app(way=RECORD)
     assert not at.exception
-    assert [t.key for t in at.text_input] == ["voice_cols_text", "api_key"]
+    assert [t.key for t in at.text_input] == ["voice_cols_box", "api_key"]
     assert at.expander[0].proto.expanded                         # 키가 없으면 설정이 펼쳐짐
 
 
@@ -124,7 +125,7 @@ def test_claude_is_switched_to_audio_capable_provider():
 
 def test_typed_columns_are_used_for_every_row():
     at = _app()
-    at.text_input(key="voice_cols_text").input("처리구, 반복, 수량").run()
+    at.text_input(key="voice_cols_box").input("처리구, 반복, 수량").run()
     at = _say(at, "처리구 A 반복 1 수량 615.4")
     assert _rows(at) == [{"처리구": "A", "반복": "1", "수량": "615.4"}]
     assert at.session_state["_calls"][-1] == ("row", "처리구 A 반복 1 수량 615.4", ["처리구", "반복", "수량"])
@@ -140,7 +141,7 @@ def test_without_columns_later_rows_follow_first_row():
 
 def test_rows_are_saved_and_resume_on_another_device():
     at = _app()
-    at.text_input(key="voice_cols_text").input("처리구, 수량").run()
+    at.text_input(key="voice_cols_box").input("처리구, 수량").run()
     at = _say(at, "처리구 A 수량 600")
     at = _say(at, "처리구 B 수량 700")
     doc = at.session_state["_store"]["voice_drafts/u1"]
@@ -148,7 +149,7 @@ def test_rows_are_saved_and_resume_on_another_device():
 
     other = _app(store=at.session_state["_store"])                 # 새 기기/새 세션
     assert len(_rows(other)) == 2
-    assert other.text_input(key="voice_cols_text").value == "처리구, 수량"
+    assert other.text_input(key="voice_cols_box").value == "처리구, 수량"
     assert any("2행" in m.value for m in other.markdown)
 
 
@@ -176,7 +177,7 @@ def _live(at, sid, rows):
 
 def test_live_rows_are_added_once_and_saved():
     at = _app()
-    at.text_input(key="voice_cols_text").input("처리구, 수량").run()
+    at.text_input(key="voice_cols_box").input("처리구, 수량").run()
     r1 = {"처리구": "A", "수량": 600}
     r2 = {"처리구": "B", "수량": 700, "덤": 1}               # 열 밖 값은 버림
     at = _live(at, "s1", [r1])
@@ -219,3 +220,61 @@ def test_live_ignores_bad_values():
         at = at.run()
         assert not at.exception
     assert not at.session_state["voice_rows"] if "voice_rows" in at.session_state else True
+
+
+# ---------------------------------------------------------------- 열 이름 고치기
+def _cols(at, text):
+    at.text_input(key="voice_cols_box").input(text)
+    return at.run()
+
+
+def test_columns_from_first_row_are_shown_and_editable():
+    at = _app()
+    at = _live(at, "s1", [{"처리구": "A", "초장": 70}])
+    assert at.text_input(key="voice_cols_box").value == "처리구, 초장"    # 말로 정해진 열도 칸에 보임
+    at = _cols(at, "처리구, 초장(cm)")
+    assert _rows(at) == [{"처리구": "A", "초장(cm)": 70}]
+
+
+def test_rename_insert_and_reorder_keep_values():
+    at = _app()
+    at = _cols(at, "처리구, 반복, 초장, 수량")
+    at = _live(at, "s1", [{"처리구": "A", "반복": 1, "초장": 70, "수량": 600}])
+    at = _cols(at, "처리구, 반복, 주수, 초장(cm), 수량")              # 가운데 열 추가 + 이름 바꾸기
+    assert _rows(at) == [{"처리구": "A", "반복": 1, "주수": None, "초장(cm)": 70, "수량": 600}]
+    assert at.session_state["_store"]["voice_drafts/u1"]["columns"] == "처리구, 반복, 주수, 초장(cm), 수량"
+    assert not at.warning                                               # 지워진 값 없음 → 되돌리기 안내 없음
+    # 새로 말하는 행도 바뀐 열로 정리된다
+    at = _live(at, "s1", [{"처리구": "A", "반복": 1, "초장": 70, "수량": 600},
+                          {"처리구": "B", "반복": 1, "주수": 3, "초장(cm)": 66, "수량": 610}])
+    assert _rows(at)[1] == {"처리구": "B", "반복": 1, "주수": 3, "초장(cm)": 66, "수량": 610}
+
+
+def test_removing_a_column_can_be_undone():
+    at = _app()
+    at = _cols(at, "처리구, 수량, 비고")
+    at = _live(at, "s1", [{"처리구": "A", "수량": 600, "비고": "좋음"}, {"처리구": "B", "수량": 610, "비고": None}])
+    at = _cols(at, "처리구, 수량")
+    assert _rows(at) == [{"처리구": "A", "수량": 600}, {"처리구": "B", "수량": 610}]
+    assert any("'비고' 1칸" in w.value for w in at.warning)
+    at = at.button(key="voice_m_cols_undo").click().run()
+    assert _rows(at)[0] == {"처리구": "A", "수량": 600, "비고": "좋음"}
+    assert at.text_input(key="voice_cols_box").value == "처리구, 수량, 비고"
+    assert not at.warning
+
+
+def test_clearing_columns_with_rows_is_refused():
+    at = _app()
+    at = _live(at, "s1", [{"처리구": "A", "수량": 600}])
+    at = _cols(at, "")
+    assert _rows(at) == [{"처리구": "A", "수량": 600}]
+    assert at.text_input(key="voice_cols_box").value == "처리구, 수량"     # 칸도 원래대로
+
+
+def test_use_as_data_goes_back_with_table_loaded():
+    at = _app()
+    at = _live(at, "s1", [{"처리구": "A", "수량": 600}, {"처리구": "B", "수량": 610}])
+    at = at.button(key="voice_m_analyze").click().run()
+    assert any("FULL_APP" in str(m.value) for m in at.markdown)
+    assert at.session_state["cur_key"] == "음성_입력데이터"
+    assert len(at.session_state["df"]) == 2

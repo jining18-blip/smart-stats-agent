@@ -6160,7 +6160,7 @@ if "price_db" not in st.session_state: st.session_state["price_db"] = None
 if "report_items" not in st.session_state: st.session_state.report_items = []
 
 # ================================================================ 휴대폰 음성 입력 전용 화면 (?mode=voice)
-# 앱 주소 뒤에 ?mode=voice 를 붙여 열면 사이드바 없이 큰 마이크 화면만 보여 준다.
+# 홈·사이드바의 🎤 버튼(또는 주소 뒤 ?mode=voice)으로 열면 사이드바 없이 큰 마이크 화면만 보여 준다.
 # 홈 화면에 이 주소를 따로 추가해 두면 아이콘 한 번으로 바로 말하기 → 행 추가가 된다.
 # 입력한 행은 로그인 계정 기준으로 Firestore(voice_drafts)에 저장돼 PC에서 이어서 불러올 수 있다.
 _VOICE_PAGE_CSS = """
@@ -6533,6 +6533,7 @@ window.addEventListener("message", function (e) {
   var d = e.data || {};
   if (d.type !== "streamlit:render") return;
   S.args = d.args || S.args;
+  lastH = 0;                                            // 다시 그려질 때마다 높이를 한 번은 보낸다
   var th = d.theme || {};
   document.body.classList.toggle("dark", th.base === "dark");
   tryRestore();
@@ -6542,8 +6543,8 @@ if (!SR) {
   showMsg("이 브라우저는 실시간 받아쓰기를 지원하지 않아요. 휴대폰은 <b>크롬(안드로이드)·사파리(아이폰)</b>, PC는 크롬·엣지에서 열어 주세요." +
           "<br>카카오톡 등 앱 안에서 열었다면 ‘다른 브라우저로 열기’를 눌러 주세요. 또는 위에서 <b>녹음 후 AI 정리</b>를 고르세요.");
 }
+post("streamlit:componentReady", { apiVersion: 1 });   // 준비 신호를 먼저 보내야 높이 신호가 무시되지 않는다
 drawMic(); draw();
-post("streamlit:componentReady", { apiVersion: 1 });
 </script></body></html>
 """
 
@@ -6684,6 +6685,7 @@ def _voice_live_absorb(val):
     cols = _voice_target_columns() or list(new[0].keys())
     new = [{c: r.get(c) for c in cols} for r in new]
     st.session_state.setdefault("voice_rows", []).extend(new)
+    st.session_state.pop("_voice_cols_undo", None)
     _voice_draft_save()
     _record_usage("음성 입력(실시간)")
     return len(new)
@@ -6718,6 +6720,108 @@ def _voice_ai_settings():
     _ai_remember_widget()
 
 
+def _voice_remap_rows(rows, old, new):
+    """열 목록이 old → new로 바뀔 때 이미 입력한 행을 옮긴다.
+
+    이름이 그대로인 열은 값 유지, 같은 자리에서 이름만 바뀐 열(예: 초장 → 초장(cm))은 값을 옮기고,
+    새로 생긴 열은 빈칸, 없어진 열의 값은 빠진다. 반환: (새 행 목록, {"renamed","added","dropped"})
+    """
+    import difflib
+    src, info = {}, {"renamed": [], "added": [], "dropped": []}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for a, b in zip(old[i1:i2], new[j1:j2]):
+                src[b] = a
+            continue
+        olds, news = list(old[i1:i2]), list(new[j1:j2])
+        if tag == "replace":
+            # 바뀐 구간 안에서는 이름이 비슷한 것끼리 먼저 잇는다(초장 → 초장(cm)).
+            # 열 하나를 끼워 넣으면서 이름도 바꾼 경우 자리만 보고 이으면 값이 엉뚱한 열로 간다.
+            def score(a, b):
+                ka, kb = (re.sub(r"\([^)]*\)|\[[^\]]*\]|\s+", "", str(x)) for x in (a, b))
+                if ka and kb and (ka in kb or kb in ka):
+                    return 1.0
+                return difflib.SequenceMatcher(None, ka, kb).ratio()
+            cand = sorted(((score(a, b), ia, ib) for ia, a in enumerate(olds) for ib, b in enumerate(news)),
+                          reverse=True)
+            pairs, used_a, used_b = [], set(), set()
+            for sc, ia, ib in cand:
+                if sc >= 0.5 and ia not in used_a and ib not in used_b:
+                    pairs.append((ia, ib)); used_a.add(ia); used_b.add(ib)
+            rest_a = [i for i in range(len(olds)) if i not in used_a]
+            rest_b = [i for i in range(len(news)) if i not in used_b]
+            if len(rest_a) == len(rest_b):          # 남은 개수가 같으면 자리끼리 이름 바꾸기로 본다
+                pairs += list(zip(rest_a, rest_b))
+                rest_a, rest_b = [], []
+            for ia, ib in pairs:
+                src[news[ib]] = olds[ia]
+                info["renamed"].append((olds[ia], news[ib]))
+            olds, news = [olds[i] for i in rest_a], [news[i] for i in rest_b]
+        info["added"].extend(news)
+        for a in olds:
+            n = sum(1 for r in rows if r.get(a) not in (None, ""))
+            info["dropped"].append((a, n))
+    out = [{b: (r.get(src[b]) if b in src else None) for b in new} for r in rows]
+    return out, info
+
+
+def _voice_cols_changed():
+    """'열 이름' 칸을 고쳤을 때: 이미 입력한 표의 열도 같이 바꾼다."""
+    S = st.session_state
+    new = list(dict.fromkeys(_voice_columns_from_text(S.get("voice_cols_box"))))
+    rows = S.get("voice_rows") or []
+    old = _voice_target_columns()
+    S["_voice_cols_synced"] = None                    # 칸 내용을 정리된 목록으로 다시 맞춘다
+    if not new:
+        if rows:
+            S["_voice_cols_msg"] = "열을 모두 비울 수는 없어요. 표를 새로 시작하려면 아래 '🗑️ 표 비우기'를 쓰세요."
+        else:
+            S["voice_cols_text"] = ""
+        return
+    S.pop("_voice_cols_undo", None)
+    if rows and old != new:
+        S["voice_rows"], info = _voice_remap_rows(rows, old, new)
+        parts = [f"'{a}'→'{b}'" for a, b in info["renamed"]] + [f"'{c}' 추가" for c in info["added"]]
+        parts += [f"'{c}' 뺌" for c, _ in info["dropped"]]
+        S["_voice_cols_msg"] = "열을 바꿨어요: " + ", ".join(parts) if parts else "열 순서를 바꿨어요."
+        lost = [(c, n) for c, n in info["dropped"] if n]
+        if lost:
+            S["_voice_cols_undo"] = {"text": S.get("voice_cols_text", ""), "rows": rows, "lost": lost}
+    S["voice_cols_text"] = ", ".join(new)
+    _voice_draft_save()
+
+
+def _voice_cols_undo():
+    S = st.session_state
+    u = S.pop("_voice_cols_undo", None)
+    if u:
+        S["voice_rows"], S["voice_cols_text"] = u["rows"], u["text"]
+        S["_voice_cols_synced"] = None
+        S["_voice_cols_msg"] = "열 변경을 되돌렸어요."
+        _voice_draft_save()
+
+
+def _voice_open():
+    """원래 주소에서 버튼 한 번으로 음성 입력 화면으로 간다(주소에 ?mode=voice를 직접 붙일 필요 없음)."""
+    st.query_params["mode"] = "voice"
+
+
+def _voice_close():
+    st.query_params.clear()
+
+
+def _voice_use_as_data():
+    """음성으로 입력한 표를 바로 분석 데이터로 쓰고 전체 화면으로 돌아간다."""
+    S = st.session_state
+    rows = S.get("voice_rows") or []
+    if rows:
+        key = "음성_입력데이터"
+        S.setdefault("files", {})[key] = clean_columns(pd.DataFrame(rows))
+        S["cur_key"] = key
+        S["df"] = S["files"][key].copy()
+    st.query_params.clear()
+
+
 def render_voice_mode():
     st.markdown(_VOICE_PAGE_CSS, unsafe_allow_html=True)
     st.markdown("### 🎤 음성 데이터 입력")
@@ -6730,14 +6834,25 @@ def render_voice_mode():
             st.session_state["voice_rows"] = d["rows"]
         if d and d.get("columns") and not st.session_state.get("voice_cols_text"):
             st.session_state["voice_cols_text"] = d["columns"]
+    # 실시간 부품이 보낸 행을 맨 먼저 반영해야 아래 '열 이름' 칸이 첫 행의 열을 바로 보여 준다.
+    _voice_live_absorb(st.session_state.get("voice_live_comp"))
 
     way = st.radio("입력 방식", _VOICE_WAYS, key="voice_m_way", horizontal=True,
                    help="실시간: 말하는 동안 표가 바로 채워집니다(브라우저 음성 인식, API 키 불필요).\n\n"
                         "녹음 후 AI 정리: 시끄러운 곳이나 실시간 인식이 안 되는 브라우저에서 사용하세요(API 키 필요).")
-    st.text_input("열 이름 (선택)", key="voice_cols_text",
+    # 칸에는 항상 지금 쓰는 열을 보여 준다(첫 행에서 정해진 열도). 고치고 Enter → 표에도 반영.
+    _cols_now = ", ".join(_voice_target_columns())
+    if st.session_state.get("_voice_cols_synced") != _cols_now:
+        st.session_state["voice_cols_box"] = _cols_now
+        st.session_state["_voice_cols_synced"] = _cols_now
+    st.text_input("열 이름", key="voice_cols_box", on_change=_voice_cols_changed,
                   placeholder="예) 처리구, 반복, 초장, 수량",
                   help="적어 두면 모든 행이 같은 열로 정리되고, 실시간 모드에서는 모든 열이 채워질 때 자동으로 다음 행으로 넘어갑니다. "
-                       "비워 두면 첫 행을 기준으로 맞춥니다.")
+                       "비워 두면 처음 말한 행을 기준으로 맞춥니다.")
+    st.caption("✏️ 언제든 고칠 수 있어요. 고친 뒤 **Enter(휴대폰은 완료)** 를 누르면 이미 입력한 표의 열 이름도 같이 바뀌어요.")
+    _msg = st.session_state.pop("_voice_cols_msg", None)
+    if _msg:
+        st.toast(_msg)            # 토스트는 화면 흐름 밖에 떠서 아래 받아쓰기 부품 위치를 바꾸지 않는다
 
     if way == _VOICE_WAYS[0]:
         # 실시간 부품 위에는 조건부 요소를 두지 않는다(위치가 바뀌면 부품이 새로 열려 받아쓰기가 끊김).
@@ -6760,6 +6875,7 @@ def render_voice_mode():
                 st.session_state["voice_warn"] = warn
                 if row is not None:
                     st.session_state.setdefault("voice_rows", []).append(row)
+                    st.session_state.pop("_voice_cols_undo", None)
                     _voice_draft_save()
                     _record_usage("음성 입력(휴대폰)")
                 st.session_state["voice_rec_n"] = n + 1       # 다음 행을 위해 녹음기를 새로 만든다
@@ -6770,6 +6886,11 @@ def render_voice_mode():
                     unsafe_allow_html=True)
     for w in ((st.session_state.get("voice_warn") or [])[:3] if way != _VOICE_WAYS[0] else []):
         (st.error if str(w).startswith("⚠️") else st.warning)(w if str(w).startswith("⚠️") else f"확인 필요: {w}")
+
+    _undo = st.session_state.get("_voice_cols_undo")
+    if _undo:
+        st.warning("열을 빼면서 값이 지워졌어요: " + ", ".join(f"'{c}' {n}칸" for c, n in _undo["lost"]))
+        st.button("↩️ 열 변경 되돌리기", width="stretch", key="voice_m_cols_undo", on_click=_voice_cols_undo)
 
     rows = st.session_state.get("voice_rows") or []
     if rows:
@@ -6783,6 +6904,8 @@ def render_voice_mode():
         if new_rows != _voice_records(vdf):
             st.session_state["voice_rows"] = new_rows
             _voice_draft_save()
+        st.button("📊 이 표로 바로 분석하기", type="primary", width="stretch", key="voice_m_analyze",
+                  on_click=_voice_use_as_data, help="전체 기능 화면으로 돌아가 이 표를 분석 데이터로 불러옵니다.")
         c1, c2 = st.columns(2)
         if c1.button("↩️ 마지막 행 취소", width="stretch", key="voice_m_undo"):
             st.session_state["voice_rows"] = rows[:-1]
@@ -6804,9 +6927,8 @@ def render_voice_mode():
                 st.rerun()
 
     st.divider()
-    if st.button("💻 전체 기능 화면으로", width="stretch", key="voice_m_full"):
-        st.query_params.clear()
-        st.rerun()
+    st.button("← 전체 기능 화면으로", width="stretch", key="voice_m_full", on_click=_voice_close,
+              help="입력한 표는 그대로 남아 있어요. 왼쪽 📂 데이터 불러오기 → 🎤 음성에서 다시 볼 수 있어요.")
 
 
 def _is_voice_mode():
@@ -6911,8 +7033,10 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="v1_tpl_main", width="stretch")
 
+st.sidebar.button("🎤 말로 데이터 입력", width="stretch", key="voice_open_side", on_click=_voice_open,
+                  help="음성 입력 화면으로 이동합니다. 말하는 동안 표가 바로 채워져요.")
 with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
-    # 휴대폰 음성 입력 화면(?mode=voice)에서 쌓아 둔 행이 있으면 바로 불러올 수 있게 한다.
+    # 휴대폰 음성 입력 화면에서 쌓아 둔 행이 있으면 바로 불러올 수 있게 한다.
     _vd = _voice_draft_peek() if (_voice_uid() and _fs_session() is not None) else None
     if _vd:
         st.info(f"📱 휴대폰 음성 입력 **{len(_vd['rows'])}행**이 있어요.")
@@ -7107,30 +7231,13 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
                         st.caption("AI 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 넣은 뒤 사용할 수 있습니다.")
 
     else:  # 음성
-        st.caption("예: '처리구 A, 반복 1, 초장 72.3, 수량 615.4'처럼 한 행씩 말해 주세요.")
-        _aud = st.audio_input("🎙️ 한 행 말하기", sample_rate=16000, key="voice_data_audio")
-        if _aud is not None:
-            st.audio(_aud)
-            if st.button("📝 음성을 데이터 한 행으로 변환", width="stretch", key="voice_parse_btn"):
-                with st.spinner("음성을 듣고 숫자와 변수명을 정리하는 중..."):
-                    _tr = ai_multimodal_text(_aud.getvalue(), getattr(_aud, "type", None) or "audio/wav",
-                                             "한국어 음성을 정확히 전사하세요.", kind="audio")
-                if str(_tr).startswith("⚠️"):
-                    st.error(_tr)
-                else:
-                    st.session_state["voice_transcript"] = _tr
-                    _cols = list(st.session_state.df.columns) if isinstance(st.session_state.get("df"), pd.DataFrame) else []
-                    _row, _warn = voice_text_to_row(_tr, _cols)
-                    if _row is not None:
-                        st.session_state.setdefault("voice_rows", [])
-                        st.session_state["voice_rows"].append(_row)
-                        st.session_state["voice_warn"] = _warn
-        if st.session_state.get("voice_transcript"):
-            st.caption("인식 문장: " + str(st.session_state["voice_transcript"]))
+        st.caption("말로 입력은 전용 화면에서 해요. 말하는 동안 표가 바로 채워집니다.")
+        st.button("🎤 음성 입력 화면 열기", type="primary", width="stretch", key="voice_open_side2",
+                  on_click=_voice_open)
         if st.session_state.get("voice_rows"):
+            st.caption("음성 입력 화면에서 넣은 행이에요.")
             _vdf = pd.DataFrame(st.session_state["voice_rows"])
             _ved = st.data_editor(_vdf, num_rows="dynamic", width="stretch", key="voice_rows_editor", height=220)
-            for _w in st.session_state.get("voice_warn", [])[:3]: st.warning(f"확인 필요: {_w}")
             cva, cvb = st.columns(2)
             if cva.button("➕ 현재 데이터에 추가", width="stretch", key="voice_append"):
                 if isinstance(st.session_state.get("df"), pd.DataFrame) and len(st.session_state.df.columns):
@@ -7153,8 +7260,6 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
                 st.session_state["voice_rows"] = []
                 st.session_state.pop("voice_transcript", None)
                 st.rerun()
-        if not st.session_state.get("api_key"):
-            st.info("음성 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 ChatGPT 또는 Gemini API 키를 설정한 뒤 사용할 수 있습니다.")
 
 # 데이터 선택 + 삭제
 if st.session_state.files:
@@ -9415,7 +9520,7 @@ _V1_HOME_STEPS = """
 _V1_HOME_TIPS = """
 <div class="h-tips">
   <div class="h-tip">💡 처음이라면 <b>⚡ 원클릭 분석</b>부터 해 보세요</div>
-  <div class="h-tip">📱 밭에서는 휴대폰으로 <b>말해서 입력</b>할 수 있어요 (주소 뒤에 <code>?mode=voice</code>)</div>
+  <div class="h-tip">📱 밭에서는 휴대폰으로 <b>말해서 입력</b>할 수 있어요 (위 <b>🎤 밭에서 말로 데이터 입력하기</b> 버튼)</div>
   <div class="h-tip">📖 자세한 방법은 <b>사용설명서</b>에 있어요</div>
 </div>
 """
@@ -9437,6 +9542,9 @@ def render_v1_home():
         st.info(f"**{_picked}**을(를) 쓰려면 먼저 왼쪽 **📂 데이터 불러오기**에서 데이터를 올려 주세요.")
     v2_btn = (f'<a class="bt" href="{_html.escape(V2_APP_URL, quote=True)}" target="_blank" rel="noopener">Version 2 열기 ↗</a>'
               if V2_APP_URL else "")
+    # 휴대폰에서는 사이드바가 접혀 있으므로 첫 화면에 바로 보이게 둔다.
+    st.button("🎤 밭에서 말로 데이터 입력하기", type="primary", width="stretch", key="voice_open_home",
+              on_click=_voice_open, help="말하는 동안 표가 바로 채워집니다. 다 입력하면 '이 표로 바로 분석하기'를 누르세요.")
     st.markdown(_V1_HOME_CSS + """
 <div class="h-wrap">
 <div class="h-lead">처음 오셨나요? 4단계면 끝나요 🌱</div>
@@ -9450,6 +9558,7 @@ def render_v1_home():
   <tr><td class="m">📊 통계분석</td><td>분석 방법을 직접 골라 자세히 볼 때</td><td>데이터 점검 · 분산분석 · 상관 · 회귀 · 머신러닝 예측</td></tr>
   <tr><td class="m">📋 설문조사 분석</td><td>농가·교육생 설문 결과를 정리할 때</td><td>만족도 · 객관식 · 다중응답 · 교차분석</td></tr>
   <tr class="grp"><td colspan="3">보조 기능</td></tr>
+  <tr><td class="m">🎤 음성 입력</td><td>조사값을 말로 바로 표에 넣을 때 (휴대폰 추천)</td><td>실시간 받아쓰기 · 엑셀 받기 · 바로 분석</td></tr>
   <tr><td class="m">📑 보고서</td><td>담아 둔 표·그래프를 문서로 만들 때</td><td>한글(hwpx) · 워드(docx)</td></tr>
   <tr><td class="m">🧠 AI 도우미 <span class="h-tag gray">API 키</span></td><td>결과 해석·고찰 문장, 통계 질문</td><td>AI 해석 · 질문하기</td></tr>
   <tr><td class="m">📖 사용설명서</td><td>데이터 작성법과 사용법을 확인할 때</td><td>메뉴별 설명 · 자주 틀리는 예시</td></tr>
@@ -12088,16 +12197,19 @@ Version 1은 통계를 처음 접하는 연구자도 **데이터 준비 → 파�
 - **📁 Excel/CSV**: 일반적인 분석 파일. 시트가 여러 개면 시트별로 나뉘어 들어옵니다. 변수명이 두 줄이면 `고급 · 변수명이 두 줄인 파일`을 켜세요.
 - **📷 이미지/사진**: 조사야장·표 사진이나 엑셀 화면 캡처를 AI가 표로 읽습니다. 적용 전에 미리보기에서 값을 꼭 확인하세요.
 - **📄 PDF**: 보고서·성적서 PDF 안의 표를 불러옵니다. 한글·엑셀에서 PDF로 저장한 파일은 AI 없이 바로 읽고, 표가 여러 개면 골라서 씁니다. 종이를 스캔한 PDF는 쪽을 골라 AI로 읽습니다.
-- **🎤 음성**: `처리구 A, 반복 1, 초장 72.3, 수량 615.4`처럼 한 행씩 말해 표로 추가합니다.
+- **🎤 음성**: 음성 입력 화면을 엽니다(아래 참고).
 
-이미지·스캔 PDF·음성 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 연결해야 합니다. 음성 인식은 ChatGPT 또는 Gemini에서만 됩니다.
+이미지·스캔 PDF 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 연결해야 합니다.
 
-### 📱 휴대폰 음성 입력 (밭·하우스에서)
-앱 주소 뒤에 `?mode=voice`를 붙여 열면 큰 마이크 화면만 나옵니다 (예: `https://앱주소/?mode=voice`).
-- 마이크를 누르고 한 행을 말한 뒤 다시 누르면 **자동으로 표에 한 행이 추가**됩니다.
-- `열 이름`에 `처리구, 반복, 초장, 수량`처럼 적어 두면 모든 행이 같은 열로 정리됩니다.
-- 입력한 표는 계정에 저장되어, PC에서 같은 계정으로 로그인하면 `📂 데이터 불러오기` 맨 위의 **📱 불러와서 분석**으로 이어서 분석할 수 있습니다.
-- `이 기기에 API 키 기억`을 체크하면 그 휴대폰에서는 키를 다시 넣지 않아도 됩니다.
+### 📱 말로 데이터 입력 (밭·하우스에서)
+홈 화면의 **🎤 밭에서 말로 데이터 입력하기** 버튼(또는 왼쪽 **🎤 말로 데이터 입력**)을 누르면 큰 마이크 화면이 나옵니다.
+- **⚡ 실시간 받아쓰기(기본)**: 마이크를 한 번 누르고 `처리구 A, 반복 1, 초장 72.3, 수량 615.4`처럼 말하면 **말하는 동안 칸이 채워지고**, 모든 열이 채워지면 자동으로 다음 행으로 넘어갑니다. API 키가 필요 없습니다(크롬·사파리·엣지).
+  - `다음` = 다음 행으로 넘기기, `취소` = 지금 행 다시 말하기, `70 아니 71` = 고쳐 말하기
+  - `칠십이 점 삼`, `육백십오`처럼 말해도 숫자로 바뀝니다.
+- **🎙️ 녹음 후 AI 정리**: 시끄러운 곳이나 실시간 인식이 안 되는 브라우저에서 씁니다(ChatGPT 또는 Gemini API 키 필요).
+- **열 이름**: `처리구, 반복, 초장, 수량`처럼 적어 두면 모든 행이 같은 열로 정리됩니다. **언제든 고칠 수 있고**, 고친 뒤 Enter(휴대폰은 완료)를 누르면 이미 입력한 표의 열 이름도 같이 바뀝니다. 열을 빼서 값이 지워지면 `↩️ 열 변경 되돌리기`가 나옵니다.
+- 다 입력하면 **📊 이 표로 바로 분석하기**를 누르세요. 엑셀로 받을 수도 있습니다.
+- 로그인했다면 입력한 표가 계정에 저장되어, PC에서 같은 계정으로 로그인하면 `📂 데이터 불러오기` 맨 위의 **📱 불러와서 분석**으로 이어서 분석할 수 있습니다.
 
 ---
 
@@ -12206,7 +12318,7 @@ API 설정은 `🧠 AI 도우미 → AI 연결 설정`에서 합니다. 연결�
 - **안드로이드(크롬)**: `⋮ → 홈 화면에 추가`
 - **아이폰(사파리)**: `공유 → 홈 화면에 추가`
 
-일반 주소와 `?mode=voice` 주소를 각각 홈 화면에 추가해 두면, 전체 기능과 음성 입력을 아이콘 하나로 바로 열 수 있습니다.
+음성 입력 화면을 연 상태에서 홈 화면에 추가하면, 음성 입력을 아이콘 하나로 바로 열 수 있습니다(주소 뒤에 `?mode=voice`가 붙은 주소).
 
 ---
 
