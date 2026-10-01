@@ -3794,6 +3794,34 @@ def ai_call(prompt, api_key=None, model=None, max_tokens=900, system=None, provi
     return fn(prompt, api_key, model, max_tokens=max_tokens, system=system)
 
 
+def ai_job_run(slot, prompt=None, max_tokens=900, spinner="AI가 답변을 만드는 중..."):
+    """AI 질문을 '대기 → 답 저장 → 화면 표시' 순서로 처리한다.
+
+    버튼을 누른 실행이 중간에 다시 그려지면(브라우저 저장소 부품이 값을 보내는 경우 등)
+    화면에 바로 그린 답은 사라진다. 그래서 질문을 먼저 세션에 넣고, 답을 받는 즉시
+    세션에 저장한 뒤, 세션에 있는 답을 그린다. prompt를 주면 새 질문으로 등록한다.
+    반환: 답 문자열(없으면 None)
+    """
+    k = f"ai_job_{slot}"
+    if prompt is not None:
+        st.session_state[k] = {"prompt": prompt, "max_tokens": max_tokens,
+                               "data": st.session_state.get("cur_key"), "ans": None}
+    job = st.session_state.get(k)
+    if not job or job.get("data") != st.session_state.get("cur_key"):
+        return None
+    if job.get("ans") is None:
+        with st.spinner(spinner):
+            try:
+                ans = ai_call(job["prompt"], st.session_state.get("api_key"),
+                              st.session_state.get("ai_model_g"), max_tokens=job["max_tokens"])
+            except Exception as ex:
+                ans = f"⚠️ AI 호출 실패: {type(ex).__name__}: {ex}"
+            # 다른 화면 요소를 그리기 전에 바로 저장한다(이후 실행이 끊겨도 답이 남는다).
+            job["ans"] = ans if str(ans or "").strip() else "⚠️ AI 응답이 비어 있습니다. 다시 시도해 주세요."
+            st.session_state[k] = job
+    return job["ans"]
+
+
 # ================================================================ 이미지/음성 데이터 입력
 
 def _extract_ai_text_from_openai_response(js):
@@ -3929,8 +3957,144 @@ def image_to_dataframe(binary, mime_type):
     return clean_columns(pd.DataFrame(fixed, columns=cols)), list(js.get("warnings") or [])
 
 
+# ---------------------------------------------------------------- 음성 문장 → 행 (AI 없이 규칙으로)
+# "처리구 A, 반복 1, 초장 72.3, 수량 육백십오 점 사" 같은 문장에서 열 이름 뒤의 값을 바로 뽑는다.
+# 실시간 받아쓰기 화면의 자바스크립트(_VOICE_LIVE_HTML 안 VP)와 같은 규칙이며,
+# tests/test_voice_live.py가 두 쪽 결과가 같은지 확인한다.
+_VP_DIG = {"영": 0, "공": 0, "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5,
+           "육": 6, "륙": 6, "칠": 7, "팔": 8, "구": 9}
+_VP_POW = {"십": 10, "백": 100, "천": 1000}
+_VP_LETTER = {"에이": "A", "비": "B", "씨": "C", "디": "D"}
+_VP_NUM_RE = re.compile(r"^(-?\d+(?:\.\d+)?)\s*(?:킬로그램|킬로|kg|그램|g|센티미터|센티|cm|"
+                        r"밀리미터|밀리|mm|미터|m|개|번|회|퍼센트|%|도|점)?$", re.I)
+_VP_KNUM_RE = re.compile(r"(^|\s|-)([영공일이삼사오육륙칠팔구십백천만]+)"
+                         r"(?:\s*점\s*([영공일이삼사오육륙칠팔구]+))?(?=$|\s)")
+_VP_NEXT_RE = re.compile(r"(?:^|\s+)(?:다음\s*행|다음|엔터)(?=$|[\s,.!?])[.!?]?")
+_VP_CANCEL_RE = re.compile(r"(?:^|\s+)취소(?=$|[\s,.!?])[.!?]?")
+
+
+def _vp_sino(w):
+    """한자어 수사 → 정수. '육백십오'→615, '일이삼'(자리 읽기)→123, 해석 불가면 None."""
+    if not re.fullmatch(r"[영공일이삼사오육륙칠팔구십백천만]+", w or ""):
+        return None
+    if not re.search(r"[십백천만]", w):
+        return int("".join(str(_VP_DIG[c]) for c in w))
+    total, sec, cur = 0, 0, None
+    for ch in w:
+        if ch in _VP_DIG:
+            if cur is not None:
+                return None
+            cur = _VP_DIG[ch]
+        elif ch in _VP_POW:
+            sec += (1 if cur is None else cur) * _VP_POW[ch]
+            cur = None
+        else:  # 만
+            total += ((sec + (cur or 0)) or 1) * 10000
+            sec, cur = 0, None
+    return total + sec + (cur or 0)
+
+
+def _vp_num(s):
+    """'72.3', '72 점 3', '칠십이 점 삼', '615kg', '1,234' → 숫자. 숫자가 아니면 None."""
+    t = re.sub(r"마이너스\s*", "-", str(s))
+    t = re.sub(r"(\d),(\d{3})(?!\d)", r"\1\2", t)
+
+    def rep(m):
+        v = _vp_sino(m.group(2))
+        if v is None:
+            return m.group(0)
+        out = str(v)
+        if m.group(3):
+            out += "." + "".join(str(_VP_DIG[c]) for c in m.group(3))
+        return m.group(1) + out
+    t = _VP_KNUM_RE.sub(rep, t)
+    t = re.sub(r"(\d)\s*점\s*(\d)", r"\1.\2", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    m = _VP_NUM_RE.match(t)
+    if not m:
+        return None
+    x = m.group(1)
+    return float(x) if "." in x else int(x)
+
+
+def _vp_clean(seg):
+    """열 이름 뒤 구간 → 값. 조사·어미·단위를 떼고, '615 아니 616'처럼 고쳐 말하면 뒤 값을 쓴다."""
+    s = re.split(r"\s*아니(?:요|고|야)?[,\s]+", str(seg or ""))[-1]
+    s = re.sub(r"^[\s,.:;·~]+", "", s)
+    s = re.sub(r"[\s,.;:!?·]+$", "", s)
+    if re.search(r"\S\s+\S", s):
+        s = re.sub(r"^(은|는|이|가|을|를|의|도|요)\s+", "", s)
+    s = re.sub(r"\s*(입니다|이에요|예요|이고요|이고|이요|고요|이며|요)$", "", s) or s
+    s = s.strip()
+    if not s:
+        return None
+    n = _vp_num(s)
+    if n is not None:
+        return n
+    return _VP_LETTER.get(s, s)
+
+
+def _vp_col_key(c):
+    k = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", str(c))
+    k = re.sub(r"\s+", "", k)
+    return k or re.sub(r"\s+", "", str(c))
+
+
+def voice_split_rows(text):
+    """'다음'으로 행을 나누고 '취소' 앞 내용은 버린다. 반환: (끝난 행 문장 목록, 이어지는 문장)."""
+    def drop_cancelled(p):
+        return _VP_CANCEL_RE.split(p)[-1].strip()
+    pieces = _VP_NEXT_RE.split(str(text or ""))
+    return [drop_cancelled(p) for p in pieces[:-1]], drop_cancelled(pieces[-1])
+
+
+def voice_parse_local(text, columns=None):
+    """음성 문장 한 행 → dict. 열을 주면 그 열 이름을 찾아 값을 채우고(못 찾으면 None),
+    열이 없으면 '이름 값 이름 값' 순서로 짝을 짓는다."""
+    text = str(text or "")
+    cols = [str(c) for c in (columns or [])]
+    if not cols:
+        t = re.sub(r"(\d)\s*점\s*(\d)", r"\1.\2", text)
+        toks = [x for x in re.split(r"[\s,]+", t) if x]
+        row, i = {}, 0
+        while i < len(toks):
+            lab = toks[i]
+            if _vp_num(lab) is not None or i + 1 >= len(toks):
+                i += 1
+                continue
+            v, j = toks[i + 1], i + 2
+            if j + 1 < len(toks) and toks[j] == "점":
+                v, j = f"{v} 점 {toks[j + 1]}", j + 2
+            cv = _vp_clean(v)
+            if cv is not None:
+                row[lab] = cv
+            i = j
+        return row
+    spans = []
+    for c in sorted(cols, key=lambda c: -len(_vp_col_key(c))):
+        pat = r"\s*".join(re.escape(ch) for ch in _vp_col_key(c))
+        for m in re.finditer(pat, text, flags=re.I):
+            s, e = m.span()
+            if e > s and not any(s < pe and e > ps for _, ps, pe in spans):
+                spans.append((c, s, e))
+    spans.sort(key=lambda x: x[1])
+    row = {c: None for c in cols}
+    for i, (c, s, e) in enumerate(spans):
+        seg = text[e: spans[i + 1][1] if i + 1 < len(spans) else len(text)]
+        v = _vp_clean(seg)
+        if v is not None:
+            row[c] = v
+    return row
+
+
 def voice_text_to_row(transcript, columns=None):
     cols = [str(c) for c in (columns or [])]
+    # 열을 알고 있고 규칙으로 모든 열이 채워지면 AI를 다시 부르지 않는다(녹음 1건당 AI 호출 2번 → 1번).
+    if cols:
+        done, rest = voice_split_rows(transcript)
+        local = voice_parse_local(" ".join(done + [rest]), cols)
+        if all(local.get(c) not in (None, "") for c in cols):
+            return local, []
     prompt = f"""다음은 연구자가 음성으로 말한 한 행의 조사 데이터입니다.
 음성: {transcript}
 현재 데이터 열: {cols if cols else '없음'}
@@ -5496,6 +5660,12 @@ def _v1_data_readiness(data):
     return {"errors": errors, "warns": warns, "oks": oks}
 
 _V1_SUMMARY_ROW_RE = re.compile(r"^\s*(평균|합계|총계|소계|계|표준편차|표준오차|변이계수|cv|lsd|total|sum|mean|average|avg|sd|se)\s*$", re.I)
+# '대조구 평균', '처리1 합계', '평균(대조구)'처럼 처리명이 붙은 요약 행
+_V1_SUMMARY_SUFFIX_RE = re.compile(r"^\s*(?:.{1,20}?[\s(\[]*(평균|합계|총계|소계)[)\]]?|(평균|합계|소계)\s*[(\[].{1,20}[)\]])\s*$")
+
+
+def _v1_is_summary_label(v):
+    return isinstance(v, str) and bool(_V1_SUMMARY_ROW_RE.match(v) or _V1_SUMMARY_SUFFIX_RE.match(v))
 
 
 _V1_NUM_WITH_UNIT_RE = re.compile(r"^\s*[-+]?\d[\d,]*(\.\d+)?\s*[A-Za-z가-힣%㎡㎏℃/().·]{0,8}\s*$")
@@ -5522,6 +5692,9 @@ def _v1_numeric_like(data, min_ratio=0.6):
             continue
         # '1차·2차', '1회', '3반복', '2구'처럼 순서·구분을 나타내는 값은 측정값이 아니다.
         if ser[ok].str.contains(r"\d\s*(?:차|회|번|구|호|기|주차|반복|시기|년차)\s*$", regex=True).mean() >= 0.8:
+            continue
+        # '30대 이하·50대·5년 이상'처럼 나이대·기간 구간을 나타내는 설문 범주
+        if ser.str.contains(r"\d\s*(?:대|세|살|년|개월)\s*(?:이하|이상|미만|초과|전후)?\s*$", regex=True).mean() >= 0.8:
             continue
         name = str(c).lower()
         if any(k in name for k in _BLOCK_KEYS + _TRT_KEYS + ["시기", "일자", "차수", "조사"]):
@@ -5607,7 +5780,7 @@ def _v1_data_checkup(data):
     sum_rows = []
     if obj_cols:
         _hit = data[obj_cols].apply(
-            lambda s_: s_.map(lambda v: isinstance(v, str) and bool(_V1_SUMMARY_ROW_RE.match(v))))
+            lambda s_: s_.map(_v1_is_summary_label))
         sum_rows = list(data.index[_hit.any(axis=1)])
     if sum_rows:
         add("error", "평균·합계 같은 요약 행이 들어 있습니다.", _v1_row_labels(data, sum_rows),
@@ -5670,6 +5843,7 @@ def _v1_data_checkup(data):
     trt, blk = dsg.get("trt"), dsg.get("blk")
     if trt:
         cnt = data[trt].value_counts(dropna=True)
+        cnt = cnt[[not _v1_is_summary_label(str(k)) for k in cnt.index]]   # 요약 행(평균·합계)은 위에서 따로 알림
         add("ok", f"처리(그룹) 열: '{trt}' — {len(cnt)}개 처리"
             + (f", 반복(블록) 열: '{blk}'" if blk else ""))
         ones = [str(k) for k, v in cnt.items() if v < 2]
@@ -5696,11 +5870,16 @@ def _v1_data_checkup(data):
             add("info", "처리마다 반복(관측) 수가 다릅니다.",
                 ", ".join(f"{k} {v}개" for k, v in list(cnt.items())[:6]),
                 "누락된 조사값이 없는지 확인해 주세요. 불균형이어도 분석은 가능합니다.")
+    elif dsg and numlike:
+        # 측정값 열이 글자로 읽혀 처리 열을 판단하지 못한 경우 — 위의 '숫자가 아닌 값' 항목을 먼저 고치면 된다.
+        add("info", "측정값 열이 글자로 읽혀 처리·품종 열을 아직 판단하지 못했습니다.", "",
+            "위의 '숫자가 아닌 값' 항목을 고치면(또는 🔧 숫자로 자동 변환) 처리 열도 함께 인식됩니다.")
     elif dsg:
         add("info", "처리·품종 열을 찾지 못했습니다.", "",
             "처리 간 비교를 하려면 `처리구`나 `품종` 열이 필요합니다. 상관·회귀·예측만 할 거라면 없어도 됩니다.")
-    if dsg.get("promoted"):
-        add("ok", "숫자로 적힌 코드 열을 그룹으로 인식했습니다: " + ", ".join(map(str, dsg["promoted"])))
+    _promoted = [c for c in (dsg.get("promoted") or []) if str(c).lower() not in treat_header_hits]
+    if _promoted:
+        add("ok", "숫자로 적힌 코드 열을 그룹으로 인식했습니다: " + ", ".join(map(str, _promoted)))
 
     # 10) 참고 사항
     numc = data.select_dtypes(include=np.number).columns
@@ -5740,6 +5919,68 @@ def _v1_checkup_for(data):
 
 def _v1_checkup_counts(findings):
     return {lv: sum(1 for f in findings if f["level"] == lv) for lv in ("error", "warn", "info", "ok")}
+
+
+def _v1_wrong_cases():
+    """'자주 틀리는 작성 예시' — 잘못 쓴 표(앱이 읽은 모습) · 앱 경고 · 바르게 쓴 표.
+
+    경고 문구는 여기 적지 않고 _v1_data_checkup 을 실제로 돌려서 보여 준다.
+    (점검 기능이 바뀌어도 안내와 실제 경고가 어긋나지 않는다.)
+    match: 점검 결과 중 이 사례를 대표하는 제목에 들어 있는 글자
+    """
+    right = pd.DataFrame({"처리구": ["대조구", "대조구", "처리1", "처리1"], "반복": [1, 2, 1, 2],
+                          "수량": [600, 610, 650, 640]})
+    _tpl = "일반 포장시험(처리×반복)"
+    _ex = _V1_TEMPLATE_EXAMPLES[_tpl]
+    return [
+        {"name": "표 위에 제목 행·병합셀",
+         "why": "엑셀 맨 위에 '2025 고추 시험 결과' 같은 제목을 넣거나 처리구 칸을 병합하면, 앱은 제목을 변수명으로 읽어요.",
+         "wrong": pd.DataFrame([["처리구", "반복", "수량"], ["대조구", 1, 600], [None, 2, 610], [None, 3, 605]],
+                               columns=["2025 결과", "열", "열_2"]),
+         "wrong_cap": "앱이 읽은 모습 (제목이 변수명 자리에 들어감)",
+         "match": "첫 행이 변수명", "right": right},
+        {"name": "숫자 칸에 단위·글자",
+         "why": "`610kg`, `결측`처럼 숫자 칸에 글자가 하나라도 섞이면 그 열 전체가 글자로 읽혀 계산할 수 없어요.",
+         "wrong": pd.DataFrame({"처리구": ["대조구", "대조구", "대조구", "처리1", "처리1", "처리1"],
+                                "수량": ["600", "610kg", "605", "650", "결측", "655"]}),
+         "match": "숫자가 아닌 값",
+         "right": pd.DataFrame({"처리구": ["대조구", "대조구", "대조구", "처리1", "처리1", "처리1"],
+                                "수량": [600.0, 610.0, 605.0, 650.0, None, 655.0]})},
+        {"name": "평균·합계 행을 같이 입력",
+         "why": "처리별 평균이나 합계 행이 섞이면 그 행도 하나의 '처리'로 계산돼요.",
+         "wrong": pd.DataFrame({"처리구": ["대조구", "대조구", "대조구 평균", "처리1", "처리1", "처리1 평균"],
+                                "수량": [600, 610, 605, 650, 640, 645]}),
+         "match": "요약 행", "right": right},
+        {"name": "처리구를 가로로 펼침",
+         "why": "처리구마다 열을 따로 만들면 앱이 어느 열이 처리인지 알 수 없어요.",
+         "wrong": pd.DataFrame({"반복": [1, 2], "대조구": [600, 610], "처리1": [650, 640]}),
+         "match": "가로로 펼쳐진", "right": right},
+        {"name": "반복을 여러 열로 나눔",
+         "why": "`반복1 수량`, `반복2 수량`처럼 나누면 반복 효과를 계산할 수 없어요.",
+         "wrong": pd.DataFrame({"처리구": ["대조구", "처리1"], "반복1 수량": [600, 650], "반복2 수량": [610, 640]}),
+         "match": "반복이 여러 열", "right": right},
+        {"name": "같은 처리명을 다르게 씀",
+         "why": "`대조구`와 `대조 구`, `대조구 `(뒤 공백)는 앱에서 서로 다른 처리로 나뉘어요.",
+         "wrong": pd.DataFrame({"처리구": ["대조구", "대조 구", "처리1", "처리1"], "반복": [1, 2, 1, 2],
+                                "수량": [600, 610, 650, 640]}),
+         "match": "다르게 적힌", "right": right},
+        {"name": "반복마다 평균값을 복사",
+         "why": "반복별 원자료 대신 평균을 복사해 넣으면 오차가 0이 되어 결과를 믿을 수 없어요.",
+         "wrong": pd.DataFrame({"처리구": ["대조구"] * 3 + ["처리1"] * 3, "반복": [1, 2, 3] * 2,
+                                "수량": [605.0] * 3 + [645.0] * 3}),
+         "match": "거의 같습니다", "right": right},
+        {"name": "양식의 예시 행을 안 지움",
+         "why": "엑셀 양식의 회색 예시 행을 남겨 두면 예시 값까지 분석에 들어가요.",
+         "wrong": pd.DataFrame(_ex[:2] + [["처리2", 1, 78.2, 335.0, 690.0]], columns=_V1_TEMPLATES[_tpl]),
+         "match": "예시 행", "right": None},
+        {"name": "변수명이 위·아래 두 줄",
+         "why": "`생육` 아래 `초장`·`경경`처럼 두 줄로 쓰면 아래 줄 이름을 못 읽어요. "
+                "📂 데이터 불러오기의 **'변수명이 두 줄인 파일'**을 켜고 다시 올리면 `생육 초장(cm)`처럼 합쳐 읽어요.",
+         "wrong": pd.DataFrame([[None, "초장(cm)", "경경(mm)"], ["대조구", 72.3, 14.1], ["처리1", 75.6, 14.8]],
+                               columns=["처리구", "생육", "열"]),
+         "wrong_cap": "앱이 읽은 모습 (아래 줄 이름이 값으로 들어감)",
+         "match": "첫 행이 변수명", "right": None},
+    ]
 
 
 def _v1_render_checkup(findings, compact=False):
@@ -5935,6 +6176,380 @@ _VOICE_PAGE_CSS = """
 </style>
 """
 
+# 실시간 받아쓰기 부품. 브라우저 내장 음성 인식(크롬·사파리·엣지)으로 말하는 동안 바로 행을 채운다.
+# AI 호출·API 키가 필요 없고, 행이 확정될 때마다 {"sid", "rows": 누적 행}을 파이썬으로 보낸다.
+# VP(문장→행 규칙)는 파이썬 voice_parse_local과 같은 규칙이다(tests/test_voice_live.py에서 비교).
+_VOICE_LIVE_HTML = r"""<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--ink:#17344B;--mute:#6B7C8A;--ok:#1E7A45;--okbg:#E8F6EE;--line:#D5E3EA;--card:#FFFFFF;
+      --chip:#F7FAFC;--new:#FFF4C2;--go:#2F7D5B;--rec:#E8484D}
+body.dark{--ink:#E8EEF2;--mute:#9DB0BE;--ok:#7FD9A5;--okbg:#183A2A;--line:#33444F;--card:#1B2630;
+          --chip:#22313C;--new:#4A4220}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:transparent;color:var(--ink);
+  font-family:"Pretendard","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+.wrap{padding:2px 2px 6px}
+.mic{display:flex;align-items:center;gap:14px;width:100%;border:2px solid var(--line);background:var(--card);
+  border-radius:18px;padding:12px 14px;cursor:pointer;color:var(--ink);text-align:left;font:inherit}
+.mic .dot{flex:none;width:60px;height:60px;border-radius:50%;background:var(--go);display:flex;
+  align-items:center;justify-content:center}
+.mic .dot svg{width:30px;height:30px;fill:#fff}
+.mic.on{border-color:var(--rec)}
+.mic.on .dot{background:var(--rec);animation:pulse 1.4s infinite}
+.mic.off{opacity:.55;cursor:not-allowed}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(232,72,77,.45)}70%{box-shadow:0 0 0 14px rgba(232,72,77,0)}
+  100%{box-shadow:0 0 0 0 rgba(232,72,77,0)}}
+.t1{display:block;font-size:1.08rem;font-weight:700}
+.t2{display:block;font-size:.85rem;color:var(--mute);margin-top:2px}
+.heard{min-height:1.5em;margin:10px 2px 8px;font-size:1.05rem;line-height:1.5;word-break:keep-all}
+.heard .i{color:var(--mute)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px}
+.cap{font-size:.82rem;color:var(--mute);margin:0 0 6px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px dashed var(--line);border-radius:10px;padding:5px 9px;min-width:70px;background:var(--chip)}
+.chip b{display:block;font-size:.74rem;color:var(--mute);font-weight:600}
+.chip span{font-size:1.05rem;font-weight:700}
+.chip.f{border:1px solid #9AD3B1;background:var(--okbg)}
+.chip.f span{color:var(--ok)}
+.btns{display:flex;gap:8px;margin-top:8px}
+.btns button{flex:1;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;
+  padding:9px;font:inherit;font-size:.95rem;cursor:pointer}
+.btns button.p{background:var(--go);border-color:var(--go);color:#fff;font-weight:700}
+.btns button:disabled{opacity:.4;cursor:default}
+.tbl{overflow-x:auto;margin-top:10px}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;white-space:nowrap}
+th{color:var(--mute);font-weight:600}
+tr.new td{background:var(--new)}
+.msg{margin-top:8px;padding:8px 10px;border-radius:10px;background:#FDECEC;color:#8A1F23;font-size:.9rem;
+  line-height:1.45;display:none}
+.tip{font-size:.8rem;color:var(--mute);margin-top:6px;line-height:1.45}
+</style></head><body><div class="wrap">
+<button id="mic" class="mic" type="button"><span class="dot"><svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></span><span><span class="t1" id="micT">눌러서 받아쓰기 시작</span><span class="t2" id="micS">말하는 동안 아래 칸이 바로 채워져요</span></span></button>
+<div class="heard" id="heard"></div>
+<div class="card">
+  <p class="cap" id="cap">지금 말하는 행</p>
+  <div class="chips" id="chips"></div>
+  <div class="btns"><button id="bClear" type="button">✖ 이 행 지우기</button><button id="bCommit" class="p" type="button">✔ 이 행 넣기</button></div>
+  <div class="tbl" id="tbl"></div>
+</div>
+<div class="msg" id="msg"></div>
+<div class="tip">모든 열이 채워지면 자동으로 다음 행으로 넘어가요. 중간에 넘기려면 “<b>다음</b>”, 이 행을 다시 말하려면 “<b>취소</b>”, 숫자를 고치려면 “70 <b>아니</b> 71”처럼 말하세요.</div>
+</div>
+<script>
+// ==== VOICE PARSER START
+var VP = (function () {
+  var DIG = {"영":0,"공":0,"일":1,"이":2,"삼":3,"사":4,"오":5,"육":6,"륙":6,"칠":7,"팔":8,"구":9};
+  var POW = {"십":10,"백":100,"천":1000};
+  var LETTER = {"에이":"A","비":"B","씨":"C","디":"D"};
+  var NUM_RE = /^(-?\d+(?:\.\d+)?)\s*(?:킬로그램|킬로|kg|그램|g|센티미터|센티|cm|밀리미터|밀리|mm|미터|m|개|번|회|퍼센트|%|도|점)?$/i;
+  var KNUM_RE = /(^|\s|-)([영공일이삼사오육륙칠팔구십백천만]+)(?:\s*점\s*([영공일이삼사오육륙칠팔구]+))?(?=$|\s)/g;
+  var NEXT_RE = /(?:^|\s+)(?:다음\s*행|다음|엔터)(?=$|[\s,.!?])[.!?]?/;
+  var CANCEL_RE = /(?:^|\s+)취소(?=$|[\s,.!?])[.!?]?/;
+  function digits(w) { var s = ""; for (var i = 0; i < w.length; i++) s += DIG[w[i]]; return s; }
+  function sino(w) {
+    if (!/^[영공일이삼사오육륙칠팔구십백천만]+$/.test(w || "")) return null;
+    if (!/[십백천만]/.test(w)) return parseInt(digits(w), 10);
+    var total = 0, sec = 0, cur = null;
+    for (var i = 0; i < w.length; i++) {
+      var ch = w[i];
+      if (ch in DIG) { if (cur !== null) return null; cur = DIG[ch]; }
+      else if (ch in POW) { sec += (cur === null ? 1 : cur) * POW[ch]; cur = null; }
+      else { total += ((sec + (cur || 0)) || 1) * 10000; sec = 0; cur = null; }
+    }
+    return total + sec + (cur || 0);
+  }
+  function num(s) {
+    var t = String(s).replace(/마이너스\s*/g, "-").replace(/(\d),(\d{3})(?!\d)/g, "$1$2");
+    t = t.replace(KNUM_RE, function (m, pre, a, b) {
+      var v = sino(a); if (v === null) return m;
+      return pre + String(v) + (b ? "." + digits(b) : "");
+    });
+    t = t.replace(/(\d)\s*점\s*(\d)/g, "$1.$2").replace(/\s+/g, " ").trim();
+    var m = t.match(NUM_RE);
+    return m ? Number(m[1]) : null;
+  }
+  function clean(seg) {
+    var parts = String(seg || "").split(/\s*아니(?:요|고|야)?[,\s]+/);
+    var s = parts[parts.length - 1];
+    s = s.replace(/^[\s,.:;·~]+/, "").replace(/[\s,.;:!?·]+$/, "");
+    if (/\S\s+\S/.test(s)) s = s.replace(/^(은|는|이|가|을|를|의|도|요)\s+/, "");
+    s = s.replace(/\s*(입니다|이에요|예요|이고요|이고|이요|고요|이며|요)$/, "") || s;
+    s = s.trim();
+    if (!s) return null;
+    var n = num(s);
+    if (n !== null) return n;
+    return LETTER.hasOwnProperty(s) ? LETTER[s] : s;
+  }
+  function colKey(c) {
+    var k = String(c).replace(/\([^)]*\)|\[[^\]]*\]/g, "").replace(/\s+/g, "");
+    return k || String(c).replace(/\s+/g, "");
+  }
+  function escRe(ch) { return ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+  function splitRows(text) {
+    var dropCancelled = function (p) { var a = p.split(CANCEL_RE); return a[a.length - 1].trim(); };
+    var pieces = String(text || "").split(NEXT_RE);
+    return { done: pieces.slice(0, -1).map(dropCancelled), rest: dropCancelled(pieces[pieces.length - 1]) };
+  }
+  function parse(text, cols) {
+    text = String(text || "");
+    cols = (cols || []).map(String);
+    var row = {};
+    if (!cols.length) {
+      var t = text.replace(/(\d)\s*점\s*(\d)/g, "$1.$2");
+      var toks = t.split(/[\s,]+/).filter(function (x) { return x; });
+      var i = 0;
+      while (i < toks.length) {
+        var lab = toks[i];
+        if (num(lab) !== null || i + 1 >= toks.length) { i++; continue; }
+        var v = toks[i + 1], j = i + 2;
+        if (j + 1 < toks.length && toks[j] === "점") { v = v + " 점 " + toks[j + 1]; j += 2; }
+        var cv = clean(v);
+        if (cv !== null) row[lab] = cv;
+        i = j;
+      }
+      return row;
+    }
+    var spans = [];
+    cols.slice().sort(function (a, b) { return colKey(b).length - colKey(a).length; }).forEach(function (c) {
+      var re = new RegExp(Array.from(colKey(c)).map(escRe).join("\\s*"), "gi"), m;
+      while ((m = re.exec(text)) !== null) {
+        var s = m.index, e = s + m[0].length;
+        if (e === s) { re.lastIndex++; continue; }
+        if (!spans.some(function (p) { return s < p.e && e > p.s; })) spans.push({ c: c, s: s, e: e });
+      }
+    });
+    spans.sort(function (a, b) { return a.s - b.s; });
+    cols.forEach(function (c) { row[c] = null; });
+    spans.forEach(function (p, k) {
+      var v = clean(text.slice(p.e, k + 1 < spans.length ? spans[k + 1].s : text.length));
+      if (v !== null) row[p.c] = v;
+    });
+    return row;
+  }
+  return { parse: parse, splitRows: splitRows, num: num };
+})();
+// ==== VOICE PARSER END
+
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+var S = { args: { columns: [], rows: [], total: 0, seen: {} },
+          sid: "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+          committed: [], finalBuf: "", interim: "", listening: false, rec: null,
+          ignoreBelow: 0, lastLen: 0, done: {}, wake: null, flash: 0, auto: false, restored: false };
+var STORE = "ssa_voice_live";
+// 화면이 다시 그려져 이 부품이 새로 열려도(연결 끊김 등) 같은 접속이면 행·받아쓰기를 이어 간다.
+function saveState() {
+  try { sessionStorage.setItem(STORE, JSON.stringify({ token: S.args.token, sid: S.sid, committed: S.committed,
+        finalBuf: S.finalBuf, listening: S.listening, t: Date.now() })); } catch (e) {}
+}
+function tryRestore() {
+  if (S.restored) return;
+  S.restored = true;
+  var d = null;
+  try { d = JSON.parse(sessionStorage.getItem(STORE) || "null"); } catch (e) {}
+  if (!d || !S.args.token || d.token !== S.args.token || Date.now() - d.t > 6 * 3600 * 1000) { saveState(); return; }
+  S.sid = d.sid; S.committed = d.committed || []; S.finalBuf = d.finalBuf || "";
+  if (S.committed.length > ((S.args.seen || {})[S.sid] || 0)) send();   // 못 받은 행이 있으면 다시 보냄
+  if (d.listening && SR) { S.auto = true; startRec(); }
+}
+var $ = function (id) { return document.getElementById(id); };
+
+function post(type, extra) {
+  var m = { isStreamlitMessage: true, type: type };
+  for (var k in (extra || {})) m[k] = extra[k];
+  window.parent.postMessage(m, "*");
+}
+var lastH = 0;
+function height() {   // 내용 높이만 잰다(문서 높이는 틀 높이 이상이라 재면 계속 커짐)
+  var h = Math.ceil(document.querySelector(".wrap").getBoundingClientRect().height) + 4;
+  if (h !== lastH) { lastH = h; post("streamlit:setFrameHeight", { height: h }); }
+}
+function send() { post("streamlit:setComponentValue", { value: { sid: S.sid, rows: S.committed }, dataType: "json" }); }
+function esc(v) {
+  return String(v === null || v === undefined ? "" : v).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; });
+}
+function cols() {
+  var c = S.args.columns || [];
+  if (c.length) return c;
+  return S.committed.length ? Object.keys(S.committed[0]) : [];
+}
+function filled(v) { return v !== null && v !== undefined && v !== ""; }
+function hasVal(r) { return Object.keys(r || {}).some(function (k) { return filled(r[k]); }); }
+function full(r, c) { return c.length > 0 && c.every(function (k) { return filled(r[k]); }); }
+
+function commitRow(r) {
+  if (!hasVal(r)) return false;
+  S.committed.push(r);
+  S.flash = Date.now();
+  send();
+  saveState();
+  try { if (navigator.vibrate) navigator.vibrate(40); } catch (e) {}
+  return true;
+}
+function absorbFinal() {
+  var sp = VP.splitRows(S.finalBuf);
+  sp.done.forEach(function (t) { commitRow(VP.parse(t, cols())); });
+  S.finalBuf = sp.rest;
+  var c = cols();
+  if (c.length) {
+    var r = VP.parse(S.finalBuf, c);
+    if (full(r, c)) { commitRow(r); S.finalBuf = ""; }
+  }
+}
+function liveText() { return VP.splitRows((S.finalBuf + " " + S.interim).trim()).rest; }
+function resetRow() { S.finalBuf = ""; S.interim = ""; S.ignoreBelow = S.lastLen; }
+
+function showMsg(t) { var m = $("msg"); m.innerHTML = t || ""; m.style.display = t ? "block" : "none"; height(); }
+
+function drawMic() {
+  var b = $("mic");
+  b.className = "mic" + (S.listening ? " on" : "") + (SR ? "" : " off");
+  $("micT").textContent = S.listening ? "듣는 중… 누르면 멈춤" : "눌러서 받아쓰기 시작";
+  $("micS").textContent = S.listening ? "한 행씩 말하세요. 예) 처리구 A 반복 1 초장 72.3"
+                                      : "말하는 동안 아래 칸이 바로 채워져요";
+}
+
+function draw() {
+  var c = cols(), lt = liveText(), r = VP.parse(lt, c);
+  $("heard").innerHTML = S.finalBuf || S.interim
+    ? esc(S.finalBuf) + ' <span class="i">' + esc(S.interim) + "</span>"
+    : '<span class="i">' + (S.listening ? "듣고 있어요…" : "") + "</span>";
+  var keys = c.length ? c : Object.keys(r);
+  $("chips").innerHTML = keys.length ? keys.map(function (k) {
+    var v = r[k];
+    return '<div class="chip' + (filled(v) ? " f" : "") + '"><b>' + esc(k) + "</b><span>" +
+           (filled(v) ? esc(v) : "—") + "</span></div>";
+  }).join("") : '<span class="cap">예) “처리구 A, 반복 1, 초장 72.3, 수량 615.4”</span>';
+  $("bCommit").disabled = !hasVal(r);
+  $("bClear").disabled = !lt;
+
+  var seen = (S.args.seen || {})[S.sid] || 0;
+  var pending = S.committed.slice(seen);
+  var base = S.args.rows || [];
+  var all = base.concat(pending), shown = all.slice(-3);
+  var total = (S.args.total || 0) + pending.length;
+  var head = c.length ? c : (shown.length ? Object.keys(shown[0]) : []);
+  var recent = Date.now() - S.flash < 6000;
+  $("cap").textContent = "지금 말하는 행" + (total ? "  ·  표에 " + total + "행" : "");
+  $("tbl").innerHTML = shown.length ? "<table><tr>" + head.map(function (h) { return "<th>" + esc(h) + "</th>"; }).join("") +
+    "</tr>" + shown.map(function (row, i) {
+      var isNew = recent && i === shown.length - 1;
+      return '<tr class="' + (isNew ? "new" : "") + '">' + head.map(function (h) { return "<td>" + esc(row[h]) + "</td>"; }).join("") + "</tr>";
+    }).join("") + "</table>" : "";
+  height();
+}
+
+function keepAwake(on) {
+  try {
+    if (on && navigator.wakeLock && !S.wake) navigator.wakeLock.request("screen").then(function (w) { S.wake = w; }).catch(function () {});
+    if (!on && S.wake) { S.wake.release(); S.wake = null; }
+  } catch (e) {}
+}
+
+function startRec() {
+  if (!SR) return;
+  showMsg("");
+  var rec = new SR();
+  rec.lang = "ko-KR";
+  rec.interimResults = true;
+  rec.continuous = !MOBILE;          // 휴대폰은 한 번씩 끊어 듣고 자동으로 다시 시작(중복 인식 방지)
+  rec.maxAlternatives = 1;
+  rec.onstart = function () { S.ignoreBelow = 0; S.lastLen = 0; S.done = {}; };
+  rec.onresult = function (e) {
+    var inter = "";
+    for (var i = e.resultIndex; i < e.results.length; i++) {
+      var res = e.results[i], t = res[0].transcript;
+      if (res.isFinal) {
+        if (i < S.ignoreBelow || S.done[i]) continue;
+        S.done[i] = 1;
+        S.finalBuf = (S.finalBuf + " " + t).trim();
+        absorbFinal();
+      } else if (i >= S.ignoreBelow) {
+        inter += t;
+      }
+    }
+    S.interim = inter;
+    S.lastLen = e.results.length;
+    S.auto = false;
+    saveState();
+    draw();
+  };
+  rec.onerror = function (e) {
+    var er = e.error || "";
+    if ((er === "not-allowed" || er === "service-not-allowed") && S.auto) {
+      S.listening = false; S.auto = false; saveState();
+      showMsg("화면이 새로 그려져 받아쓰기가 멈췄어요. 마이크를 다시 눌러 주세요. 입력한 행은 그대로 있어요.");
+    } else if (er === "not-allowed" || er === "service-not-allowed") {
+      S.listening = false;
+      showMsg("마이크를 쓸 수 없어요. 주소창 옆 자물쇠(또는 설정)에서 <b>마이크 허용</b>을 켠 뒤 다시 눌러 주세요." +
+              (/iPhone|iPad/i.test(navigator.userAgent) ? "<br>아이폰은 설정 → Siri 및 검색에서 <b>Siri 받아쓰기</b>가 켜져 있어야 해요." : ""));
+    } else if (er === "network") {
+      S.listening = false;
+      showMsg("인터넷 연결이 불안정해 받아쓰기가 멈췄어요. 잠시 후 다시 눌러 주세요.");
+    } else if (er === "audio-capture") {
+      S.listening = false;
+      showMsg("마이크를 찾지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인해 주세요.");
+    }
+  };
+  rec.onend = function () {
+    if (S.interim) { S.finalBuf = (S.finalBuf + " " + S.interim).trim(); S.interim = ""; absorbFinal(); saveState(); }
+    if (S.listening) {
+      setTimeout(function () { if (S.listening) { try { rec.start(); } catch (x) {} } }, 120);
+    } else {
+      keepAwake(false);
+    }
+    drawMic(); draw();
+  };
+  S.rec = rec;
+  S.listening = true;
+  saveState();
+  try { rec.start(); } catch (x) {}
+  keepAwake(true);
+  drawMic(); draw();
+}
+function stopRec() {
+  S.listening = false;
+  saveState();
+  try { if (S.rec) S.rec.stop(); } catch (x) {}
+  keepAwake(false);
+  drawMic(); draw();
+}
+
+$("mic").onclick = function () {
+  if (!SR) return;
+  if (S.listening) stopRec(); else startRec();
+};
+$("bCommit").onclick = function () {
+  if (commitRow(VP.parse(liveText(), cols()))) { resetRow(); saveState(); }
+  draw();
+};
+$("bClear").onclick = function () { resetRow(); saveState(); draw(); };
+
+window.addEventListener("message", function (e) {
+  var d = e.data || {};
+  if (d.type !== "streamlit:render") return;
+  S.args = d.args || S.args;
+  var th = d.theme || {};
+  document.body.classList.toggle("dark", th.base === "dark");
+  tryRestore();
+  draw();
+});
+if (!SR) {
+  showMsg("이 브라우저는 실시간 받아쓰기를 지원하지 않아요. 휴대폰은 <b>크롬(안드로이드)·사파리(아이폰)</b>, PC는 크롬·엣지에서 열어 주세요." +
+          "<br>카카오톡 등 앱 안에서 열었다면 ‘다른 브라우저로 열기’를 눌러 주세요. 또는 위에서 <b>녹음 후 AI 정리</b>를 고르세요.");
+}
+drawMic(); draw();
+post("streamlit:componentReady", { apiVersion: 1 });
+</script></body></html>
+"""
+
+
+_VOICE_WAYS = ["⚡ 실시간 받아쓰기", "🎙️ 녹음 후 AI 정리"]
+
 
 def _voice_columns_from_text(text):
     return [c.strip() for c in re.split(r"[,，/·]", str(text or "")) if c.strip()]
@@ -5986,12 +6601,107 @@ def _voice_process(binary, mime_type):
                             "한국어 음성을 정확히 전사하세요.", kind="audio")
     if str(tr).startswith("⚠️"):
         return None, "", [str(tr)]
+    row, warn = voice_text_to_row(tr, _voice_target_columns())
+    return row, tr, list(warn or [])
+
+
+_VOICE_LIVE_LOADER = """from streamlit.components.v1 import declare_component
+
+
+def make(path):
+    return declare_component("ssa_voice_live", path=path)
+"""
+
+
+def _voice_live_declare(html):
+    """부품 HTML을 임시 폴더에 써서 Streamlit 부품으로 등록한다(저장소에 폴더를 따로 올릴 필요 없음).
+
+    declare_component는 호출한 모듈 이름으로 부품을 구분하므로, 작은 로더 모듈을 만들어 그 안에서 호출한다.
+    """
+    import hashlib, importlib.util, os, sys, tempfile
+    d = os.path.join(tempfile.gettempdir(), "ssa_voice_live_" + hashlib.sha1(html.encode("utf-8")).hexdigest()[:10])
+    page, loader = os.path.join(d, "index.html"), os.path.join(d, "ssa_voice_live_loader.py")
+    if not os.path.exists(page) or not os.path.exists(loader):
+        os.makedirs(d, exist_ok=True)
+        for fp, text in ((page, html), (loader, _VOICE_LIVE_LOADER)):
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(text)
+    mod = sys.modules.get("ssa_voice_live_loader")
+    if mod is None or os.path.dirname(getattr(mod, "__file__", "")) != d:
+        spec = importlib.util.spec_from_file_location("ssa_voice_live_loader", loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["ssa_voice_live_loader"] = mod
+        spec.loader.exec_module(mod)
+    return mod.make(d)
+
+
+def _voice_records(df):
+    """표 → 행 목록. 빈칸·NaN은 None으로(JSON·Firestore에 그대로 실을 수 있게)."""
+    return df.astype(object).where(pd.notna(df), None).to_dict("records")
+
+
+def _voice_jsonable(rows):
+    """부품으로 보낼 행: NumPy 값은 파이썬 값으로, NaN·무한대는 None으로(JSON에 NaN이 섞이면 부품이 깨진다)."""
+    import math
+
+    def one(v):
+        if hasattr(v, "item") and not isinstance(v, str):
+            try:
+                v = v.item()
+            except Exception:
+                v = str(v)
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v if v is None or isinstance(v, (str, int, float, bool)) else str(v)
+    return [{str(k): one(v) for k, v in r.items()} for r in rows]
+
+
+def _voice_target_columns():
     cols = _voice_columns_from_text(st.session_state.get("voice_cols_text"))
     rows = st.session_state.get("voice_rows") or []
     if not cols and rows:
         cols = list(rows[0].keys())          # 열 이름을 안 적었으면 첫 행의 열을 계속 사용
-    row, warn = voice_text_to_row(tr, cols)
-    return row, tr, list(warn or [])
+    return cols
+
+
+def _voice_live_absorb(val):
+    """실시간 부품이 보낸 누적 행 중 아직 표에 넣지 않은 행만 붙인다. 반환: 새로 붙인 행 수.
+
+    부품은 확정된 행을 모두 다시 보내므로(중간 전송이 묶여도 빠지지 않게) 부품별(sid)로
+    몇 행까지 받았는지 기억한다. 표를 비우거나 마지막 행을 취소해도 같은 행이 되살아나지 않는다.
+    """
+    if not isinstance(val, dict):
+        return 0
+    sid, rows = str(val.get("sid") or ""), val.get("rows")
+    if not sid or not isinstance(rows, list):
+        return 0
+    seen = st.session_state.setdefault("_voice_live_seen", {})
+    start = int(seen.get(sid, 0))
+    seen[sid] = len(rows)
+    new = [r for r in rows[start:] if isinstance(r, dict)]
+    if not new:
+        return 0
+    cols = _voice_target_columns() or list(new[0].keys())
+    new = [{c: r.get(c) for c in cols} for r in new]
+    st.session_state.setdefault("voice_rows", []).extend(new)
+    _voice_draft_save()
+    _record_usage("음성 입력(실시간)")
+    return len(new)
+
+
+def _voice_live_widget():
+    key = "voice_live_comp"
+    _voice_live_absorb(st.session_state.get(key))       # 앞 실행에서 들어온 행을 먼저 반영
+    rows = st.session_state.get("voice_rows") or []
+    token = st.session_state.setdefault("_voice_live_token", __import__("uuid").uuid4().hex)
+    args = {"token": token,
+            "columns": _voice_target_columns(),
+            "rows": _voice_jsonable(rows[-3:]),
+            "total": len(rows),
+            "seen": dict(st.session_state.get("_voice_live_seen") or {})}
+    val = _voice_live_declare(_VOICE_LIVE_HTML)(key=key, default=None, height=330, **args)
+    if _voice_live_absorb(val):
+        st.rerun()                                       # 부품 아래 표에 새 행이 바로 보이도록
 
 
 def _voice_ai_settings():
@@ -6011,8 +6721,6 @@ def _voice_ai_settings():
 def render_voice_mode():
     st.markdown(_VOICE_PAGE_CSS, unsafe_allow_html=True)
     st.markdown("### 🎤 음성 데이터 입력")
-    st.markdown('<div class="v-hint">마이크를 누르고 <b>한 행씩</b> 말한 뒤 다시 누르면 표에 추가됩니다.<br>'
-                '예) “처리구 A, 반복 1, 초장 72.3, 수량 615.4”</div>', unsafe_allow_html=True)
 
     # 첫 접속: PC/다른 기기에서 입력하던 행과 열 이름을 이어서 불러온다.
     if not st.session_state.get("_voice_draft_loaded"):
@@ -6023,34 +6731,44 @@ def render_voice_mode():
         if d and d.get("columns") and not st.session_state.get("voice_cols_text"):
             st.session_state["voice_cols_text"] = d["columns"]
 
-    need_key = not st.session_state.get("api_key") or str(st.session_state.get("ai_provider", "")).startswith("Claude")
-    with st.expander("🔌 음성 인식 설정", expanded=need_key):
-        _voice_ai_settings()
+    way = st.radio("입력 방식", _VOICE_WAYS, key="voice_m_way", horizontal=True,
+                   help="실시간: 말하는 동안 표가 바로 채워집니다(브라우저 음성 인식, API 키 불필요).\n\n"
+                        "녹음 후 AI 정리: 시끄러운 곳이나 실시간 인식이 안 되는 브라우저에서 사용하세요(API 키 필요).")
     st.text_input("열 이름 (선택)", key="voice_cols_text",
                   placeholder="예) 처리구, 반복, 초장, 수량",
-                  help="적어 두면 모든 행이 같은 열로 정리됩니다. 비워 두면 첫 행을 기준으로 맞춥니다.")
+                  help="적어 두면 모든 행이 같은 열로 정리되고, 실시간 모드에서는 모든 열이 채워질 때 자동으로 다음 행으로 넘어갑니다. "
+                       "비워 두면 첫 행을 기준으로 맞춥니다.")
 
-    n = st.session_state.setdefault("voice_rec_n", 0)
-    aud = st.audio_input("🎙️ 눌러서 말하기", sample_rate=16000, key=f"voice_m_audio_{n}")
-    if aud is not None:
-        if not st.session_state.get("api_key"):
-            st.error("위 '🔌 음성 인식 설정'에서 API 키를 먼저 넣어 주세요.")
-        else:
-            with st.spinner("듣고 표로 정리하는 중..."):
-                row, tr, warn = _voice_process(aud.getvalue(), getattr(aud, "type", None))
-            st.session_state["voice_transcript"] = tr
-            st.session_state["voice_warn"] = warn
-            if row is not None:
-                st.session_state.setdefault("voice_rows", []).append(row)
-                _voice_draft_save()
-                _record_usage("음성 입력(휴대폰)")
-            st.session_state["voice_rec_n"] = n + 1       # 다음 행을 위해 녹음기를 새로 만든다
-            st.rerun()
+    if way == _VOICE_WAYS[0]:
+        # 실시간 부품 위에는 조건부 요소를 두지 않는다(위치가 바뀌면 부품이 새로 열려 받아쓰기가 끊김).
+        _voice_live_widget()
+    else:
+        st.markdown('<div class="v-hint">마이크를 누르고 <b>한 행씩</b> 말한 뒤 다시 누르면 표에 추가됩니다.<br>'
+                    '예) “처리구 A, 반복 1, 초장 72.3, 수량 615.4”</div>', unsafe_allow_html=True)
+        need_key = not st.session_state.get("api_key") or str(st.session_state.get("ai_provider", "")).startswith("Claude")
+        with st.expander("🔌 음성 인식 설정", expanded=need_key):
+            _voice_ai_settings()
+        n = st.session_state.setdefault("voice_rec_n", 0)
+        aud = st.audio_input("🎙️ 눌러서 말하기", sample_rate=16000, key=f"voice_m_audio_{n}")
+        if aud is not None:
+            if not st.session_state.get("api_key"):
+                st.error("위 '🔌 음성 인식 설정'에서 API 키를 먼저 넣어 주세요.")
+            else:
+                with st.spinner("듣고 표로 정리하는 중..."):
+                    row, tr, warn = _voice_process(aud.getvalue(), getattr(aud, "type", None))
+                st.session_state["voice_transcript"] = tr
+                st.session_state["voice_warn"] = warn
+                if row is not None:
+                    st.session_state.setdefault("voice_rows", []).append(row)
+                    _voice_draft_save()
+                    _record_usage("음성 입력(휴대폰)")
+                st.session_state["voice_rec_n"] = n + 1       # 다음 행을 위해 녹음기를 새로 만든다
+                st.rerun()
 
-    if st.session_state.get("voice_transcript"):
+    if way != _VOICE_WAYS[0] and st.session_state.get("voice_transcript"):
         st.markdown(f'<div class="v-last">🗣️ {st.session_state["voice_transcript"]}</div>',
                     unsafe_allow_html=True)
-    for w in (st.session_state.get("voice_warn") or [])[:3]:
+    for w in ((st.session_state.get("voice_warn") or [])[:3] if way != _VOICE_WAYS[0] else []):
         (st.error if str(w).startswith("⚠️") else st.warning)(w if str(w).startswith("⚠️") else f"확인 필요: {w}")
 
     rows = st.session_state.get("voice_rows") or []
@@ -6059,8 +6777,10 @@ def render_voice_mode():
         vdf = pd.DataFrame(rows)
         edited = st.data_editor(vdf, num_rows="dynamic", width="stretch",
                                 key=f"voice_m_editor_{len(rows)}_{st.session_state.get('voice_rec_n', 0)}")
-        new_rows = edited.where(pd.notna(edited), None).to_dict("records")
-        if new_rows != vdf.where(pd.notna(vdf), None).to_dict("records"):
+        # 빈칸(NaN)은 None으로 바꿔 비교·저장한다. NaN은 NaN과 같지 않아 매 실행마다 '바뀜'으로
+        # 판정되어 저장이 반복되고, JSON에도 실을 수 없다.
+        new_rows = _voice_records(edited)
+        if new_rows != _voice_records(vdf):
             st.session_state["voice_rows"] = new_rows
             _voice_draft_save()
         c1, c2 = st.columns(2)
@@ -6153,12 +6873,35 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         "수량(kg/10a)": [500, 510, 560, 555],
     }), hide_index=True, width="stretch")
     with st.expander("❌ 자주 틀리는 작성 예시"):
-        st.markdown("**처리구를 가로로 펼치지 마세요.**")
-        smart_table(pd.DataFrame({"반복": [1,2], "대조구": [500,510], "처리1": [560,555]}), hide_index=True, width="stretch")
-        st.markdown("→ `처리구 / 반복 / 수량` 세 열로 세로 입력합니다.")
-        st.markdown("**숫자와 단위를 섞지 마세요.**  `120kg`, `35cm`, `결측` ❌ → `120`, `35`, 빈칸 ✅")
-        st.markdown("**병합셀·중간 합계행을 넣지 마세요.** 모든 행에 처리구/품종 값을 반복 입력하고 실제 관측값만 남깁니다.")
-        st.markdown("**반복을 여러 열로 만들지 마세요.** `반복1 수량 / 반복2 수량` ❌ → `반복` 열 + `수량` 열 ✅")
+        # 사례를 하나씩 골라 보게 한다(사이드바가 길어지지 않게). 경고 문구는 실제 점검 기능의 결과다.
+        _cases = _v1_wrong_cases()
+        _pick = st.selectbox("사례 고르기", [f"{i}. {c['name']}" for i, c in enumerate(_cases, 1)],
+                             key="sup_wrong_case")
+        _c = _cases[int(_pick.split(".")[0]) - 1]
+        st.markdown(_c["why"])
+        st.markdown("**❌ 이렇게 쓰면**")
+        if _c.get("wrong_cap"):
+            st.caption(_c["wrong_cap"])
+        def _guide_view(d):
+            # 사이드바가 좁아서 앞의 3개 열만, 빈칸은 빈칸으로, 정수는 소수점 없이 보여 준다.
+            v = d.iloc[:, :3].astype(object).where(d.iloc[:, :3].notna(), "")
+            v = v.map(lambda x: int(x) if isinstance(x, float) and float(x).is_integer() else x)
+            if d.shape[1] > 3:
+                st.caption(f"(열 {d.shape[1]}개 중 앞의 3개만 표시)")
+            smart_table(v, hide_index=True, width="stretch")
+        _guide_view(_c["wrong"])
+        _fs = [f for f in _v1_data_checkup(_c["wrong"])
+               if f["level"] in ("error", "warn") and _c["match"] in f["title"]]
+        if _fs:
+            _f = _fs[0]
+            st.markdown("**📋 앱에는 이렇게 떠요**")
+            _msg = f"{'❌' if _f['level'] == 'error' else '⚠️'} **{_f['title']}**"
+            if _f["fix"]:
+                _msg += f"  \n🔧 {_f['fix']}"
+            (st.error if _f["level"] == "error" else st.warning)(_msg)
+        if _c.get("right") is not None:
+            st.markdown("**✅ 이렇게 고쳐요**")
+            _guide_view(_c["right"])
     st.markdown("**엑셀 양식 (예시 포함)**")
     st.caption("회색 글씨(변수명·값)는 예시입니다. 내 시험에 맞게 바꿔 입력하세요.")
     _tpl_name = "일반 포장시험(처리×반복)"
@@ -8480,6 +9223,7 @@ def _ai_panel(df, menu_name):
         st.caption("첨부: " + ", ".join(getattr(f, "name", "?") for f in ups))
     b1, b2 = st.columns([3, 1])
     if b1.button("물어보기", key="gai_send", type="primary", width="stretch") and q.strip():
+        _prompt = None
         try:
             ctx = ""
             if df is not None:
@@ -8491,8 +9235,7 @@ def _ai_panel(df, menu_name):
             if ups:
                 per = max(1500, _ATT_LIMIT // len(ups))
                 att = "".join(_read_attachment(f, per) for f in ups)[:_ATT_LIMIT]
-            with st.spinner("AI가 생각하는 중..."):
-                ans = ai_call(
+            _prompt = (
                     "당신은 농업연구사를 돕는 통계 전문가이자 이 앱의 사용 안내자입니다. "
                     f"사용자는 지금 '{menu_name}' 화면을 보고 있습니다. "
                     "아래 실제 데이터 요약만 근거로 한국어로 쉽고 정확하게 답하세요. "
@@ -8500,13 +9243,27 @@ def _ai_panel(df, menu_name):
                     "앱 사용법을 묻는다면 화면 이름을 들어 안내하세요.\n\n"
                     + (ctx or "(현재 선택된 데이터가 없습니다.)")
                     + (f"\n\n[사용자가 올린 파일]{att}" if att else "")
-                    + f"\n\n질문: {q}", max_tokens=900)
+                    + f"\n\n질문: {q}")
         except Exception as _ex:
-            ans = f"⚠️ AI 호출 실패: {type(_ex).__name__}: {_ex}"
-        _qlog = q + (("\n\n📎 " + ", ".join(getattr(f, "name", "?") for f in ups))
-                     if ups else "")
-        st.session_state["gai_hist"] = (st.session_state.get("gai_hist", [])
-                                        + [("q", _qlog), ("a", ans)])[-12:]
+            st.session_state["gai_hist"] = (st.session_state.get("gai_hist", [])
+                                            + [("q", q), ("a", f"⚠️ 질문 준비 실패: {type(_ex).__name__}: {_ex}")])[-12:]
+        if _prompt:
+            _qlog = q + (("\n\n📎 " + ", ".join(getattr(f, "name", "?") for f in ups))
+                         if ups else "")
+            # 질문을 먼저 등록해 두면, 이 실행이 중간에 끊겨도 다음 실행에서 이어서 답을 받는다.
+            st.session_state["gai_pending"] = {"prompt": _prompt, "qlog": _qlog}
+    _pend = st.session_state.get("gai_pending")
+    if _pend:
+        with st.spinner("AI가 생각하는 중..."):
+            try:
+                ans = ai_call(_pend["prompt"], max_tokens=900)
+            except Exception as _ex:
+                ans = f"⚠️ AI 호출 실패: {type(_ex).__name__}: {_ex}"
+            if not str(ans or "").strip():
+                ans = "⚠️ AI 응답이 비어 있습니다. 다시 시도해 주세요."
+            st.session_state["gai_hist"] = (st.session_state.get("gai_hist", [])
+                                            + [("q", _pend["qlog"]), ("a", ans)])[-12:]
+            st.session_state["gai_pending"] = None
         st.rerun()
     if b2.button("지우기", key="gai_clear", width="stretch"):
         st.session_state["gai_hist"] = []
@@ -10513,14 +11270,18 @@ elif menu == "🧠 AI 도우미":
         st.info("AI 기능은 선택 사항입니다. API 키가 없어도 통계분석·설문·보고서는 사용할 수 있습니다.")
     if df is None:
         st.markdown("### 데이터 없이 질문하기")
-        _gq = st.text_area("통계나 앱 사용법을 물어보세요", placeholder="예) 난괴법 3반복 데이터는 엑셀을 어떻게 작성해?")
-        if st.button("AI에게 질문", type="primary") and _gq.strip():
+        _gq = st.text_area("통계나 앱 사용법을 물어보세요", key="ai_free_q",
+                           placeholder="예) 난괴법 3반복 데이터는 엑셀을 어떻게 작성해?")
+        _new = None
+        if st.button("AI에게 질문", type="primary", key="ai_free_btn") and _gq.strip():
             if not st.session_state.get("api_key"):
                 st.warning("위 AI 연결 설정에서 API 키를 먼저 연결해 주세요.")
             else:
-                with st.spinner("AI가 답변을 만드는 중..."):
-                    st.markdown(ai_call("농업연구 통계 초보자에게 쉽고 정확하게 한국어로 답하세요. 질문: " + _gq,
-                                        st.session_state.get("api_key"), st.session_state.get("ai_model_g")))
+                _new = "농업연구 통계 초보자에게 쉽고 정확하게 한국어로 답하세요. 질문: " + _gq
+        _ans = ai_job_run("free", _new)
+        if _ans:
+            st.markdown(_ans)
+            ai_disclaimer()
         st.stop()
     amode = st.radio("기능", ["결과를 자연어로 질문", "📝 데이터 자동 요약(초록 초안)",
                              "연구계획서 기반 통계 추천"], key="ai_mode")
@@ -10533,19 +11294,20 @@ elif menu == "🧠 AI 도우미":
         purpose = st.text_input("연구 목적/배경 (한 줄, 선택)",
                                 placeholder="예) 고추 신품종의 생육·수량 특성 비교")
         want = st.radio("형태", ["핵심 요약 (불릿)", "결과 요약 문단"], horizontal=True)
+        _new = None
         if st.button("AI 요약 생성"):
-            with st.spinner("AI가 데이터를 살펴보는 중..."):
-                fmt = {"핵심 요약 (불릿)": "핵심 발견을 불릿 5개 이내로",
-                       "연구 초록 초안": "학술논문 초록 형식(목적·방법·결과·결론)으로 200자 내외",
-                       "결과 요약 문단": "결과를 서술한 한 문단으로"}[want]
-                st.markdown(ai_call(
-                    f"연구 목적: {purpose or '(미기재)'}\n\n{summary}\n\n"
+            fmt = {"핵심 요약 (불릿)": "핵심 발견을 불릿 5개 이내로",
+                   "연구 초록 초안": "학술논문 초록 형식(목적·방법·결과·결론)으로 200자 내외",
+                   "결과 요약 문단": "결과를 서술한 한 문단으로"}[want]
+            _new = (f"연구 목적: {purpose or '(미기재)'}\n\n{summary}\n\n"
                     f"[처리·품종별 요약]\n{_general_profiles}\n\n"
                     f"위 데이터를 {fmt} 한국어로 정리해 주세요. 데이터에 근거한 내용만 쓰고, "
-                    "통계 검정을 따로 하진 않았으니 단정적 유의성 주장은 피하세요.",
-                    st.session_state.get("api_key"), st.session_state.get("ai_model_g"), max_tokens=1000))
-                ai_disclaimer()
-                log_action("AI 데이터 요약 생성")
+                    "통계 검정을 따로 하진 않았으니 단정적 유의성 주장은 피하세요.")
+            log_action("AI 데이터 요약 생성")
+        _ans = ai_job_run("summary", _new, max_tokens=1000, spinner="AI가 데이터를 살펴보는 중...")
+        if _ans:
+            st.markdown(_ans)
+            ai_disclaimer()
     elif amode.startswith("결과"):
         with st.expander("💬 이렇게 물어보세요 (예시)"):
             st.markdown("""
@@ -10556,17 +11318,21 @@ elif menu == "🧠 AI 도우미":
 - 이 결과를 비전공자인 상사에게 보고할 때 어떻게 말하면 좋을까?
 - 처리2가 가장 좋은 이유를 데이터 근거로 설명해줘
 """)
-        q = st.text_area("궁금한 점", placeholder="예) 처리구별 수량 차이를 쉽게 설명해줘")
-        if st.button("AI에게 물어보기"):
-            with st.spinner("AI가 분석 중..."):
+        q = st.text_area("궁금한 점", key="ai_ask_q", placeholder="예) 처리구별 수량 차이를 쉽게 설명해줘")
+        _new = None
+        if st.button("AI에게 물어보기", key="ai_ask_btn"):
+            if not q.strip():
+                st.warning("궁금한 점을 먼저 적어 주세요.")
+            else:
                 _question_profiles = build_group_profiles(df, question=q)
-                st.markdown(ai_call(
-                    "당신은 농업연구사를 돕는 통계 전문가입니다. 아래 실제 데이터 요약만 참고해 "
-                    "질문에 쉽고 정확하게 한국어로 답해주세요. 입력에 없는 수치나 유의성을 "
-                    f"추측하지 마세요.\n\n{summary}\n\n"
-                    f"[질문 관련 처리·품종별 요약]\n{_question_profiles}\n\n질문: {q}",
-                    st.session_state.get("api_key"), st.session_state.get("ai_model_g")))
-                ai_disclaimer()
+                _new = ("당신은 농업연구사를 돕는 통계 전문가입니다. 아래 실제 데이터 요약만 참고해 "
+                        "질문에 쉽고 정확하게 한국어로 답해주세요. 입력에 없는 수치나 유의성을 "
+                        f"추측하지 마세요.\n\n{summary}\n\n"
+                        f"[질문 관련 처리·품종별 요약]\n{_question_profiles}\n\n질문: {q}")
+        _ans = ai_job_run("ask", _new, spinner="AI가 분석 중...")
+        if _ans:
+            st.markdown(_ans)
+            ai_disclaimer()
     else:
         with st.expander("💬 이렇게 입력하세요 (예시)"):
             st.markdown("""
@@ -10590,14 +11356,16 @@ elif menu == "🧠 AI 도우미":
         plan = st.text_area("연구계획서 내용 (직접 입력하거나 위 파일 첨부)",
                             value=file_text, height=180,
                             placeholder="시험 목적, 처리 내용, 반복 수, 조사 항목 등")
+        _new = None
         if st.button("통계 방법 추천받기"):
-            with st.spinner("AI가 연구계획을 분석 중..."):
-                st.markdown(ai_call("당신은 농업 실험설계·통계 전문가입니다. 아래 연구계획서와 데이터 구조를 보고 "
-                                    "가장 적합한 통계 분석 방법(분산분석 종류, 사후검정, 상관/회귀, 비모수 등)을 "
-                                    f"이유와 함께 한국어로 단계별 추천해주세요.\n\n[데이터]\n{summary}\n\n[연구계획서]\n{plan}",
-                                    st.session_state.get("api_key"), st.session_state.get("ai_model_g"), max_tokens=1300))
-                ai_disclaimer()
-                log_action("AI 연구계획서 기반 통계 추천")
+            _new = ("당신은 농업 실험설계·통계 전문가입니다. 아래 연구계획서와 데이터 구조를 보고 "
+                    "가장 적합한 통계 분석 방법(분산분석 종류, 사후검정, 상관/회귀, 비모수 등)을 "
+                    f"이유와 함께 한국어로 단계별 추천해주세요.\n\n[데이터]\n{summary}\n\n[연구계획서]\n{plan}")
+            log_action("AI 연구계획서 기반 통계 추천")
+        _ans = ai_job_run("plan", _new, max_tokens=1300, spinner="AI가 연구계획을 분석 중...")
+        if _ans:
+            st.markdown(_ans)
+            ai_disclaimer()
     st.caption("※ AI 응답은 참고용이며, 호출 시 사용량만큼 소액 비용이 발생할 수 있어요.")
 
 # ================================================================ 설문 분석
@@ -10863,8 +11631,14 @@ elif menu == "📋 설문조사 분석":
         c1, c2 = st.columns(2)
         demo = c1.multiselect("응답자 특성 열", df.columns.tolist(),
                               default=[c for c in cat_cols if c != "응답자ID"][:3], key="s_d")
+        # 응답자번호 같은 일련번호나 점수 범위를 벗어난 열(나이·금액 등)은 기본 선택에서 뺀다.
+        _id_cols = set(_v1_id_like_cols(df))
+        def _scale_like(c):
+            v = pd.to_numeric(df[c], errors="coerce").dropna()
+            return len(v) > 0 and v.min() >= 0 and v.max() <= 10 and bool((v == v.round()).all())
         qs = c2.multiselect("문항 열 (숫자형)", num_cols,
-                            default=[c for c in num_cols if not _looks_like_nominal_code(c)], key="s_q")
+                            default=[c for c in num_cols if not _looks_like_nominal_code(c)
+                                     and c not in _id_cols and _scale_like(c)], key="s_q")
         demo = reorder_by_rank(demo, "s_d", "↕️ 응답자 특성 표시 순서 바꾸기")
         qs = reorder_by_rank(qs, "s_q", "↕️ 문항 표시 순서 바꾸기")
         scale_max = st.number_input("척도 최대값 (5점 척도면 5)", 2, 10, 5)
@@ -11287,12 +12061,20 @@ Version 1은 통계를 처음 접하는 연구자도 **데이터 준비 → 파�
 | 처리2 | 1 | 130 |
 | 처리2 | 2 | 128 |
 
-### 자주 틀리는 형식
-- `120kg`, `35cm`, `결측` → 값에는 `120`, `35`, 빈칸만 입력합니다.
-- 품종명을 여러 행에 걸쳐 병합 → 병합을 풀고 각 행에 품종명을 반복 입력합니다.
-- `처리1 평균`, `합계`, `소계` 행 → 실제 관측값 행만 남깁니다.
-- `반복1 수량`, `반복2 수량` → `반복` 열 하나와 `수량` 열 하나로 바꿉니다.
-- 반복마다 평균값을 복사해 넣기 → 반복별 **실제 조사값(원자료)**을 넣습니다.
+### 자주 틀리는 형식과 앱에 뜨는 안내
+| 이렇게 쓰면 | 앱에 이렇게 떠요 | 고치는 법 |
+|---|---|---|
+| 표 위에 제목 행, 병합셀 | ❌ 첫 행이 변수명이 아닌 것 같습니다 | 제목·빈 행을 지우고 첫 행에 변수명만, 병합은 풀고 모든 행에 처리명 입력 |
+| `120kg`, `약 15`, `결측` | ⚠️ 열에 숫자가 아닌 값이 섞여 있습니다 (몇 행인지 표시) | 숫자만 입력, 결측은 빈칸. `🔧 숫자로 자동 변환`으로 바로 고칠 수도 있음 |
+| `대조구 평균`, `합계`, `소계` 행 | ❌ 평균·합계 같은 요약 행이 들어 있습니다 | 실제 관측값 행만 남기기 (평균은 앱이 계산) |
+| 처리구마다 열을 따로 만듦 | ⚠️ 처리구가 여러 열로 가로로 펼쳐진 형태입니다 | `처리구 / 반복 / 측정값` 세 열로 세로 입력 |
+| `반복1 수량`, `반복2 수량` | ⚠️ 반복이 여러 열로 나뉘어 있습니다 | `반복` 열 하나와 `수량` 열 하나로 |
+| `대조구` / `대조 구` / `대조구 ` | ⚠️ 같은 이름이 다르게 적힌 값이 있습니다 | 처리명을 하나로 통일 (띄어쓰기·공백 주의) |
+| 반복마다 평균값을 복사 | ⚠️ 반복 간 값이 거의 같습니다 (CV 1% 미만) | 반복별 **실제 조사값(원자료)** 입력 |
+| 양식의 회색 예시 행을 남겨 둠 | ❌ 엑셀 양식의 예시 행이 그대로 남아 있습니다 | 예시 행 삭제 |
+| 변수명이 위·아래 두 줄 | ❌ 첫 행이 변수명이 아닌 것 같습니다 (또는 ⚠️ 이름 없는 열) | `고급 · 변수명이 두 줄인 파일`을 켜고 다시 올리기 |
+
+왼쪽 `📘 데이터 작성 가이드 → ❌ 자주 틀리는 작성 예시`에서 사례별로 잘못 쓴 표와 실제 경고, 고친 표를 볼 수 있습니다.
 
 ### 엑셀 양식
 왼쪽 `📘 데이터 작성 가이드`의 **📥 엑셀 양식 받기**로 예시가 들어 있는 양식을 받을 수 있습니다. **회색 글씨(변수명·값)는 예시**이므로 내 시험에 맞게 변수명을 바꾸고, 예시 행은 지운 뒤 실제 값을 입력하세요. 예시 행을 지우지 않고 올리면 데이터 점검에서 알려 드립니다. 양식의 `작성방법` 시트는 올릴 때 자동으로 제외됩니다.

@@ -124,3 +124,37 @@ def test_template_workbook_has_examples_and_guide(ck):
     assert [c.value for c in ws[1]] == ck["_V1_TEMPLATES"][name]
     assert ws.cell(2, 1).value == "대조구" and ws.cell(2, 1).font.italic
     assert "작성방법" in ck["_V1_GUIDE_SHEETS"]
+
+
+def test_summary_rows_with_treatment_names(ck):
+    d = pd.DataFrame({"처리구": ["대조구", "대조구", "대조구 평균", "처리1", "처리1", "처리1 평균", "합계"],
+                      "수량": [600, 610, 605, 650, 640, 645, 2500]})
+    out = ck["_v1_data_checkup"](d)
+    s = _find(out, "요약 행")
+    assert "4행" in s["detail"] and "7행" in s["detail"] and "8행" in s["detail"]
+    assert not any("반복이 1개뿐" in f["title"] for f in out)       # 요약 행은 따로 알리므로 중복 경고 없음
+    assert ck["_v1_is_summary_label"]("평균(대조구)") and not ck["_v1_is_summary_label"]("평균기온")
+
+
+def test_age_band_survey_column_is_not_numeric(ck):
+    d = pd.DataFrame({"연령대": ["30대 이하", "40대", "50대", "60대 이상"] * 3,
+                      "경력": ["5년 미만", "5년 이상", "10년 이상", "5년 미만"] * 3})
+    assert ck["_v1_numeric_like"](d) == {}
+
+
+def test_text_measurements_explain_design_not_found(ck):
+    d = pd.DataFrame({"처리구": ["A", "A", "B", "B"], "수량": ["600kg", "610kg", "650kg", "640kg"]})
+    out = ck["_v1_data_checkup"](d)
+    assert not any(f["title"] == "처리·품종 열을 찾지 못했습니다." for f in out)
+
+
+def test_every_wrong_case_in_guide_is_caught(ck):
+    """가이드의 '자주 틀리는 작성 예시'마다 실제 점검이 해당 경고를 낸다(안내와 경고가 어긋나지 않게)."""
+    cases = ck["_v1_wrong_cases"]()
+    assert len(cases) >= 9
+    for c in cases:
+        fs = [f for f in ck["_v1_data_checkup"](c["wrong"]) if f["level"] in ("error", "warn")]
+        assert any(c["match"] in f["title"] for f in fs), (c["name"], [f["title"] for f in fs])
+        if c["right"] is not None:                      # 고친 표에는 그 경고가 없어야 한다
+            ok = ck["_v1_data_checkup"](c["right"])
+            assert not any(c["match"] in f["title"] for f in ok if f["level"] in ("error", "warn")), c["name"]

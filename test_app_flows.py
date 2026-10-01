@@ -120,3 +120,30 @@ def test_contact_shown_in_sidebar_and_manual():
     at.session_state["menu_choice"] = "📖 사용설명서"
     at.run()
     assert "## 17. 문의" in _md(at) and "hyo99@korea.kr" in _md(at)
+
+
+def test_ai_page_answer_stays_after_rerun():
+    """버튼을 누른 실행 뒤에 화면이 다시 그려져도(브라우저 저장소 부품 등) 답이 남아 있어야 한다."""
+    at = AppTest.from_file(APP, default_timeout=300)
+    at.session_state["menu_choice"] = "🧠 AI 도우미"
+    at.session_state["api_key"] = "test-key"
+    at.run()
+    at.text_area(key="ai_free_q").input("난괴법 자료는 어떻게 적어?")
+    at.button(key="ai_free_btn").click().run()
+    assert not at.exception
+    job = at.session_state["ai_job_free"]
+    assert job["ans"]                                   # 답(또는 안내 문구)이 세션에 저장됨
+    at.run()                                            # 다시 그려져도
+    assert any(job["ans"][:15] in str(m.value) for m in at.markdown)
+
+
+def test_dock_pending_question_is_answered_on_next_run():
+    """질문을 등록한 실행이 끊겨도 다음 실행에서 이어서 답을 받는다."""
+    at = AppTest.from_file(APP, default_timeout=300)
+    at.session_state["api_key"] = "test-key"
+    at.session_state["gai_pending"] = {"prompt": "질문: 테스트", "qlog": "테스트 질문"}
+    at.run()
+    assert not at.exception
+    assert not at.session_state["gai_pending"]
+    hist = at.session_state["gai_hist"]
+    assert hist[-2] == ("q", "테스트 질문") and hist[-1][0] == "a" and hist[-1][1]
