@@ -36,7 +36,9 @@ SECRETS = {
 def ns():
     import numpy as np, pandas as pd
     import streamlit as st
-    n = {"st": st, "np": np, "pd": pd, "_requests": None}
+    import re
+    n = {"st": st, "np": np, "pd": pd, "re": re, "_requests": None,
+         "CONTACT_NAME": "문의처", "CONTACT_EMAIL": "help@example.kr"}
     exec(SEG, n)
     return n
 
@@ -173,6 +175,7 @@ def _script():
 
         _requests = FakeRequests()
         _src = open({str(APP)!r}, encoding="utf-8").read()
+        CONTACT_NAME, CONTACT_EMAIL = "문의처", "help@example.kr"   # 앱 맨 위에서 정의되는 문의처
         exec(_src[_src.index({START!r}):_src.index({END!r})])
         _fs_session = lambda: FakeFirestore()
         # 가짜 브라우저 localStorage: 위젯처럼 같은 key는 한 번만 실행된다.
@@ -234,7 +237,12 @@ def _signup(at, email, pw="password123", org="경상북도농업기술원"):
     at.text_input(key="auth_name").input("홍길동")
     at.text_input(key="auth_signup_email").input(email)
     at.text_input(key="auth_signup_pw").input(pw)
-    at.text_input(key="auth_org").input(org)
+    pick = at.selectbox(key="auth_org_pick")         # 기본 기관 유형(도 농업기술원)은 목록에서 고른다
+    if org in pick.options:
+        pick.select(org).run()
+    else:
+        pick.select("✏️ 목록에 없음 (직접 입력)").run()
+        at.text_input(key="auth_org").input(org)
     at.text_input(key="auth_dept").input("영양고추연구소")
     at.checkbox(key="auth_consent").check()
     return at.button(key="auth_signup_btn").click().run()
@@ -358,6 +366,39 @@ def test_usage_logging_and_admin_dashboard():
     assert labels["가입 사용자"] == "2명"
     assert labels["기능 이용 기록"] == "1회"
 
+    # 예전 방식으로 직접 입력된 기관명이 하나 더 생긴 상황
+    at.session_state["_docs"]["profiles/uid-old"] = {
+        "name": {"stringValue": "옛가입"}, "email": {"stringValue": "old@korea.kr"},
+        "organization": {"stringValue": "경북 농기원"}}
+    at = at.run()
+    labels = {m.label: m.value for m in at.metric}
+    assert labels["가입 사용자"] == "2명"                       # 30분 동안은 다시 읽지 않는다
+    at = at.button(key="auth_admin_refresh").click().run()
+    labels = {m.label: m.value for m in at.metric}
+    assert labels["가입 사용자"] == "3명"                       # 새로고침하면 다시 읽는다
+    assert labels["확인된 소속기관"] == "1곳"                   # '경북 농기원'도 같은 기관으로 집계
+
+
+@pytest.mark.parametrize("raw,canon", [
+    ("경북 농기원", "경상북도농업기술원"), ("경상북도 농업기술원", "경상북도농업기술원"),
+    ("경북농업기술원", "경상북도농업기술원"), ("강원도농업기술원", "강원특별자치도농업기술원"),
+    ("전라북도농업기술원", "전북특별자치도농업기술원"), ("충남농업기술원", "충청남도농업기술원"),
+    ("경상북도농업기술원 영양고추연구소", "경상북도농업기술원 영양고추연구소"),   # 모르는 형태는 그대로
+    ("농촌진흥청", "농촌진흥청"), ("", ""),
+])
+def test_org_names_are_grouped(ns, raw, canon):
+    assert ns["_org_canonical"](raw) == canon
+
+
+def test_signup_with_org_not_in_list_and_other_type():
+    at = _signup(_new_app(), "kim@korea.kr", org="OO도농업기술원 시험장")
+    prof = [v for k, v in _docs(at, "profiles").items()][0]
+    assert prof["organization"]["stringValue"] == "OO도농업기술원 시험장"
+    at2 = _new_app()
+    at2.selectbox(key="auth_org_type").select("대학교/연구기관").run()
+    assert not [b for b in at2.selectbox if b.key == "auth_org_pick"]      # 목록 없는 유형은 직접 입력
+    assert [t for t in at2.text_input if t.key == "auth_org"]
+
 
 def test_no_restriction_lets_anyone_sign_up():
     """허용 목록을 비우면 기관 메일이 아니어도 가입된다."""
@@ -374,6 +415,7 @@ def test_individual_without_organization():
     at.text_input(key="auth_signup_pw").input("password123")
     at.selectbox(key="auth_org_type").select("개인 (소속 없음)").run()
     assert not [t for t in at.text_input if t.key == "auth_org"]     # 소속기관 칸이 사라짐
+    assert not [b for b in at.selectbox if b.key == "auth_org_pick"]
     at.checkbox(key="auth_consent").check()
     at = at.button(key="auth_signup_btn").click().run()
     prof = _docs(at, "profiles")["profiles/uid-farmer"]
@@ -502,3 +544,16 @@ def test_login_again_with_remember_after_logout_saves_again():
     at.checkbox(key="auth_remember").check()
     at = _login(at, "hong@korea.kr")
     assert _stored_rt(at) == "rt-hong@korea.kr"
+
+
+def test_remembered_ai_key_is_written_and_removed_on_logout():
+    """휴대폰용 'API 키 기억'은 이 브라우저에만 저장되고 로그아웃하면 지워진다."""
+    import json as _j
+    at = _login(_verified_user(_new_app()), "hong@korea.kr")
+    at.session_state["_ai_remember_payload"] = {"provider": "Gemini (Google)", "key": "AIza-x", "model": "g1"}
+    at = at.run()
+    assert _j.loads(at.session_state["_ls"]["ssa_ai"])["key"] == "AIza-x"
+    at.session_state["_do_logout"] = True
+    at = at.run()
+    assert "ssa_ai" not in at.session_state["_ls"]
+    assert "api_key" not in at.session_state
