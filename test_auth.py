@@ -173,11 +173,27 @@ def _script():
                 docs = [{{"fields": v}} for k, v in S["_docs"].items() if k.split("/")[0] == p]
                 return R(200, {{"documents": docs}})
 
+        class FakeAuthAdmin:
+            """Firebase 인증 관리 API(batchGet·update) 흉내."""
+            def get(self, url, params=None, timeout=None):
+                if S.get("_admin_403"):
+                    return R(403, {{"error": {{"message": "PERMISSION_DENIED"}}}})
+                users = [{{"localId": u["uid"], "email": e, "emailVerified": u["verified"],
+                           "createdAt": "1790000000000"}} for e, u in S["_users"].items()]
+                return R(200, {{"users": users}})
+            def post(self, url, json=None, timeout=None):
+                S["_calls"].append(("admin_update", json))
+                for u in S["_users"].values():
+                    if u["uid"] == json["localId"]:
+                        u["verified"] = bool(json["emailVerified"])
+                return R(200, {{}})
+
         _requests = FakeRequests()
         _src = open({str(APP)!r}, encoding="utf-8").read()
         CONTACT_NAME, CONTACT_EMAIL = "문의처", "help@example.kr"   # 앱 맨 위에서 정의되는 문의처
         exec(_src[_src.index({START!r}):_src.index({END!r})])
         _fs_session = lambda: FakeFirestore()
+        _fb_admin_session = lambda: FakeAuthAdmin() if S.get("_fake_admin") else None
         # 가짜 브라우저 localStorage: 위젯처럼 같은 key는 한 번만 실행된다.
         S.setdefault("_ls", {{}})
         S.setdefault("_js_done", {{}})
@@ -296,6 +312,7 @@ def test_unverified_login_blocked_then_verified_login_ok():
     at = _login(at, "hong@korea.kr")
     assert not _opened(at)
     assert any("인증이 아직" in w.value for w in at.warning)
+    assert any("인증 처리" in w.value and "help@example.kr" in w.value for w in at.warning)   # 문의처 안내
     at.button(key="auth_resend_verify").click().run()
     assert _calls(at, "sendOobCode")[-1]["requestType"] == "VERIFY_EMAIL"
     _verify(at, "hong@korea.kr")
@@ -557,3 +574,47 @@ def test_remembered_ai_key_is_written_and_removed_on_logout():
     at = at.run()
     assert "ssa_ai" not in at.session_state["_ls"]
     assert "api_key" not in at.session_state
+
+
+# ---------------------------------------------------------------- 관리자: 이메일 인증 처리
+def _admin_with_pending():
+    at = _new_app()
+    at.session_state["_fake_admin"] = True
+    at = _signup(at, "hong@korea.kr")                       # 인증 메일을 못 받은 사람
+    at = _verified_user(at, "boss@naver.com")
+    return _login(at, "boss@naver.com")
+
+
+def test_admin_sees_unverified_and_verifies():
+    at = _admin_with_pending()
+    assert any("이메일 인증 대기" in m.value for m in at.markdown)
+    pick = at.multiselect(key="auth_admin_verify_pick")
+    assert pick.options == ["홍길동 · hong@korea.kr"]          # 인증한 관리자 본인은 목록에 없음
+    assert at.button(key="auth_admin_verify_btn").disabled  # 고르기 전에는 누를 수 없음
+    pick.select("홍길동 · hong@korea.kr").run()
+    at = at.button(key="auth_admin_verify_btn").click().run()
+    assert ("admin_update", {"localId": "uid-hong", "emailVerified": True}) in at.session_state["_calls"]
+    assert any("1명을 인증 처리" in s.value for s in at.success)
+    assert not [m for m in at.multiselect if m.key == "auth_admin_verify_pick"]   # 대기 목록이 비었음
+    # 이제 그 사람은 메일 없이 로그인된다
+    at.session_state["auth_user"] = None
+    at = _login(at.run(), "hong@korea.kr")
+    assert _opened(at)
+
+
+def test_admin_verify_without_permission_explains_fix():
+    at = _new_app()
+    at.session_state["_fake_admin"] = True
+    at.session_state["_admin_403"] = True
+    at = _verified_user(at, "boss@naver.com")
+    at = _login(at, "boss@naver.com")
+    assert any("Firebase Authentication 관리자" in w.value for w in at.warning)
+    assert not [m for m in at.multiselect if m.key == "auth_admin_verify_pick"]
+
+
+def test_admin_verify_section_quiet_without_service_account():
+    at = _new_app()
+    at = _verified_user(at, "boss@naver.com")
+    at = _login(at, "boss@naver.com")
+    assert any("서비스 계정" in c.value for c in at.caption)
+    assert not at.exception

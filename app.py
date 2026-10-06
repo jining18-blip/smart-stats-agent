@@ -3208,7 +3208,8 @@ def render_auth_gate():
             pending = st.session_state.get("auth_unverified")
             if pending:
                 st.warning(f"**{pending['email']}** 의 이메일 인증이 아직 끝나지 않았습니다. "
-                           "메일함(스팸함 포함)의 인증 링크를 누른 뒤 다시 로그인해 주세요.")
+                           "메일함(스팸함 포함)의 인증 링크를 누른 뒤 다시 로그인해 주세요. "
+                           f"메일이 오지 않으면 문의처({CONTACT_NAME} · {CONTACT_EMAIL})에 **인증 처리**를 요청해 주세요.")
                 if st.button("인증 메일 다시 보내기", width="stretch", key="auth_resend_verify"):
                     _, err = _fb_send_verify(pending.get("id_token"))
                     if err:
@@ -3306,6 +3307,154 @@ def _is_admin_user(user=None):
     return bool(email and email in _auth_config()["admins"])
 
 
+# ---------------------------------------------------------------- 이메일 인증 관리(관리자, 서비스 계정)
+# 기관 메일 서버가 Firebase 인증 메일을 막는 경우가 있어, 관리자가 본인 확인한 사람을 직접 인증 처리한다.
+_FB_ADMIN_URL = "https://identitytoolkit.googleapis.com/v1/projects/{pid}/accounts:"
+
+
+@st.cache_resource(show_spinner=False)
+def _fb_admin_session_cached(sa_json):
+    import json
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import AuthorizedSession
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/identitytoolkit",
+                                     "https://www.googleapis.com/auth/cloud-platform"])
+    return AuthorizedSession(creds)
+
+
+def _fb_admin_session():
+    """Firebase 인증 관리용 세션. 서비스 계정이 없으면 None."""
+    import json
+    cfg = _auth_config()
+    sa = cfg["service_account"]
+    if not sa or not cfg["project_id"]:
+        return None
+    try:
+        return _fb_admin_session_cached(json.dumps(sa, sort_keys=True))
+    except Exception:
+        return None
+
+
+def _fb_admin_err(r):
+    try:
+        msg = str(((r.json() or {}).get("error") or {}).get("message") or "")
+    except Exception:
+        msg = ""
+    if r.status_code in (401, 403) or "PERMISSION" in msg.upper():
+        return "PERMISSION"
+    return msg or f"HTTP_{r.status_code}"
+
+
+def _fb_admin_unverified(max_pages=10):
+    """이메일 인증을 아직 끝내지 않은 계정. (목록 [{uid, email, created_at}], 오류) 반환."""
+    sess = _fb_admin_session()
+    if sess is None:
+        return None, "NO_SERVICE_ACCOUNT"
+    url = _FB_ADMIN_URL.format(pid=_auth_config()["project_id"]) + "batchGet"
+    out, token = [], None
+    try:
+        for _ in range(max_pages):
+            params = {"maxResults": 1000}
+            if token:
+                params["nextPageToken"] = token
+            r = sess.get(url, params=params, timeout=20)
+            if r.status_code != 200:
+                return None, _fb_admin_err(r)
+            js = r.json() or {}
+            for u in js.get("users") or []:
+                if u.get("email") and not u.get("emailVerified") and not u.get("disabled"):
+                    out.append({"uid": u.get("localId"), "email": str(u["email"]).strip().lower(),
+                                "created_ms": u.get("createdAt")})
+            token = js.get("nextPageToken")
+            if not token:
+                break
+    except Exception as ex:
+        return None, f"NETWORK:{type(ex).__name__}"
+    return out, None
+
+
+def _fb_admin_verify(uid):
+    """계정을 '이메일 인증 완료'로 바꾼다. 성공하면 None, 실패하면 오류 문자열."""
+    sess = _fb_admin_session()
+    if sess is None:
+        return "NO_SERVICE_ACCOUNT"
+    url = _FB_ADMIN_URL.format(pid=_auth_config()["project_id"]) + "update"
+    try:
+        r = sess.post(url, json={"localId": uid, "emailVerified": True}, timeout=20)
+    except Exception as ex:
+        return f"NETWORK:{type(ex).__name__}"
+    return None if r.status_code == 200 else _fb_admin_err(r)
+
+
+def _admin_verify_selected():
+    """'선택한 사용자 인증 처리' 버튼(콜백): 고른 계정을 인증 완료로 바꾸고 결과를 남긴다."""
+    S = st.session_state
+    picked = list(S.get("auth_admin_verify_pick") or [])
+    lst, _err = S.get("_auth_admin_unverified") or ([], None)
+    by_label = {u["label"]: u for u in (lst or []) if "label" in u}
+    ok, fail = [], []
+    for lab in picked:
+        u = by_label.get(lab)
+        if not u:
+            continue
+        e = _fb_admin_verify(u["uid"])
+        (fail.append((u["email"], e)) if e else ok.append(u["email"]))
+    if ok:
+        S["_auth_admin_unverified"] = ([u for u in (lst or []) if u["email"] not in ok], None)
+    S["_auth_admin_verify_msg"] = (ok, fail)
+    S["auth_admin_verify_pick"] = []
+
+
+def _admin_verify_section(profiles, reload):
+    """관리자 화면의 '✉️ 이메일 인증 대기' 칸."""
+    S = st.session_state
+    st.markdown("### ✉️ 이메일 인증 대기")
+    st.caption("가입했지만 인증 메일을 확인하지 못한 사람입니다. 기관 메일이 인증 메일을 막아 못 받는 경우가 있어요. "
+               "**직접 연락 온 동료처럼 본인이 확인된 사람만** 골라 인증 처리해 주세요.")
+    if _fb_admin_session() is None:
+        st.caption("Firebase 서비스 계정(firebase_service_account)이 있어야 쓸 수 있습니다.")
+        return
+    if reload or "_auth_admin_unverified" not in S:
+        with st.spinner("인증 대기 계정을 확인하는 중..."):
+            S["_auth_admin_unverified"] = _fb_admin_unverified()
+    lst, err = S["_auth_admin_unverified"]
+    msg = S.pop("_auth_admin_verify_msg", None)
+    if msg:
+        ok, fail = msg
+        if ok:
+            st.success(f"{len(ok)}명을 인증 처리했어요: {', '.join(ok)} — 이제 이메일·비밀번호로 바로 로그인할 수 있어요.")
+        if any(e == "PERMISSION" for _, e in fail):
+            err = "PERMISSION"
+        elif fail:
+            st.error("인증 처리하지 못했습니다: " + ", ".join(f"{m}({e})" for m, e in fail))
+    if err == "PERMISSION":
+        sa = (_auth_config().get("service_account") or {}).get("client_email", "")
+        st.warning("서비스 계정에 Firebase 인증 관리 권한이 없어요. Google Cloud 콘솔 → **IAM 및 관리자 → IAM**에서 "
+                   f"서비스 계정 `{sa}`에 **'Firebase Authentication 관리자'** 역할을 추가한 뒤 🔄 새로고침을 눌러 주세요. "
+                   "(Firebase 콘솔 → 프로젝트 설정 → 서비스 계정에서 '새 비공개 키'로 받은 키라면 보통 이 권한이 이미 있어요.)")
+        return
+    if err:
+        st.error(f"인증 대기 계정을 불러오지 못했습니다: {err}")
+        return
+    if not lst:
+        st.caption("✅ 인증을 기다리는 계정이 없어요.")
+        return
+    prof = {str(r.get("email", "")).strip().lower(): r for r in (profiles or [])}
+    rows = []
+    for u in lst:
+        pr = prof.get(u["email"], {})
+        when = (_to_kst_text(pd.Series([pd.to_datetime(int(u["created_ms"]), unit="ms", utc=True)])).iloc[0]
+                if str(u.get("created_ms") or "").isdigit() else "")
+        u["label"] = f"{pr.get('name') or '(이름 없음)'} · {u['email']}"
+        rows.append({"이름": pr.get("name", ""), "이메일": u["email"], "소속기관": pr.get("organization", ""),
+                     "부서": pr.get("department", ""), "가입일": when})
+    smart_table(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.multiselect("인증 처리할 사람", [u["label"] for u in lst], key="auth_admin_verify_pick")
+    st.button("✅ 선택한 사용자 인증 처리", key="auth_admin_verify_btn", on_click=_admin_verify_selected,
+              disabled=not S.get("auth_admin_verify_pick"))
+
+
 def _to_kst_text(series):
     t = pd.to_datetime(series, errors="coerce", utc=True)
     return t.dt.tz_convert("Asia/Seoul").dt.strftime("%Y-%m-%d %H:%M").fillna("")
@@ -3325,7 +3474,9 @@ def render_admin_dashboard():
     _cache = st.session_state.get("_auth_admin_cache")
     _hc1, _hc2 = st.columns([3, 1])
     _refresh = _hc2.button("🔄 새로고침", key="auth_admin_refresh", width="stretch")
+    _reloaded = False
     if _refresh or not _cache or _time.time() - _cache[0] > 1800:
+        _reloaded = True
         with st.spinner("이용 기록을 불러오는 중..."):
             _data = (_fs_list("profiles", 5000),
                      _fs_recent("login_events", "logged_in_at", 5000),
@@ -3352,6 +3503,7 @@ def render_admin_dashboard():
     c2.metric("확인된 소속기관", f"{p['organization'].fillna('').map(_org_canonical).replace('', np.nan).nunique() if 'organization' in p else 0:,}곳")
     c3.metric("로그인 기록", f"{len(ev):,}회")
     c4.metric("기능 이용 기록", f"{len(uv):,}회")
+    _admin_verify_section(profiles, reload=_reloaded)
     if not p.empty and "organization" in p:
         st.markdown("### 🏢 기관별 사용자")
         g = (p.assign(소속기관=p["organization"].fillna("").map(_org_canonical).replace("", "미입력"))
@@ -5117,6 +5269,36 @@ def _v1_id_like_cols(df):
     return out
 
 
+_TIME_KEYS = ["시기", "차수", "회차", "주차", "조사일", "측정일", "일자", "날짜", "date", "dat", "dap", "week"]
+_INDIV_KEYS = ["개체", "포기", "주번호", "나무", "식물체", "plant"]
+
+
+def _v1_time_hint(df, trt=None, blk=None):
+    """조사 시기 열(·같은 개체 반복 측정)이 있으면 원클릭 분석이 시기를 섞어 비교한다는 안내 문구를 돌려준다."""
+    def _is_id(name):
+        low = str(name).lower()
+        return any(k in low for k in _INDIV_KEYS) or bool(re.search(r"(^|[^a-z])id([^a-z]|$)", low))
+    try:
+        skip = {trt, blk}
+        tcol = next((c for c in df.columns if c not in skip
+                     and any(k in str(c).lower() for k in _TIME_KEYS)
+                     and 2 <= df[c].nunique(dropna=True) <= 30), None)
+        if tcol is None:
+            return None
+        icol = next((c for c in df.columns if c not in skip | {tcol} and _is_id(c)
+                     and df.groupby(c)[tcol].nunique().max() >= 2), None)
+    except Exception:
+        return None
+    n_t = df[tcol].nunique(dropna=True)
+    if icol is not None:
+        return (f"같은 개체('{icol}')를 여러 시기('{tcol}', {n_t}회)에 걸쳐 잰 **반복측정 자료**로 보여요. "
+                "원클릭 분석은 시기를 나누지 않고 한데 섞어 처리구를 비교해서, 처리 간 차이를 놓치거나 잘못 판단할 수 있어요. "
+                "**📊 통계분석 → 🌱 분산분석 → 🔁 반복측정**으로 분석해 주세요.")
+    return (f"조사 시기 열('{tcol}', {n_t}회)이 있어요. 원클릭 분석은 시기를 나누지 않고 한데 섞어 처리구를 비교해요. "
+            "시기마다 따로 보려면 시기별로 데이터를 나눠 올리거나, **📊 통계분석 → 🌱 분산분석 → 이원배치**"
+            f"(처리구 × {tcol})를 쓰세요.")
+
+
 def detect_design(df):
     """데이터 구조를 보고 실험설계를 자동 판별.
     반환: dict(design, trt, blk, sub, ys, reason, confidence, promoted)"""
@@ -5137,7 +5319,15 @@ def detect_design(df):
         return res
     # 이름 우선순위로 처리구 선택
     trt = next((c for k in _TRT_KEYS for c in trt_cands if k in str(c)), trt_cands[0])
-    others = [c for c in trt_cands if c != trt]
+
+    # 두 번째 요인은 처리구와 '교차'된 열만 인정한다(처리구×요인 조합이 대부분 있어야 함).
+    # '등급'처럼 처리구에 따라 정해지는 글자 측정값을 요인으로 잘못 알리지 않게 한다.
+    def _crossed(col):
+        try:
+            return float((pd.crosstab(df[trt], df[col]).to_numpy() > 0).mean()) >= 0.8
+        except Exception:
+            return True
+    others = [c for c in trt_cands if c != trt and _crossed(c)]
     res["trt"] = trt
     res["blk"] = blk
     # 균형 여부 확인
@@ -7104,7 +7294,7 @@ with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
             head = [0, 1] if hdr_rows == 2 else 0
             for uf in ups:
                 try:
-                    if uf.name.endswith(".csv"):
+                    if uf.name.lower().endswith(".csv"):
                         d = None
                         for _enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
                             try:
@@ -9488,7 +9678,9 @@ st.markdown("""
 # ================================================================ 홈 화면 (데이터를 불러오기 전)
 _V1_HOME_CSS = """
 <style>
-.h-wrap {max-width:1080px; padding-bottom:4.5rem;}
+.h-wrap {max-width:1080px; margin:0 auto; padding-bottom:4.5rem;}
+/* 홈 위 음성 입력 버튼도 본문과 같은 폭으로 가운데에 둔다 */
+.st-key-voice_open_home {max-width:1080px; width:100%; margin-left:auto; margin-right:auto;}
 .h-lead {font-size:1.55rem; font-weight:800; color:#17344B; margin:.2rem 0 .25rem 0; letter-spacing:-.02em;}
 .h-sub {font-size:1rem; color:#5F6F66; margin-bottom:1.1rem;}
 .h-steps {display:flex; gap:.6rem; align-items:stretch; margin-bottom:1.5rem; flex-wrap:wrap;}
@@ -9550,7 +9742,7 @@ _V1_HOME_STEPS = """
 _V1_HOME_TIPS = """
 <div class="h-tips">
   <div class="h-tip">💡 처음이라면 <b>⚡ 원클릭 분석</b>부터 해 보세요</div>
-  <div class="h-tip">📱 밭에서는 휴대폰으로 <b>말해서 입력</b>할 수 있어요 (위 <b>🎤 밭에서 말로 데이터 입력하기</b> 버튼)</div>
+  <div class="h-tip">📱 현장에서는 휴대폰으로 <b>음성 입력</b>할 수 있어요 (위 🎤 버튼)</div>
   <div class="h-tip">📖 자세한 방법은 <b>사용설명서</b>에 있어요</div>
 </div>
 """
@@ -9573,7 +9765,7 @@ def render_v1_home():
     v2_btn = (f'<a class="bt" href="{_html.escape(V2_APP_URL, quote=True)}" target="_blank" rel="noopener">Version 2 열기 ↗</a>'
               if V2_APP_URL else "")
     # 휴대폰에서는 사이드바가 접혀 있으므로 첫 화면에 바로 보이게 둔다.
-    st.button("🎤 밭에서 말로 데이터 입력하기", type="primary", width="stretch", key="voice_open_home",
+    st.button("🎤 현장에서 음성으로 데이터 입력하기", type="primary", width="stretch", key="voice_open_home",
               on_click=_voice_open, help="말하는 동안 표가 바로 채워집니다. 다 입력하면 '이 표로 바로 분석하기'를 누르세요.")
     st.markdown(_V1_HOME_CSS + """
 <div class="h-wrap">
@@ -9655,6 +9847,9 @@ if menu == "⚡ 원클릭 분석":
         if _pre.get("trt"):
             st.caption(f"🔬 자동 인지: **{_pre['design']}** — 처리구 '{_pre['trt']}'"
                        + (f", 반복 '{_pre['blk']}'" if _pre.get("blk") else ", 반복 없음"))
+            _time_hint = _v1_time_hint(df, _pre.get("trt"), _pre.get("blk"))
+            if _time_hint:
+                st.warning("⚠️ " + _time_hint)
         with st.expander("⚙️ 설정 (필요할 때만)"):
             _allc = df.columns.tolist()
             _bopts = ["(자동)"] + _allc
@@ -11150,12 +11345,16 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
             fts = st.multiselect("입력 변수(X)", [c for c in num_cols if c != tgt], key="ml_x")
             y_is_num = tgt in num_cols
             n_uni = int(df[tgt].nunique())
-            auto_cls = (not y_is_num) or n_uni <= 10
+            # 숫자 Y는 '정수이고 같은 값이 되풀이되는' 경우(등급 1~5 등)만 분류로 본다.
+            # 3처리×3반복처럼 작은 시험의 수량(소수·값이 거의 안 겹침)을 범주로 다루지 않게 한다.
+            _yv = pd.to_numeric(df[tgt], errors="coerce").dropna() if y_is_num else pd.Series(dtype=float)
+            _y_int = bool(len(_yv)) and bool(np.all(np.isclose(_yv, np.round(_yv))))
+            auto_cls = (not y_is_num) or (n_uni <= 10 and _y_int and n_uni <= max(2, len(_yv) * 0.5))
             task = st.radio("문제 유형", ["회귀(연속값 예측)", "분류(범주 예측)"],
                             index=1 if auto_cls else 0)
             if not y_is_num:
                 st.info(f"'{tgt}'은 문자(범주)형이므로 **분류**만 가능합니다.")
-            elif n_uni <= 10:
+            elif auto_cls:
                 st.caption(f"'{tgt}'의 값이 {n_uni}종류뿐이라 분류가 자연스럽습니다.")
             _reg_algos = [
                 "랜덤포레스트", "Extra Trees", "그래디언트부스팅", "히스토그램 부스팅",
@@ -11377,25 +11576,51 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                 else:
                     st.caption(f"예측할 파일에 **{', '.join(saved['feats'])}** 열이 있어야 합니다.")
                     pf = st.file_uploader("예측할 데이터 (xlsx/csv)", type=["xlsx", "csv"], key="ml_pf")
+                    newdf, _read_fail = None, False
                     if pf is not None:
-                        newdf = pd.read_csv(pf) if pf.name.endswith(".csv") else pd.read_excel(pf)
+                        # 엑셀에서 저장한 한글 CSV(cp949)·대문자 확장자도 읽는다. 못 읽으면 화면이 멈추지 않게 안내만 한다.
+                        try:
+                            if pf.name.lower().endswith(".csv"):
+                                for _enc in ("utf-8-sig", "cp949", "euc-kr"):
+                                    try:
+                                        pf.seek(0)
+                                        newdf = pd.read_csv(pf, encoding=_enc)
+                                        break
+                                    except UnicodeDecodeError:
+                                        continue
+                            else:
+                                newdf = pd.read_excel(pf)
+                        except Exception as _ex:
+                            st.error(f"'{pf.name}' 파일을 읽지 못했습니다: {_ex}")
+                            newdf, _read_fail = None, True
+                        if newdf is None and not _read_fail:
+                            st.error(f"'{pf.name}' 파일의 문자 인코딩을 읽지 못했습니다. 엑셀에서 'CSV UTF-8'로 다시 저장해 보세요.")
+                    if newdf is not None:
+                        newdf = clean_columns(newdf)
                         miss = [f for f in saved["feats"] if f not in newdf.columns]
                         if miss:
                             st.error(f"필요한 열이 없습니다: {', '.join(miss)}")
                         elif st.button("일괄 예측 실행", key="ml_predict2"):
-                            Xnew = newdf[saved["feats"]].dropna()
-                            preds = saved["model"].predict(Xnew)
-                            out = newdf.loc[Xnew.index].copy()
-                            if saved["is_reg"]:
-                                out[f"{saved['target']}_예측"] = np.round(preds, 2)
+                            # 숫자가 아닌 칸(단위·글자)이 있는 행은 빼고 예측한다.
+                            Xnew = newdf[saved["feats"]].apply(pd.to_numeric, errors="coerce").dropna()
+                            _skipped = len(newdf) - len(Xnew)
+                            if Xnew.empty:
+                                st.error("예측할 수 있는 행이 없습니다. 입력 변수 칸이 비었거나 숫자가 아닌지 확인해 주세요.")
                             else:
-                                out[f"{saved['target']}_예측"] = [saved["classes"][int(p)]
-                                                                if saved["classes"] else p for p in preds]
-                            st.success(f"{len(out)}건 예측 완료!")
-                            smart_table(out, width="stretch")
-                            csv = out.to_csv(index=False).encode("utf-8-sig")
-                            st.download_button("📥 예측 결과 CSV 다운로드", csv, "예측결과.csv", key="ml_dlpred")
-                            log_action(f"머신러닝 일괄 예측: {len(out)}건")
+                                if _skipped:
+                                    st.warning(f"빈칸이나 숫자가 아닌 값이 있는 {_skipped}개 행은 빼고 예측했습니다.")
+                                preds = saved["model"].predict(Xnew)
+                                out = newdf.loc[Xnew.index].copy()
+                                if saved["is_reg"]:
+                                    out[f"{saved['target']}_예측"] = np.round(preds, 2)
+                                else:
+                                    out[f"{saved['target']}_예측"] = [saved["classes"][int(p)]
+                                                                    if saved["classes"] else p for p in preds]
+                                st.success(f"{len(out)}건 예측 완료!")
+                                smart_table(out, width="stretch")
+                                csv = out.to_csv(index=False).encode("utf-8-sig")
+                                st.download_button("📥 예측 결과 CSV 다운로드", csv, "예측결과.csv", key="ml_dlpred")
+                                log_action(f"머신러닝 일괄 예측: {len(out)}건")
 
     # ---------- AI 도우미 ----------
 
@@ -12232,7 +12457,7 @@ Version 1은 통계를 처음 접하는 연구자도 **데이터 준비 → 파�
 이미지·스캔 PDF 인식은 `🧠 AI 도우미 → AI 연결 설정`에서 API 키를 연결해야 합니다.
 
 ### 📱 말로 데이터 입력 (밭·하우스에서)
-홈 화면의 **🎤 밭에서 말로 데이터 입력하기** 버튼(또는 왼쪽 **🎤 말로 데이터 입력**)을 누르면 큰 마이크 화면이 나옵니다.
+홈 화면의 **🎤 현장에서 음성으로 데이터 입력하기** 버튼(또는 왼쪽 **🎤 말로 데이터 입력**)을 누르면 큰 마이크 화면이 나옵니다.
 - **⚡ 실시간 받아쓰기(기본)**: 마이크를 한 번 누르고 `처리구 A, 반복 1, 초장 72.3, 수량 615.4`처럼 말하면 **말하는 동안 칸이 채워지고**, 모든 열이 채워지면 자동으로 다음 행으로 넘어갑니다. API 키가 필요 없습니다(크롬·사파리·엣지).
   - `다음` = 다음 행으로 넘기기, `취소` = 지금 행 다시 말하기, `70 아니 71` = 고쳐 말하기
   - `칠십이 점 삼`, `육백십오`처럼 말해도 숫자로 바뀝니다.
@@ -12335,7 +12560,7 @@ API 설정은 `🧠 AI 도우미 → AI 연결 설정`에서 합니다. 연결�
 ## 12. 로그인
 
 - **회원가입**: 이메일·비밀번호와 이름·기관 유형·소속기관을 입력합니다. 소속이 없으면 기관 유형에서 `개인 (소속 없음)`을 고르세요.
-- **이메일 인증**: 가입하면 인증 메일이 옵니다. 링크는 **처음 한 번만** 누르면 되고, 이후에는 이메일·비밀번호로 로그인합니다. 메일이 안 보이면 스팸함을 확인하세요.
+- **이메일 인증**: 가입하면 인증 메일이 옵니다. 링크는 **처음 한 번만** 누르면 되고, 이후에는 이메일·비밀번호로 로그인합니다. 메일이 안 보이면 스팸함을 확인하고, 그래도 오지 않으면 문의처에 **인증 처리**를 요청하세요.
 - **로그인 상태 유지(30일)**: 체크하면 그 브라우저에서는 창을 닫았다 열어도 바로 들어갑니다. **공용 PC에서는 체크하지 마세요.**
 - **비밀번호 찾기**: `🔑 비밀번호 찾기`에서 재설정 메일을 받아 새 비밀번호를 정합니다.
 - **로그아웃**: 사이드바의 `로그아웃`을 누르면 로그인 유지와 기억한 API 키가 함께 지워집니다.
@@ -12366,7 +12591,6 @@ Version 1은 자주 쓰는 분석과 쉬운 선택에 집중합니다. **경제�
 - 올린 엑셀·CSV·PDF·사진은 **분석하는 동안만 서버 메모리에** 있고, 따로 저장하지 않습니다. 창을 닫거나 오래 쓰지 않으면 지워집니다.
 - 계정에 저장되는 것은 **회원 정보(이름·이메일·소속)**, **로그인·기능 이용 기록**(어떤 분석을 했는지), **휴대폰 음성 입력으로 만든 표**(PC에서 이어 쓰기용)뿐입니다.
 - **AI 기능**(AI 해석·질문, 사진·스캔 PDF 인식, 음성 인식)을 쓰면 해당 표·글·그림·음성이 선택한 AI 회사(OpenAI·Google·Anthropic)의 해외 서버로 전송됩니다. AI를 쓰지 않으면 외부로 보내지 않습니다.
-- 앱 서버는 해외 클라우드(Streamlit Community Cloud)에서 운영됩니다. **미공개 시험 자료는 소속 기관의 정보보안 지침을 확인한 뒤** 사용해 주세요.
 
 ---
 
