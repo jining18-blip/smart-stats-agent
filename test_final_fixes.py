@@ -110,3 +110,9 @@ def test_ml_grade_scores_default_to_classification():
                       "등급": rng.integers(1, 6, 60)})
     at = _app(d, "📊 통계분석")
     assert _ml(at, "등급").startswith("분류")
+
+
+def test_admin_menu_opens_without_data():
+    """데이터를 올리기 전에도 관리자 메뉴는 홈 화면이 아니라 관리자 화면이 떠야 한다."""
+    guard = re.search(r"if df is None and menu not in \(([^)]*)\):", _SRC).group(1)
+    assert "👑 관리자" in guard

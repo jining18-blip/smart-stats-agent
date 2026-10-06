@@ -9678,9 +9678,9 @@ st.markdown("""
 # ================================================================ 홈 화면 (데이터를 불러오기 전)
 _V1_HOME_CSS = """
 <style>
-.h-wrap {max-width:1080px; margin:0 auto; padding-bottom:4.5rem;}
+.h-wrap {max-width:100%; margin:0 auto; padding-bottom:4.5rem;}
 /* 홈 위 음성 입력 버튼도 본문과 같은 폭으로 가운데에 둔다 */
-.st-key-voice_open_home {max-width:1080px; width:100%; margin-left:auto; margin-right:auto;}
+.st-key-voice_open_home {max-width:100%; width:100%; margin-left:auto; margin-right:auto;}
 .h-lead {font-size:1.55rem; font-weight:800; color:#17344B; margin:.2rem 0 .25rem 0; letter-spacing:-.02em;}
 .h-sub {font-size:1rem; color:#5F6F66; margin-bottom:1.1rem;}
 .h-steps {display:flex; gap:.6rem; align-items:stretch; margin-bottom:1.5rem; flex-wrap:wrap;}
@@ -9792,7 +9792,7 @@ def render_v1_home():
 """ + _V1_HOME_TIPS + "</div>", unsafe_allow_html=True)
 
 # ================================================================ 공통 가드
-if df is None and menu not in ("📑 보고서", "📖 사용설명서", "🧠 AI 도우미"):
+if df is None and menu not in ("📑 보고서", "📖 사용설명서", "🧠 AI 도우미", "👑 관리자"):
     render_v1_home()
     st.stop()
 
