@@ -3296,9 +3296,6 @@ def render_auth_gate():
                         st.success("가입된 이메일이면 재설정 메일이 발송됩니다. 메일의 링크에서 새 비밀번호를 "
                                    "정한 뒤 로그인해 주세요. 메일이 안 보이면 스팸함을 확인해 주세요.")
         st.caption("🔒 비밀번호는 이 앱이 저장하지 않고 Google Firebase 인증이 처리합니다.")
-        st.caption("📂 올린 분석 자료는 분석하는 동안만 서버 메모리에 있고 저장되지 않습니다. "
-                   "AI 기능을 쓸 때만 해당 내용이 선택한 AI 회사로 전송됩니다. "
-                   "미공개 자료는 소속 기관의 정보보안 지침을 확인한 뒤 사용해 주세요.")
         st.caption(f"📮 가입·로그인 문의: {CONTACT_NAME} · [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
     st.stop()
 
