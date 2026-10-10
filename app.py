@@ -179,6 +179,8 @@ V2_APP_URL = _v1_env("V2_APP_URL", "https://smart-stats-agent-v2.streamlit.app/"
 # 문의처 — 사이드바·로그인 화면·오류 안내·사용설명서에 함께 표시된다.
 CONTACT_NAME = "경상북도농업기술원 영양고추연구소 이효진"
 CONTACT_EMAIL = "hyo99@korea.kr"
+# 로그인·이용 기록·신고에 함께 남겨 관리자 화면에서 버전별로 나눠 본다(V2 코드에는 "V2").
+APP_VERSION = "V1"
 
 # 아래 CSS는 V1의 배경/사이드바 분위기만 바꿉니다.
 # 통계 그래프와 Excel 차트 디자인은 기존 검증 버전을 그대로 사용합니다.
@@ -442,6 +444,7 @@ def _model_emmeans(model, data, treatment_col):
     return levels, means, rows
 
 
+@st.cache_data(show_spinner=False, max_entries=200)
 def _simulate_dunnett_adjustment(t_values, corr, df_resid, alpha=0.05,
                                  n_sim=60000, seed=20260726):
     """모형 기반 대조들의 상관을 반영한 Dunnett 단일단계 보정.
@@ -475,6 +478,17 @@ def _simulate_dunnett_adjustment(t_values, corr, df_resid, alpha=0.05,
                       for t in tv], dtype=float)
     crit = float(np.quantile(max_abs, 1 - alpha))
     return p_adj, crit
+
+
+@st.cache_data(show_spinner=False, max_entries=20000)
+def _srange_sf(q, k, df):
+    """studentized_range.sf는 수치적분이라 느리다. 같은 값이면 저장해 둔 결과를 쓴다(화면을 다시 그릴 때 빨라짐)."""
+    return float(studentized_range.sf(q, k, df))
+
+
+@st.cache_data(show_spinner=False, max_entries=5000)
+def _srange_ppf(p, k, df):
+    return float(studentized_range.ppf(p, k, df))
 
 
 def posthoc_from_model(model, data, treatment_col, method, control=None,
@@ -545,17 +559,17 @@ def posthoc_from_model(model, data, treatment_col, method, control=None,
             c, diff, se, tval, p_raw = contrast(a, b)
             if method == "Tukey HSD":
                 q = abs(tval) * np.sqrt(2)
-                p_adj = float(studentized_range.sf(q, k, dfe))
+                p_adj = _srange_sf(float(q), k, dfe)
                 significant = p_adj < alpha
-                crit = float(studentized_range.ppf(1 - alpha, k, dfe) / np.sqrt(2))
+                crit = float(_srange_ppf(1 - alpha, k, dfe) / np.sqrt(2))
             elif method == "던컨(Duncan)":
                 ia, ib = ordered.index(a), ordered.index(b)
                 rng_size = abs(ia - ib) + 1
                 alpha_range = 1 - (1 - alpha) ** max(rng_size - 1, 1)
                 q = abs(tval) * np.sqrt(2)
-                qcrit = float(studentized_range.ppf(1 - alpha_range, rng_size, dfe))
+                qcrit = _srange_ppf(float(1 - alpha_range), rng_size, dfe)
                 significant = q > qcrit
-                p_adj = float(studentized_range.sf(q, rng_size, dfe))
+                p_adj = _srange_sf(float(q), rng_size, dfe)
                 crit = qcrit / np.sqrt(2)
             else:  # Bonferroni
                 p_adj = min(float(p_raw) * m, 1.0)
@@ -666,6 +680,11 @@ def sup_display(df):
     out.columns = [sup_text(c) if isinstance(c, str) else c for c in out.columns]
     return out
 
+# 홈 화면·신고 메뉴 이름 (사이드바 메뉴·오류 신고 버튼에서 함께 쓴다)
+_HOME_MENU = "🏠 홈"
+_FEEDBACK_MENU = "📮 오류·불편 신고"
+
+
 # ---------------------------------------------------------------- 오류 도우미
 def error_help(err, context="", key="err"):
     """오류가 났을 때 (1) 앱 안에서 AI에게 바로 물어보고 답을 화면에 띄우고,
@@ -710,10 +729,22 @@ def error_help(err, context="", key="err"):
         c3.link_button("💬 ChatGPT",
                        "https://chatgpt.com/?hints=search&q=" + _up.quote_plus(prompt[:1800]),
                        width="stretch")
+        st.button("📮 이 오류 신고하기", key=f"errfb_{key}", width="stretch",
+                  on_click=_feedback_from_error,
+                  args=({"msg": msg, "context": context, "trace": trace[-1500:]},),
+                  help="오류 내용이 자동으로 담긴 신고 화면으로 이동해요. 익명으로도 보낼 수 있어요.")
         if st.session_state.get(_ans_key):
             st.markdown(st.session_state[_ans_key])
             st.caption("※ AI 답변은 참고용입니다.")
         st.caption(f"📮 해결이 안 되면 이 화면을 캡처해 **{CONTACT_EMAIL}** ({CONTACT_NAME})로 보내 주세요.")
+
+
+def _feedback_from_error(info):
+    """'이 오류 신고하기' 버튼: 오류 내용을 담아 두고 📮 오류·불편 신고 화면으로 이동한다."""
+    st.session_state["_fb_prefill"] = dict(info or {})
+    st.session_state["menu_choice"] = _FEEDBACK_MENU
+    st.session_state["menu_main"] = None
+    st.session_state["menu_support"] = _FEEDBACK_MENU
 
 
 def _install_error_helper():
@@ -726,7 +757,7 @@ def _install_error_helper():
         return
     _orig = _eu.handle_uncaught_app_exception
 
-    def _patched(ex):
+    def _patched(ex, _show=None):
         # 세션 복원이 버튼 키를 건드리면 스트림릿이 막는다. 그 키를 기억해 두고
         # 세션에서 빼 두면 다음 실행부터는 같은 오류가 나지 않는다.
         try:
@@ -741,7 +772,7 @@ def _install_error_helper():
         except Exception:
             pass
         try:
-            _orig(ex)
+            (_show or _orig)(ex)
         except Exception:
             try: st.error(f"⚠️ {type(ex).__name__}: {ex}")
             except Exception: pass
@@ -751,6 +782,21 @@ def _install_error_helper():
             pass
 
     _eu.handle_uncaught_app_exception = _patched
+    # 스트림릿은 위 함수를 실행 모듈(exec_code)에 이름으로 가져가 쓰므로
+    # 거기에도 바꿔 끼워야 실제로 이 상자가 뜬다. (새 버전은 함수 이름이 다르다.)
+    try:
+        from streamlit.runtime.scriptrunner import exec_code as _ec
+        if hasattr(_ec, "handle_uncaught_app_exception"):
+            _ec.handle_uncaught_app_exception = _patched
+        if hasattr(_ec, "handle_user_script_exception"):
+            _orig_user = _ec.handle_user_script_exception
+
+            def _patched_user(ex, *a, **k):
+                _patched(ex, _show=lambda e: _orig_user(e, *a, **k))
+
+            _ec.handle_user_script_exception = _patched_user
+    except Exception:
+        pass
     _eu._smart_agent_patched = True
 
 
@@ -1050,13 +1096,65 @@ def _polish_figure(fig):
         pass
     return fig
 
+def _fig_fingerprint(fig):
+    """그래프 내용을 나타내는 지문. 내용이 같으면 같은 값이 나온다(못 만들면 None).
+
+    그림 저장(PNG 만들기)은 느린데, 버튼을 누를 때마다 화면을 처음부터 다시 그리면서
+    같은 그래프를 매번 새로 만들고 있었다. 그래프를 피클로 바꾼 뒤 객체 주소처럼
+    실행할 때마다 달라지는 숫자만 순서 번호로 바꿔 지문을 만든다.
+    """
+    try:
+        import pickle, pickletools, hashlib
+        raw = pickle.dumps(fig, protocol=4)
+        h, ids = hashlib.sha1(), {}
+        for op, arg, _pos in pickletools.genops(raw):
+            if op.name in ("LONG1", "LONG4", "LONG", "BININT") and isinstance(arg, int) and arg >= 2 ** 32:
+                arg = ids.setdefault(arg, len(ids))
+            h.update(op.name.encode())
+            h.update(repr(arg).encode())
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 def _figure_png(fig, dpi=150):
-    """Matplotlib Figure를 화면/다운로드 공용 PNG bytes로 변환한다."""
+    """Matplotlib Figure를 화면/다운로드 공용 PNG bytes로 변환한다.
+    같은 그래프를 이미 만든 적이 있으면 저장해 둔 PNG를 그대로 쓴다."""
     _polish_figure(fig)
+    _fp = _fig_fingerprint(fig)
+    _cache = st.session_state.setdefault("_png_cache", {})
+    _ck = f"{_fp}:{dpi}" if _fp else None
+    if _ck and _ck in _cache:
+        return _cache[_ck]
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
     buf.seek(0)
-    return buf.getvalue()
+    data = buf.getvalue()
+    if _ck:
+        if len(_cache) >= 60:
+            _cache.pop(next(iter(_cache)))
+        _cache[_ck] = data
+    return data
+
+
+def _memo_bytes(tag, payload, builder):
+    """표·그래프·설정이 같으면 이미 만든 파일(한글·워드·엑셀)을 그대로 쓴다.
+    버튼을 누를 때마다 파일을 새로 만들던 것을 줄여 화면 반응을 빠르게 한다."""
+    try:
+        import pickle, hashlib
+        opts = tuple(sorted((k, str(v)) for k, v in st.session_state.items()
+                            if str(k).startswith(("hwp_", "sup_"))))
+        key = tag + ":" + hashlib.sha1(pickle.dumps((payload, opts), protocol=4)).hexdigest()
+    except Exception:
+        return builder()
+    cache = st.session_state.setdefault("_file_cache", {})
+    if key in cache:
+        return cache[key]
+    data = builder()
+    if len(cache) >= 30:
+        cache.pop(next(iter(cache)))
+    cache[key] = data
+    return data
 
 
 def show_plot(fig, max_width=660):
@@ -2377,7 +2475,8 @@ def dl_table(df, title, key, fname="table", image=None, xlsx_chart=None):
     try:
         if image:
             item = [{"heading": title, "table": df, "image": image}]
-            hwpx_bytes = build_report_hwpx(item, doc_title=title)
+            hwpx_bytes = _memo_bytes("dl_hwpx", (item, title),
+                                     lambda: build_report_hwpx(item, doc_title=title))
         else:
             hwpx_bytes = _make_docs(csv_text, title, "hwpx", opts_sig)
         c1.download_button("📄 한글(hwpx)" + (" (그래프 포함)" if image else ""), hwpx_bytes,
@@ -2388,7 +2487,8 @@ def dl_table(df, title, key, fname="table", image=None, xlsx_chart=None):
         try:
             if image:
                 item = [{"heading": title, "table": df, "image": image}]
-                docx_bytes = build_report_docx(item, doc_title=title)
+                docx_bytes = _memo_bytes("dl_docx", (item, title),
+                                         lambda: build_report_docx(item, doc_title=title))
             else:
                 docx_bytes = _make_docs(csv_text, title, "docx", opts_sig)
             c2.download_button("📝 워드(docx)" + (" (그래프 포함)" if image else ""), docx_bytes,
@@ -2399,7 +2499,9 @@ def dl_table(df, title, key, fname="table", image=None, xlsx_chart=None):
         c2.caption("워드 저장: pip install python-docx 필요")
     # app(9)의 "편집 가능한 Excel 차트" 기능을 유지하면서 스마트 블루 디자인을 적용한다.
     try:
-        c2.download_button("📈 엑셀(xlsx) — 스마트 블루 디자인 + 편집 가능한 그래프", make_xlsx(df, title, chart_spec=xlsx_chart),
+        c2.download_button("📈 엑셀(xlsx) — 스마트 블루 디자인 + 편집 가능한 그래프",
+                           _memo_bytes("dl_xlsx", (df, title, xlsx_chart),
+                                       lambda: make_xlsx(df, title, chart_spec=xlsx_chart)),
                            f"{fname}.xlsx", key=f"xls_{key}", width="stretch",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            help="화면과 같은 스마트 블루 표·차트 디자인으로 저장됩니다. 막대 색·글꼴·축 범위·차트 종류도 엑셀에서 직접 바꿀 수 있습니다.")
@@ -2445,7 +2547,7 @@ def survey_download_panel(slot, key, fname):
     _title = item.get("heading", "설문조사 분석 결과")
 
     try:
-        hwp = build_report_hwpx([item], doc_title=_title)
+        hwp = _memo_bytes("svy_hwpx", (item, _title), lambda: build_report_hwpx([item], doc_title=_title))
         c1.download_button("📘 한글(hwpx)", hwp, f"{fname}.hwpx",
                            key=f"dl_svyhwp_{key}", width="stretch")
     except Exception as ex:
@@ -2453,7 +2555,8 @@ def survey_download_panel(slot, key, fname):
 
     if _HAS_DOCX:
         try:
-            docx_bytes = build_report_docx([item], doc_title=_title)
+            docx_bytes = _memo_bytes("svy_docx", (item, _title),
+                                     lambda: build_report_docx([item], doc_title=_title))
             c2.download_button("📝 워드(docx)", docx_bytes, f"{fname}.docx",
                                key=f"dl_svydocx_{key}", width="stretch")
         except Exception as ex:
@@ -2468,7 +2571,8 @@ def survey_download_panel(slot, key, fname):
     xblocks = [b for b in blocks if b.get("table") is not None]
     try:
         if xblocks:
-            xls = make_xlsx_multi(xblocks, doc_title=_title)
+            xls = _memo_bytes("svy_xlsx", (xblocks, _title),
+                              lambda: make_xlsx_multi(xblocks, doc_title=_title))
             c3.download_button("📈 Excel(xlsx) — 편집 가능한 그래프", xls, f"{fname}.xlsx",
                                key=f"dl_svyxls_{key}", width="stretch",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2931,12 +3035,13 @@ def _record_login(user):
     try:
         meta = user.get("user_metadata") or {}
         now = _now_utc()
-        _fs_set("profiles", user.get("id"), {"email": user.get("email", ""), "last_login_at": now})
+        _fs_set("profiles", user.get("id"), {"email": user.get("email", ""), "last_login_at": now,
+                                             f"last_login_{APP_VERSION.lower()}": now})
         _fs_add("login_events", {
             "user_id": user.get("id"), "email": user.get("email", ""),
             "name": meta.get("name", ""), "organization_type": meta.get("organization_type", ""),
             "organization": meta.get("organization", ""), "department": meta.get("department", ""),
-            "logged_in_at": now})
+            "logged_in_at": now, "app": APP_VERSION})
     except Exception:
         pass
 
@@ -3076,8 +3181,9 @@ def _ai_remember_widget():
     """'이 기기에 API 키 기억' 체크박스. AI 연결 설정·음성 입력 화면에서 사용."""
     if not _HAS_JS_EVAL:
         return
-    st.session_state.setdefault("ai_remember_on", bool(st.session_state.get("_ai_remember_loaded")))
-    on = st.checkbox("이 기기에 API 키 기억", key="ai_remember_on",
+    st.session_state.setdefault("ai_remember_on", bool(st.session_state.get("_ai_remember_loaded")
+                                                       or st.session_state.get("_ai_remember_payload")))
+    on = st.checkbox("이 기기에 API 키 기억", key="ai_remember_on", on_change=_ai_remember_toggled,
                      help="체크하면 이 브라우저에만 키가 저장되어 다음에 다시 입력하지 않아도 됩니다. "
                           "로그아웃하면 지워집니다. 공용 PC에서는 체크하지 마세요.")
     if on and st.session_state.get("api_key"):
@@ -3086,9 +3192,31 @@ def _ai_remember_widget():
             "key": st.session_state.get("api_key"),
             "model": st.session_state.get("ai_model_g")}
         st.session_state.pop("_ai_remember_clear", None)
-    elif not on and (st.session_state.get("_ai_remember_payload")
-                     or st.session_state.get("_ai_remember_loaded")):
+
+
+def _ai_remember_toggled():
+    """사용자가 '이 기기에 API 키 기억' 체크를 직접 끌 때만 저장된 키를 지운다.
+    (예전에는 다른 화면에 다녀와 체크 값이 사라진 것만으로도 저장된 키를 지웠다)"""
+    if not st.session_state.get("ai_remember_on"):
         _ai_remember_forget()
+
+
+_AI_KEEP_KEYS = ("api_key", "ai_provider", "ai_remember_on")
+
+
+def _keep_ai_settings():
+    """API 키·AI 제공사·'기억' 체크를 다른 화면으로 옮겨도 유지한다.
+
+    이 입력칸들은 🧠 AI 도우미 화면 안에만 있는데, Streamlit은 이번 화면에 그려지지 않은
+    입력칸의 값을 지워 버린다. 그래서 설문조사 분석 등으로 넘어가면 키가 풀렸다.
+    매 화면 맨 앞에서 값을 다시 써 넣어 지워지지 않게 한다.
+    """
+    for _k in _AI_KEEP_KEYS:
+        if _k in st.session_state:
+            try:
+                st.session_state[_k] = st.session_state[_k]
+            except Exception:
+                pass
 
 
 def _try_remembered_login(cfg):
@@ -3131,7 +3259,7 @@ def _record_usage(action):
             "user_id": user.get("id"), "email": user.get("email", ""),
             "name": meta.get("name", ""), "organization": meta.get("organization", ""),
             "department": meta.get("department", ""), "action": str(action)[:300],
-            "used_at": _now_utc()})
+            "used_at": _now_utc(), "app": APP_VERSION})
     except Exception:
         pass
 
@@ -3387,8 +3515,18 @@ def _render_google_button():
     if msg:
         st.error(msg)
     remember = bool(st.session_state.get("auth_remember")) if _HAS_JS_EVAL else False
-    st.link_button("Google로 로그인", _google_login_url(remember), type="primary", width="stretch")
-    st.caption("새 창에서 Google 계정을 고르면 바로 들어갑니다. 인증 메일이 필요 없어요.")
+    # st.link_button은 항상 새 탭으로 열려서, 로그인 후 '로그인 화면 창 + 로그인된 창' 두 개가 남았다.
+    # 같은 창에서 Google로 갔다가 돌아오도록 링크(target="_top")로 만든다.
+    import html as _html
+    _gurl = _html.escape(_google_login_url(remember), quote=True)
+    st.markdown(
+        "<style>a.ssa-google-btn,a.ssa-google-btn:visited{display:block;text-align:center;"
+        "background:#FF4B4B;color:#FFFFFF !important;text-decoration:none !important;"
+        "border-radius:0.5rem;padding:0.5rem 0.75rem;font-size:1rem;line-height:1.6;}"
+        "a.ssa-google-btn:hover{background:#E03E3E;color:#FFFFFF !important;}</style>"
+        f'<a class="ssa-google-btn" href="{_gurl}" target="_top">Google로 로그인</a>',
+        unsafe_allow_html=True)
+    st.caption("Google 계정을 고르면 이 창에서 바로 들어갑니다. 인증 메일이 필요 없어요.")
     st.markdown("<div style='text-align:center;color:#888;font-size:0.85rem;margin:6px 0 2px'>"
                 "또는 이메일로</div>", unsafe_allow_html=True)
 
@@ -3702,6 +3840,263 @@ def _to_kst_text(series):
     return t.dt.tz_convert("Asia/Seoul").dt.strftime("%Y-%m-%d %H:%M").fillna("")
 
 
+# ---------------------------------------------------------------- 오류·불편 신고 (사용자 → 관리자)
+# 신고는 Firestore 'feedback' 모음에 저장한다(문서 하나 = 신고 하나).
+# 익명이면 이름·이메일·소속·계정 ID를 아예 저장하지 않는다(관리자도 누군지 알 수 없게).
+_FEEDBACK_KINDS = ["오류", "불편사항", "기능 건의", "질문"]
+_FEEDBACK_STATUS = {"new": "새 신고", "checked": "확인함", "done": "해결"}
+_FEEDBACK_LIST_FIELDS = ("id", "kind", "content", "screen", "data_shape", "app", "status", "anonymous",
+                         "created_at", "error", "has_image", "name", "email", "organization")
+
+
+def _feedback_screen_label():
+    """신고할 때 보고 있던 화면 이름 (통계분석·설문은 안쪽 탭 이름까지)."""
+    last = str(st.session_state.get("_fb_last_menu") or "")
+    sub = {"📊 통계분석": st.session_state.get("stat_sub"),
+           "📋 설문조사 분석": st.session_state.get("svy_type")}.get(last)
+    return f"{last} > {sub}" if sub else (last or "-")
+
+
+def _feedback_data_shape():
+    d = st.session_state.get("df")
+    if isinstance(d, pd.DataFrame):
+        return f"{len(d):,}행×{len(d.columns)}열"
+    return "데이터 없음"
+
+
+def _feedback_image_b64(uploaded):
+    """캡처 이미지를 줄여서(JPEG) 글자로 바꾼다. Firestore 문서 한 개는 1MB까지라 650KB 안으로 맞춘다."""
+    import base64
+    from PIL import Image
+    img = Image.open(io.BytesIO(uploaded.getvalue()))
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    for side, quality in ((1600, 75), (1280, 65), (1000, 60), (800, 55), (640, 50)):
+        im = img.copy()
+        im.thumbnail((side, side))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        if len(b64) <= 650_000:
+            return b64
+    return None
+
+
+def _feedback_submit(kind, content, anonymous, image_b64=None, error_text="", screen=None):
+    """신고 한 건을 저장한다. 성공하면 None, 실패하면 오류 문자열."""
+    import uuid
+    doc_id = uuid.uuid4().hex
+    data = {"id": doc_id, "kind": str(kind), "content": str(content or "")[:5000],
+            "screen": screen or _feedback_screen_label(), "data_shape": _feedback_data_shape(),
+            "app": APP_VERSION, "status": "new", "anonymous": bool(anonymous),
+            "has_image": bool(image_b64), "created_at": _now_utc()}
+    if error_text:
+        data["error"] = str(error_text)[:3000]
+    if image_b64:
+        data["image"] = image_b64
+    if not anonymous:
+        user = _current_auth_user() or {}
+        meta = user.get("user_metadata") or {}
+        data.update({"user_id": user.get("id", ""), "email": user.get("email", ""),
+                     "name": meta.get("name", ""), "organization": meta.get("organization", "")})
+    err = _fs_set("feedback", doc_id, data)
+    if not err:
+        st.session_state.pop("_fb_new_cache", None)
+    return err
+
+
+def _feedback_query(only_new=False, limit=300):
+    """신고 목록(최신순). 캡처 이미지는 빼고 읽는다(무료 사용량 절약 — 이미지는 볼 때만 따로 읽음).
+    반환: (목록, 오류)"""
+    sess = _fs_session()
+    if sess is None:
+        return None, "Firestore 서비스 계정 설정이 없습니다."
+    q = {"from": [{"collectionId": "feedback"}],
+         "select": {"fields": [{"fieldPath": f} for f in _FEEDBACK_LIST_FIELDS]},
+         "limit": int(limit)}
+    if only_new:
+        q["where"] = {"fieldFilter": {"field": {"fieldPath": "status"}, "op": "EQUAL",
+                                      "value": {"stringValue": "new"}}}
+    else:
+        q["orderBy"] = [{"field": {"fieldPath": "created_at"}, "direction": "DESCENDING"}]
+    try:
+        r = sess.post(_fs_docs_url() + ":runQuery", json={"structuredQuery": q}, timeout=20)
+        if r.status_code != 200:
+            return None, f"HTTP_{r.status_code}: {r.text[:160]}"
+        return [_fs_decode(x["document"].get("fields")) for x in (r.json() or [])
+                if isinstance(x, dict) and x.get("document")], None
+    except Exception as ex:
+        return None, f"네트워크 오류: {type(ex).__name__}"
+
+
+def _feedback_new_count():
+    """관리자 사이드바 '새 신고 N건' 표시용. 매 화면마다 서버에 묻지 않도록 5분간 기억한다."""
+    import time as _time
+    cache = st.session_state.get("_fb_new_cache")
+    if cache and _time.time() - cache[0] < 300:
+        return cache[1]
+    n = 0
+    try:
+        rows, err = _feedback_query(only_new=True, limit=100)
+        n = len(rows or []) if not err else 0
+    except Exception:
+        n = 0
+    st.session_state["_fb_new_cache"] = (_time.time(), n)
+    return n
+
+
+def render_feedback_page():
+    st.title("📮 오류·불편 신고")
+    st.caption("불편한 점을 편하게 남겨 주세요. 관리자가 바로 확인해요.")
+    done = st.session_state.pop("_fb_done", None)
+    if done:
+        st.success(done)
+    if _fs_session() is None:
+        st.warning("지금은 신고를 저장할 수 없어요(서버 설정이 없음). 아래 메일로 보내 주세요.")
+        st.caption(f"📮 {CONTACT_NAME} · [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
+        return
+    n = st.session_state.get("_fb_form_n", 0)          # 보낸 뒤 입력칸을 비우려고 key를 바꾼다
+    prefill = st.session_state.get("_fb_prefill") or {}
+    if prefill.get("msg"):
+        with st.container(border=True):
+            st.markdown(f"🧷 **방금 난 오류가 함께 첨부돼요:** `{str(prefill['msg'])[:200]}`")
+            if st.button("첨부 빼기", key=f"fb_unattach_{n}"):
+                st.session_state.pop("_fb_prefill", None)
+                st.rerun()
+    kinds = _FEEDBACK_KINDS
+    kind = st.radio("종류", kinds, horizontal=True, key=f"fb_kind_{n}")
+    content = st.text_area("내용", key=f"fb_content_{n}", height=150,
+                           placeholder="예) 설문조사 분석에서 엑셀 저장을 누르니 오류가 떠요.")
+    img = st.file_uploader("캡처 이미지 첨부 (선택)", type=["png", "jpg", "jpeg", "webp"], key=f"fb_img_{n}")
+    anon = st.checkbox("익명으로 보내기", key=f"fb_anon_{n}")
+    st.caption("익명으로 보내면 답변을 받을 수 없어요. 답변이 필요하면 체크하지 마세요.")
+    if anon:
+        st.info("ℹ️ 보고 있던 화면과 데이터 크기(행·열 수)만 함께 전송돼요. 이름·소속은 저장하지 않아요.")
+    else:
+        st.info("ℹ️ 원인을 빨리 찾을 수 있도록 **이름·소속, 보고 있던 화면, 데이터 크기(행·열 수)**가 "
+                "함께 전송돼요. 데이터 내용은 보내지 않아요.")
+    st.caption(f"보고 있던 화면: {_feedback_screen_label()} · 데이터: {_feedback_data_shape()}")
+    if st.button("신고 보내기", type="primary", key=f"fb_send_{n}", width="stretch"):
+        if not str(content or "").strip() and not prefill.get("msg"):
+            st.warning("내용을 적어 주세요.")
+            return
+        b64 = None
+        if img is not None:
+            try:
+                b64 = _feedback_image_b64(img)
+            except Exception:
+                b64 = None
+            if b64 is None:
+                st.warning("캡처 이미지를 읽지 못해 이미지 없이 보냅니다.")
+        err_txt = ""
+        if prefill.get("msg"):
+            err_txt = "\n".join(x for x in (str(prefill.get("msg", "")),
+                                            f"[상황] {prefill.get('context')}" if prefill.get("context") else "",
+                                            str(prefill.get("trace", ""))) if x)
+        with st.spinner("보내는 중..."):
+            err = _feedback_submit(kind, content, anon, image_b64=b64, error_text=err_txt)
+        if err:
+            st.error(f"보내지 못했어요({err}). 잠시 후 다시 시도하거나 {CONTACT_EMAIL}로 보내 주세요.")
+            return
+        st.session_state.pop("_fb_prefill", None)
+        st.session_state["_fb_form_n"] = n + 1
+        st.session_state["_fb_done"] = "✅ 신고를 보냈어요. 관리자가 확인할게요. 고맙습니다!"
+        st.rerun()
+
+
+def _feedback_set_status(doc_id, status):
+    err = _fs_set("feedback", doc_id, {"status": status, "status_at": _now_utc()})
+    if not err:
+        for r in (st.session_state.get("_fb_admin_list") or (0, []))[1]:
+            if r.get("id") == doc_id:
+                r["status"] = status
+        st.session_state.pop("_fb_new_cache", None)
+    return err
+
+
+def _admin_feedback_section(ver_sel):
+    """관리자 화면의 '📮 신고함'. 30분 보관 없이 1분이 지나면 다시 읽는다."""
+    import time as _time
+    st.markdown("### 📮 신고함")
+    c1, c2 = st.columns([3, 1])
+    cache = st.session_state.get("_fb_admin_list")
+    if c2.button("🔄 신고함 새로고침", key="fbadm_refresh", width="stretch") or not cache \
+            or _time.time() - cache[0] > 60:
+        rows, err = _feedback_query()
+        if err:
+            st.error(f"신고함을 불러오지 못했습니다: {err}")
+            return
+        cache = (_time.time(), rows or [])
+        st.session_state["_fb_admin_list"] = cache
+        st.session_state["_fb_new_cache"] = (_time.time(),
+                                             sum(1 for r in cache[1] if r.get("status", "new") == "new"))
+    rows = list(cache[1])
+    if ver_sel != "전체":
+        rows = [r for r in rows if (r.get("app") or "구분 없음(이전 기록)") == ver_sel]
+    cnt = Counter(r.get("status", "new") for r in rows)
+    c1.caption(" · ".join(f"{lab} {cnt.get(k, 0)}건" for k, lab in _FEEDBACK_STATUS.items()))
+    f1, f2 = st.columns(2)
+    st_sel = f1.radio("상태", ["새 신고", "확인함", "해결", "전체"], horizontal=True, key="fbadm_status")
+    kind_sel = f2.radio("종류", ["전체"] + _FEEDBACK_KINDS, horizontal=True, key="fbadm_kind")
+    inv = {v: k for k, v in _FEEDBACK_STATUS.items()}
+    if st_sel != "전체":
+        rows = [r for r in rows if r.get("status", "new") == inv[st_sel]]
+    if kind_sel != "전체":
+        rows = [r for r in rows if r.get("kind") == kind_sel]
+    if not rows:
+        st.caption("해당하는 신고가 없어요.")
+        return
+    for r in rows[:100]:
+        rid = r.get("id", "")
+        when = _to_kst_text(pd.Series([r.get("created_at")])).iloc[0]
+        who = ("익명" if r.get("anonymous")
+               else " · ".join(x for x in (r.get("name"), r.get("organization"), r.get("email")) if x) or "-")
+        with st.container(border=True):
+            st.markdown(f"**[{r.get('kind', '-')}]** · {when} · {r.get('app') or '구분 없음'} · "
+                        f"{_FEEDBACK_STATUS.get(r.get('status', 'new'), '-')}")
+            st.text(str(r.get("content") or "(내용 없음)"))
+            st.caption(f"👤 {who} · 🖥️ {r.get('screen', '-')} · 📊 {r.get('data_shape', '-')}")
+            if r.get("error"):
+                with st.expander("🧷 첨부된 오류 내용"):
+                    st.code(str(r["error"]), language=None)
+            if r.get("has_image"):
+                if st.button("🖼️ 캡처 보기", key=f"fbadm_img_{rid}"):
+                    d = _fs_get("feedback", rid) or {}
+                    if d.get("image"):
+                        import base64
+                        st.image(base64.b64decode(d["image"]))
+                    else:
+                        st.caption("이미지를 불러오지 못했어요.")
+            b = st.columns(3)
+            for i, (k, lab) in enumerate((("new", "새 신고로"), ("checked", "확인함으로"), ("done", "해결로"))):
+                if b[i].button(lab, key=f"fbadm_{k}_{rid}", width="stretch",
+                               disabled=(r.get("status", "new") == k)):
+                    e = _feedback_set_status(rid, k)
+                    if e:
+                        st.error(f"상태를 바꾸지 못했어요: {e}")
+                    else:
+                        st.rerun()
+    if len(rows) > 100:
+        st.caption(f"최근 100건만 보여 줘요 (전체 {len(rows)}건).")
+
+
+def _usage_dedupe_mask(uv, minutes=30):
+    """같은 사람이 같은 기능을 30분 안에 연달아 쓴 기록은 1번으로 친다(True = 세는 기록).
+    예전 버전은 화면을 다시 그릴 때마다 같은 기록을 또 남겨 횟수가 부풀려져 있다."""
+    if uv.empty:
+        return pd.Series(dtype=bool)
+    t = pd.to_datetime(uv.get("used_at"), errors="coerce", utc=True)
+    who = uv.get("user_id", pd.Series("", index=uv.index)).fillna("").astype(str)
+    who = who.where(who != "", uv.get("email", pd.Series("", index=uv.index)).fillna("").astype(str))
+    d = pd.DataFrame({"t": t, "who": who,
+                      "act": uv.get("action", pd.Series("", index=uv.index)).fillna("").astype(str),
+                      "app": uv.get("app", pd.Series("", index=uv.index)).fillna("").astype(str)},
+                     index=uv.index).sort_values(["who", "app", "act", "t"])
+    gap = d.groupby(["who", "app", "act"])["t"].diff()
+    keep = gap.isna() | (gap > pd.Timedelta(minutes=minutes))
+    return keep.reindex(uv.index).fillna(True).astype(bool)
+
+
 def render_admin_dashboard():
     st.title("👑 관리자 — 이용 현황")
     if not _is_admin_user():
@@ -3735,16 +4130,35 @@ def render_admin_dashboard():
     p = pd.DataFrame(profiles or [])
     ev = pd.DataFrame(events or [])
     uv = pd.DataFrame(usage or [])
+    # 버전 구분: 기록에 남긴 'app'(V1/V2). 이 기능 이전 기록은 표시가 없어 따로 묶는다.
+    _NOVER = "구분 없음(이전 기록)"
+    for df_ in (ev, uv):
+        if not df_.empty:
+            df_["app"] = (df_["app"].fillna("").replace("", _NOVER) if "app" in df_
+                          else pd.Series(_NOVER, index=df_.index))
+    ver_sel = st.radio("버전별로 보기", ["전체", "V1", "V2", _NOVER], horizontal=True, key="auth_admin_ver",
+                       help="로그인·기능 이용 기록과 신고를 버전별로 나눠 봅니다. "
+                            "버전 표시는 이 기능을 넣은 뒤부터 남아요.")
+    if ver_sel != "전체":
+        ev = ev[ev["app"] == ver_sel] if not ev.empty else ev
+        uv = uv[uv["app"] == ver_sel] if not uv.empty else uv
+    if not uv.empty:
+        uv = uv.assign(_count=_usage_dedupe_mask(uv).values)
     if not p.empty and "last_login_at" in p:
         p = p.sort_values("last_login_at", ascending=False, na_position="last")
-    for df_, col in ((p, "last_login_at"), (p, "created_at"), (ev, "logged_in_at"), (uv, "used_at")):
+    for df_, col in ((p, "last_login_at"), (p, "last_login_v1"), (p, "last_login_v2"), (p, "created_at"),
+                     (ev, "logged_in_at"), (uv, "used_at")):
         if not df_.empty and col in df_:
             df_[col] = _to_kst_text(df_[col])
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("가입 사용자", f"{len(p):,}명")
     c2.metric("확인된 소속기관", f"{p['organization'].fillna('').map(_org_canonical).replace('', np.nan).nunique() if 'organization' in p else 0:,}곳")
     c3.metric("로그인 기록", f"{len(ev):,}회")
-    c4.metric("기능 이용 기록", f"{len(uv):,}회")
+    c4.metric("기능 이용 (중복 제외)", f"{int(uv['_count'].sum()) if not uv.empty else 0:,}회",
+              help="같은 사람이 같은 기능을 30분 안에 연달아 쓴 기록은 1번으로 셉니다.")
+    if not uv.empty:
+        c4.caption(f"원래 기록 {len(uv):,}회")
+    _admin_feedback_section(ver_sel)
     _admin_verify_section(profiles, reload=_reloaded)
     if not p.empty and "organization" in p:
         st.markdown("### 🏢 기관별 사용자")
@@ -3755,10 +4169,11 @@ def render_admin_dashboard():
     if not p.empty:
         st.markdown("### 👥 사용자 목록")
         cols = [c for c in ["name", "email", "organization_type", "organization", "department",
-                            "created_at", "last_login_at"] if c in p]
+                            "created_at", "last_login_at", "last_login_v1", "last_login_v2"] if c in p]
         show = p[cols].rename(columns={"name": "이름", "email": "이메일", "organization_type": "기관유형",
                                        "organization": "소속기관", "department": "부서",
-                                       "created_at": "가입일", "last_login_at": "최근 로그인"})
+                                       "created_at": "가입일", "last_login_at": "최근 로그인",
+                                       "last_login_v1": "V1 최근 로그인", "last_login_v2": "V2 최근 로그인"})
         smart_table(show, width="stretch", hide_index=True)
         st.download_button("📊 사용자 목록 Excel", dataframe_to_styled_xlsx(show, "스마트 통계 에이전트 사용자 목록"),
                            "사용자목록.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -3767,20 +4182,25 @@ def render_admin_dashboard():
     if not uv.empty:
         st.markdown("### 📈 기관별 기능 이용")
         _orguse = (uv.assign(소속기관=uv.get("organization", pd.Series(index=uv.index, dtype=object)).fillna("").map(_org_canonical).replace("", "미입력"))
-                     .groupby("소속기관", dropna=False).size().reset_index(name="기능 이용 횟수")
-                     .sort_values("기능 이용 횟수", ascending=False))
+                     .groupby("소속기관", dropna=False)
+                     .agg(**{"기능 이용 횟수(중복 제외)": ("_count", "sum"), "원래 기록 수": ("_count", "size")})
+                     .reset_index()
+                     .sort_values("기능 이용 횟수(중복 제외)", ascending=False))
+        _orguse["기능 이용 횟수(중복 제외)"] = _orguse["기능 이용 횟수(중복 제외)"].astype(int)
         smart_table(_orguse, width="stretch", hide_index=True)
+        st.caption("같은 사람이 같은 기능을 30분 안에 연달아 쓴 기록은 1번으로 셉니다. "
+                   "예전 버전은 화면을 다시 그릴 때마다 같은 기록이 또 남아 '원래 기록 수'가 부풀려져 있어요.")
         st.markdown("### 🧭 최근 기능 이용 기록")
-        _ucols = [c for c in ["used_at", "name", "email", "organization", "department", "action"] if c in uv]
-        _ushow = uv[_ucols].head(500).rename(columns={"used_at": "이용시각", "name": "이름", "email": "이메일",
+        _ucols = [c for c in ["used_at", "app", "name", "email", "organization", "department", "action"] if c in uv]
+        _ushow = uv[_ucols].head(500).rename(columns={"used_at": "이용시각", "app": "버전", "name": "이름", "email": "이메일",
                                                         "organization": "소속기관", "department": "부서", "action": "기능"})
         smart_table(_ushow, width="stretch", hide_index=True)
     if e2:
         st.caption(f"로그인 기록을 불러오지 못했습니다: {e2}")
     if not ev.empty:
         st.markdown("### 🕘 최근 로그인")
-        cols = [c for c in ["logged_in_at", "name", "email", "organization", "department"] if c in ev]
-        show2 = ev[cols].head(300).rename(columns={"logged_in_at": "접속시각", "name": "이름", "email": "이메일",
+        cols = [c for c in ["logged_in_at", "app", "name", "email", "organization", "department"] if c in ev]
+        show2 = ev[cols].head(300).rename(columns={"logged_in_at": "접속시각", "app": "버전", "name": "이름", "email": "이메일",
                                                    "organization": "소속기관", "department": "부서"})
         smart_table(show2, width="stretch", hide_index=True)
 
@@ -6016,6 +6436,7 @@ _V1_TEMPLATE_EXAMPLES = {
 _V1_GUIDE_SHEETS = ("작성방법", "작성예시")    # 양식의 안내용 시트 — 업로드할 때 데이터로 읽지 않는다
 
 
+@st.cache_data(show_spinner=False, max_entries=10)
 def _v1_template_bytes(columns, examples=None):
     from openpyxl.styles import Font, PatternFill, Alignment
     out = io.BytesIO()
@@ -6499,7 +6920,9 @@ _PIN_BUTTON_PREFIX = ("__btn_", "btn_", "aib_", "aiadd_", "aidel_", "errai_",
                       "econ_entry_", "econ_g_",
                       "hwx_", "dcx_", "csv_", "xls_", "gai_",
                       "svyhwp_", "svyxls_",
-                      "voice_m_audio_", "voice_m_editor_", "ssa_", "v1_tpl_", "pdf_editor_")
+                      "voice_m_audio_", "voice_m_editor_", "ssa_", "v1_tpl_", "pdf_editor_",
+                      # 홈 버튼(배너·로고), 오류·불편 신고 화면·관리자 신고함의 버튼/파일 칸
+                      "v1_hero_", "v1_brand_", "errfb_", "fb_", "fbadm_")
 
 # 데이터와 무관하지만 '메뉴 안에서만' 그려지는 위젯들 — 데이터별로 나눌 필요는 없어도
 # 매 실행마다 붙잡아 두지 않으면 다른 메뉴에 다녀올 때 기본값으로 돌아간다.
@@ -7404,17 +7827,47 @@ def _is_voice_mode():
 # Firebase가 설정되고 AUTH_REQUIRED=true이면 로그인한 사용자만 아래 앱을 렌더링합니다.
 render_auth_gate()
 _ai_remember_load()
+_keep_ai_settings()
 if _is_voice_mode():
     render_voice_mode()
     st.stop()
 
+def _go_home():
+    """배너·로고를 누르면 홈 화면으로. 왼쪽 메뉴 두 묶음의 선택 점도 모두 비운다."""
+    st.session_state["menu_choice"] = _HOME_MENU
+    st.session_state["menu_main"] = None
+    st.session_state["menu_support"] = None
+
+
+# 배너·로고 위에 보이지 않는 버튼을 겹쳐서, 누르면 페이지 새로고침 없이 홈으로 간다.
+# (링크로 만들면 새로고침되면서 올려 둔 데이터와 분석 결과가 사라진다)
+_HOME_CLICK_CSS = """
+<style>
+.st-key-v1_hero_box {position:relative; margin:1.65rem 0 1.00rem 0;}
+.st-key-v1_hero_box .v1-hero {margin:0 !important; transition:box-shadow .15s ease;}
+.st-key-v1_hero_box:hover .v1-hero {box-shadow:0 8px 24px rgba(76,137,96,.18);}
+.st-key-v1_brand_box {position:relative;}
+.st-key-v1_brand_box:hover .v1-sidebar-brand-title {color:#25A953;}
+.st-key-v1_hero_home_btn, .st-key-v1_brand_home_btn {
+    position:absolute !important; inset:0; z-index:6; margin:0 !important;
+    width:100% !important; height:100% !important; max-width:none !important;}
+.st-key-v1_hero_home_btn div, .st-key-v1_brand_home_btn div,
+.st-key-v1_hero_home_btn button, .st-key-v1_brand_home_btn button {
+    width:100% !important; height:100% !important; min-height:0 !important;}
+.st-key-v1_hero_home_btn button, .st-key-v1_brand_home_btn button {
+    opacity:0 !important; cursor:pointer !important; padding:0 !important; border:0 !important;}
+</style>
+"""
+
 # ================================================================ 사이드바
-st.sidebar.markdown("""
+with st.sidebar.container(key="v1_brand_box"):
+    st.markdown("""
 <div class="v1-sidebar-brand">
   <div class="v1-sidebar-brand-title">스마트 통계 에이전트</div>
   <div class="v1-sidebar-brand-sub"><span class="v1-ver">Version 1</span><span class="v1-sub-txt">실험 데이터 자동 통계 분석</span></div>
 </div>
 """, unsafe_allow_html=True)
+    st.button("홈으로", key="v1_brand_home_btn", on_click=_go_home)
 
 # 로그인 사용자의 소속을 사이드바에 표시한다.
 _auth_u = _current_auth_user()
@@ -7786,22 +8239,27 @@ if st.session_state.files and st.sidebar.button(
 
 # 메뉴 — V1은 분석 시작 3개만 강조, 보고서·AI·설명서는 보조 기능으로 작게 표시
 _MAIN_MENU_OPTIONS = ["⚡ 원클릭 분석", "📊 통계분석", "📋 설문조사 분석"]
-_SUPPORT_MENU_OPTIONS = ["📑 보고서", "🧠 AI 도우미", "📖 사용설명서"]
+_SUPPORT_MENU_OPTIONS = ["📑 보고서", "🧠 AI 도우미", "📖 사용설명서", _FEEDBACK_MENU]
 if _is_admin_user():
     _SUPPORT_MENU_OPTIONS.append("👑 관리자")
 _all_menu_options = _MAIN_MENU_OPTIONS + _SUPPORT_MENU_OPTIONS
-if st.session_state.get("menu_choice") not in _all_menu_options:
+if st.session_state.get("menu_choice") not in _all_menu_options + [_HOME_MENU]:
     st.session_state["menu_choice"] = _MAIN_MENU_OPTIONS[0]
 
+# 두 메뉴 묶음은 서로 다른 라디오 버튼이라, 한쪽을 고르면 다른 쪽 선택을 비워야 한다.
+# 그렇지 않으면 예전에 고른 항목이 선택된 채 남아서, 그 항목을 다시 눌러도 '바뀐 게 없다'고
+# 보고 화면이 넘어가지 않았다.
 def _menu_from_main():
     value = st.session_state.get("menu_main")
     if value:
         st.session_state["menu_choice"] = value
+        st.session_state["menu_support"] = None
 
 def _menu_from_support():
     value = st.session_state.get("menu_support")
     if value:
         st.session_state["menu_choice"] = value
+        st.session_state["menu_main"] = None
 
 st.sidebar.markdown("""
 <style>
@@ -8036,10 +8494,14 @@ st.sidebar.markdown('<div class="v1-section-label">보조 기능</div>', unsafe_
 _current_menu = st.session_state.get("menu_choice")
 with st.sidebar.container(key="support_menu_block"):
     _support_idx = (_SUPPORT_MENU_OPTIONS.index(_current_menu) if _current_menu in _SUPPORT_MENU_OPTIONS else None)
+    _fb_new = _feedback_new_count() if _is_admin_user() else 0
     st.radio("보조 기능", _SUPPORT_MENU_OPTIONS, index=_support_idx, key="menu_support",
-             label_visibility="collapsed", on_change=_menu_from_support)
+             label_visibility="collapsed", on_change=_menu_from_support,
+             format_func=lambda o: (f"{o} · 새 신고 {_fb_new}건" if o == "👑 관리자" and _fb_new else o))
 
 menu = st.session_state.get("menu_choice", _MAIN_MENU_OPTIONS[0])
+if menu not in (_FEEDBACK_MENU, _HOME_MENU):
+    st.session_state["_fb_last_menu"] = menu      # 신고할 때 '보고 있던 화면'으로 함께 보낸다
 
 st.sidebar.markdown('<div class="v1-side-mascot" aria-hidden="true"></div>', unsafe_allow_html=True)
 
@@ -9588,8 +10050,42 @@ def money_table(df, dec_overrides=None):
     return out
 
 
+def _ml_cached(tag, data, builder):
+    """머신러닝: 같은 자료·같은 알고리즘이면 학습해 둔 모델(또는 중요도 결과)을 그대로 쓴다.
+    결과가 떠 있는 동안 다른 것을 누를 때마다 모델을 처음부터 다시 학습하던 것을 막는다.
+    (random_state가 고정되어 있어 다시 학습해도 결과는 같다)"""
+    try:
+        import pickle, hashlib
+        key = repr(tag) + ":" + hashlib.sha1(pickle.dumps(data, protocol=4)).hexdigest()
+    except Exception:
+        return builder()
+    cache = st.session_state.setdefault("_ml_cache", {})
+    if key in cache:
+        return cache[key]
+    out = builder()
+    if len(cache) >= 12:
+        cache.pop(next(iter(cache)))
+    cache[key] = out
+    return out
+
+
+_LOG_REPEAT_SEC = 30 * 60   # 같은 작업을 이 시간 안에 연달아 하면 1번으로 친다
+
+
 def log_action(what):
-    import datetime
+    """분석 이력에 남기고 이용 기록(Firebase)에 저장한다.
+
+    분석 결과가 화면에 떠 있는 동안 다른 것을 누르면 화면 전체를 다시 그리면서 같은 분석
+    코드가 다시 실행된다. 예전에는 그때마다 같은 기록을 또 남기고 서버에 저장하러 다녀와서
+    화면이 느려지고 이용 횟수도 부풀려졌다. 같은 작업을 30분 안에 연달아 하면 1번만 남긴다.
+    """
+    import datetime, time as _time
+    seen = st.session_state.setdefault("_log_seen", {})
+    now, key = _time.time(), str(what)
+    last = seen.get(key)
+    seen[key] = now
+    if last is not None and now - last < _LOG_REPEAT_SEC:
+        return
     st.session_state.setdefault("log", []).append(
         {"시각": datetime.datetime.now().strftime("%H:%M:%S"), "작업": what})
     _record_usage(what)
@@ -9636,14 +10132,23 @@ def render_ai_connection_settings():
         if len(_models) >= 2:
             _labels[_models[1]] = f"{_models[1]} (정교함)"
         _opts = list(_models) + ["✏️ 직접 입력"]
+        # 다른 화면에 다녀와도 고른 모델이 처음 모델로 돌아가지 않게, 지금 쓰는 모델을 기본 선택으로 둔다.
+        _cur_model = str(st.session_state.get("ai_model_g") or "")
+        _fam = {"Claude": ("claude",), "Gemini": ("gemini",),
+                "ChatGPT": ("gpt", "o1", "o3", "o4", "chatgpt")}.get(provider.split()[0], ())
+        if _cur_model and _fam and not _cur_model.lower().startswith(_fam):
+            _cur_model = ""      # 제공사를 바꾼 경우: 그 제공사의 첫 모델부터
         if not _models:
             st.caption("설정된 모델 목록이 없습니다. 모델명을 직접 입력해 주세요.")
-            _sel = st.text_input("모델명 직접 입력", value="",
+            _sel = st.text_input("모델명 직접 입력", value=_cur_model,
                                  placeholder="예) claude-sonnet-5")
         else:
-            _sel = st.selectbox("모델", _opts, format_func=lambda m: _labels.get(m, m))
+            _m_idx = (_opts.index(_cur_model) if _cur_model in _models
+                      else (len(_opts) - 1 if _cur_model else 0))
+            _sel = st.selectbox("모델", _opts, index=_m_idx, format_func=lambda m: _labels.get(m, m))
             if _sel == "✏️ 직접 입력":
-                _sel = st.text_input("모델명 직접 입력", value=_models[0],
+                _sel = st.text_input("모델명 직접 입력",
+                                     value=(_cur_model if _cur_model and _cur_model not in _models else _models[0]),
                                      help="새 모델이 나왔을 때 여기에 이름을 넣으면 바로 쓸 수 있습니다.")
         st.session_state["ai_model_g"] = _sel
         ai_model = _sel
@@ -9668,7 +10173,6 @@ st.sidebar.markdown("---")
 _ct_org, _, _ct_person = CONTACT_NAME.rpartition(" ")
 st.sidebar.caption(f"📮 **문의**  \n{_ct_org or CONTACT_NAME}  \n"
                    + (f"{_ct_person} · " if _ct_org else "") + f"[{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
-st.sidebar.caption("스마트 통계 에이전트 얏호(*/ω＼*)")
 
 # ================================================================ 떠 있는 AI 도우미
 _ATT_LIMIT = 12000          # 첨부 전체에서 AI 에게 넘길 글자 수 상한
@@ -9907,7 +10411,9 @@ except Exception as _gex:
         pass
 
 
-st.markdown("""
+st.markdown(_HOME_CLICK_CSS, unsafe_allow_html=True)
+with st.container(key="v1_hero_box"):
+    st.markdown("""
 <div class="v1-hero" aria-label="스마트 통계 에이전트 Version 1">
   <div class="v1-hero-copy">
     <div class="v1-hero-title">스마트 통계 에이전트 <span>Version 1</span></div>
@@ -9916,6 +10422,7 @@ st.markdown("""
   <div class="v1-hero-mascot" aria-hidden="true"></div>
 </div>
 """, unsafe_allow_html=True)
+    st.button("홈으로", key="v1_hero_home_btn", on_click=_go_home)
 
 
 # ================================================================ 홈 화면 (데이터를 불러오기 전)
@@ -10027,6 +10534,7 @@ def render_v1_home():
   <tr><td class="m">📑 보고서</td><td>담아 둔 표·그래프를 문서로 만들 때</td><td>한글(hwpx) · 워드(docx)</td></tr>
   <tr><td class="m">🧠 AI 도우미 <span class="h-tag gray">API 키</span></td><td>결과 해석·고찰 문장, 통계 질문</td><td>AI 해석 · 질문하기</td></tr>
   <tr><td class="m">📖 사용설명서</td><td>데이터 작성법과 사용법을 확인할 때</td><td>메뉴별 설명 · 자주 틀리는 예시</td></tr>
+  <tr><td class="m">📮 오류·불편 신고</td><td>오류가 나거나 불편한 점을 관리자에게 알릴 때</td><td>오류·불편·건의·질문 · 캡처 첨부 · 익명 가능</td></tr>
 </table>
 <div class="h-v2"><div class="i">🔬</div>
   <div><div class="tt">Version 2 전문형<span>고급</span></div>
@@ -10035,7 +10543,10 @@ def render_v1_home():
 """ + _V1_HOME_TIPS + "</div>", unsafe_allow_html=True)
 
 # ================================================================ 공통 가드
-if df is None and menu not in ("📑 보고서", "📖 사용설명서", "🧠 AI 도우미", "👑 관리자"):
+if menu == _HOME_MENU:               # 배너·로고를 누르면 데이터가 있어도 홈 화면
+    render_v1_home()
+    st.stop()
+if df is None and menu not in ("📑 보고서", "📖 사용설명서", "🧠 AI 도우미", "👑 관리자", _FEEDBACK_MENU):
     render_v1_home()
     st.stop()
 
@@ -11661,7 +12172,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         "Lasso": Pipeline([("scale", StandardScaler()), ("model", Lasso(alpha=0.01, max_iter=5000))]),
                         "ElasticNet": Pipeline([("scale", StandardScaler()), ("model", ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=5000))]),
                     }
-                    model = mreg[algo].fit(Xtr, ytr)
+                    model = _ml_cached(("fit", "reg", algo), (Xtr, ytr), lambda: mreg[algo].fit(Xtr, ytr))
                     pred = model.predict(Xte)
                     s_ = r2_score(yte, pred)
                     _mae = float(np.mean(np.abs(np.asarray(yte) - pred)))
@@ -11694,7 +12205,7 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                         "로지스틱 회귀": Pipeline([("scale", StandardScaler()), ("model", LogisticRegression(max_iter=3000, random_state=0))]),
                         "GaussianNB": GaussianNB(),
                     }
-                    model = mclf[algo].fit(Xtr, ytr)
+                    model = _ml_cached(("fit", "clf", algo), (Xtr, ytr), lambda: mclf[algo].fit(Xtr, ytr))
                     pred = model.predict(Xte)
                     s_ = accuracy_score(yte, pred)
                     _baseline = float(pd.Series(ytr).value_counts(normalize=True).max()) if len(ytr) else None
@@ -11723,8 +12234,10 @@ ANCOVA는 '정식 당시 묘 크기'를 **공변량**으로 넣어 그 영향을
                     _imp_method = "표준화 계수 절댓값"
                 else:
                     try:
-                        _perm = permutation_importance(model, Xte, yte, n_repeats=12, random_state=0,
-                                                       scoring=("r2" if is_reg else "accuracy"))
+                        _perm = _ml_cached(("perm", is_reg, algo), (Xtr, ytr, Xte, yte),
+                                           lambda: permutation_importance(
+                                               model, Xte, yte, n_repeats=12, random_state=0,
+                                               scoring=("r2" if is_reg else "accuracy")))
                         _imp_vals = np.clip(np.asarray(_perm.importances_mean, dtype=float), 0, None)
                         _imp_method = "순열 중요도"
                     except Exception:
@@ -12621,6 +13134,9 @@ elif menu == "📋 설문조사 분석":
         survey_download_panel("cap_ct", "cross", "설문_교차분석")
 
 # ================================================================ 사용설명서
+elif menu == _FEEDBACK_MENU:
+    render_feedback_page()
+
 elif menu == "👑 관리자":
     render_admin_dashboard()
 
@@ -12733,6 +13249,9 @@ Version 1은 통계를 처음 접하는 연구자도 **데이터 준비 → 파�
 | 📑 **보고서** | 담아 둔 표·그래프를 문서로 만들 때 | 한글(hwpx) · 워드(docx) |
 | 🧠 **AI 도우미** | 결과 해석·고찰 문장, 통계 질문 | AI 해석 · 질문하기 (API 키 필요) |
 | 📖 **사용설명서** | 데이터 작성법과 사용법을 확인할 때 | 메뉴별 설명 · 자주 틀리는 예시 |
+| 📮 **오류·불편 신고** | 오류가 나거나 불편한 점을 관리자에게 알릴 때 | 오류·불편·건의·질문 · 캡처 첨부 · 익명 가능 |
+
+위쪽 배너(스마트 통계 에이전트 Version 1)나 왼쪽 위 로고를 누르면 언제든 홈 화면으로 돌아갑니다. 올려 둔 데이터와 분석 결과는 그대로 남아 있어요.
 
 ---
 
@@ -12849,7 +13368,9 @@ Version 1은 자주 쓰는 분석과 쉬운 선택에 집중합니다. **경제�
 
 ## 17. 문의
 
-사용 중 오류가 나거나 궁금한 점이 있으면 아래로 연락해 주세요. 오류라면 화면을 캡처해 함께 보내 주시면 빠르게 확인할 수 있습니다.
+사용 중 오류가 나거나 불편한 점이 있으면 왼쪽 **📮 오류·불편 신고**에 남겨 주세요. 종류(오류·불편사항·기능 건의·질문)를 고르고 내용을 적으면 관리자가 바로 확인합니다. 캡처 이미지를 붙일 수 있고, **익명으로 보내기**를 체크하면 이름·소속을 저장하지 않아요(대신 답변은 받을 수 없어요). 오류가 났을 때 뜨는 🆘 도움받기 상자의 **📮 이 오류 신고하기**를 누르면 오류 내용이 자동으로 담깁니다.
+
+메일로 직접 연락하셔도 됩니다. 오류라면 화면을 캡처해 함께 보내 주시면 빠르게 확인할 수 있습니다.
 
 - **경상북도농업기술원 영양고추연구소 이효진**
 - 이메일: hyo99@korea.kr
