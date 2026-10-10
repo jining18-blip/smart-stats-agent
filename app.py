@@ -182,6 +182,12 @@ CONTACT_EMAIL = "hyo99@korea.kr"
 # 로그인·이용 기록·신고에 함께 남겨 관리자 화면에서 버전별로 나눠 본다(V2 코드에는 "V2").
 APP_VERSION = "V1"
 
+# 사이트 공지 — 내용과 끝나는 시각(한국 시간)만 바꾸면 된다. 끝나는 시각이 지나면 저절로 사라진다.
+# 공지가 필요 없으면 _SITE_NOTICE = "" 로 두면 된다.
+_SITE_NOTICE = ("⏳ 지금 서버 사용량이 많아 **오늘(10월 10일) 오후 3시 무렵까지** 분석과 화면 전환이 "
+                "평소보다 느릴 수 있어요. 기다리시면 정상적으로 처리됩니다. 불편을 드려 죄송합니다.")
+_SITE_NOTICE_UNTIL = "2026-10-10 15:10"
+
 # 아래 CSS는 V1의 배경/사이드바 분위기만 바꿉니다.
 # 통계 그래프와 Excel 차트 디자인은 기존 검증 버전을 그대로 사용합니다.
 st.markdown("""<style>
@@ -3093,11 +3099,14 @@ def _remember_read():
 
 def _remember_save(refresh_token):
     """로그인 상태 유지를 켠 세션에서 매 화면 호출. 같은 key라 브라우저에서는 한 번만 실행된다."""
-    import json, time, hashlib
-    payload = json.dumps({"rt": refresh_token, "exp": time.time() + _REMEMBER_DAYS * 86400})
+    import json, hashlib
+    # 만료 시각은 브라우저에서 계산한다. 예전처럼 파이썬에서 time.time()을 넣으면 실행할 때마다
+    # 식이 달라져 부품이 매번 다시 저장하고 → 화면을 다시 그리고 → 또 저장하는 무한 반복이 생겼다
+    # (로그인 상태 유지를 켠 창이 가만히 있어도 계속 다시 실행되어 CPU를 다 써 버림).
     tag = hashlib.sha1(refresh_token.encode()).hexdigest()[:10]
     gen = st.session_state.get("_auth_remember_gen", 0)
-    _js_eval(f"localStorage.setItem('{_REMEMBER_KEY}', {json.dumps(payload)}) || 'ok'",
+    _js_eval(f"localStorage.setItem('{_REMEMBER_KEY}', JSON.stringify({{rt: {json.dumps(refresh_token)}, "
+             f"exp: Date.now() / 1000 + {_REMEMBER_DAYS * 86400}}})) || 'ok'",
              key=f"ssa_remember_save_{gen}_{tag}")
 
 
@@ -7824,6 +7833,22 @@ def _is_voice_mode():
         return False
 
 
+def _render_site_notice():
+    """맨 위 공지(로그인 화면·앱 화면 공통). 끝나는 시각이 지나면 보이지 않는다."""
+    if not _SITE_NOTICE:
+        return
+    try:
+        import datetime as _dt
+        _kst = _dt.timezone(_dt.timedelta(hours=9))
+        _until = _dt.datetime.strptime(_SITE_NOTICE_UNTIL, "%Y-%m-%d %H:%M").replace(tzinfo=_kst)
+        if _dt.datetime.now(_kst) >= _until:
+            return
+    except Exception:
+        pass
+    st.warning(_SITE_NOTICE)
+
+
+_render_site_notice()
 # Firebase가 설정되고 AUTH_REQUIRED=true이면 로그인한 사용자만 아래 앱을 렌더링합니다.
 render_auth_gate()
 _ai_remember_load()
