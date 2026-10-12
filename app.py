@@ -3536,8 +3536,10 @@ def _render_google_button():
     # 마크다운을 거치지 않는 st.html로 그려 그 문제를 피하고, 쓸 수 없으면 기본 버튼으로 내려간다.
     _same_window = False
     if _GOOGLE_BTN_SAME_WINDOW and hasattr(st, "html"):
-        import html as _html
-        _gurl = _html.escape(_url, quote=True)
+        # 주소를 html.escape로 바꾸면 '&'가 '&amp;'가 되는데, st.html이 한 번 더 바꾸면
+        # '&amp;amp;'가 되어 Google이 파라미터를 읽지 못하고 403을 낸다.
+        # urlencode를 거친 주소에는 따옴표·꺾쇠·공백이 없으므로 그대로 넣는 쪽이 안전하다.
+        _gurl = str(_url).replace('"', "%22")
         try:
             st.html(
                 "<style>a.ssa-google-btn,a.ssa-google-btn:visited{display:block;text-align:center;"
