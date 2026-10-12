@@ -3516,6 +3516,11 @@ def _render_google_first_visit():
     return True
 
 
+# Google 버튼을 같은 창에서 열지(True) 새 탭에서 열지(False) 정하는 스위치.
+# True인데도 버튼이 안 눌리는 환경이면 False로 바꾸면 스트림릿 기본 버튼(새 탭)으로 돌아간다.
+_GOOGLE_BTN_SAME_WINDOW = True
+
+
 def _render_google_button():
     """로그인 탭들 위에 'Google로 로그인' 버튼을 그린다. 설정이 없으면 아무것도 그리지 않는다."""
     if not _google_config()["enabled"]:
@@ -3524,18 +3529,34 @@ def _render_google_button():
     if msg:
         st.error(msg)
     remember = bool(st.session_state.get("auth_remember")) if _HAS_JS_EVAL else False
+    _url = _google_login_url(remember)
     # st.link_button은 항상 새 탭으로 열려서, 로그인 후 '로그인 화면 창 + 로그인된 창' 두 개가 남았다.
-    # 같은 창에서 Google로 갔다가 돌아오도록 링크(target="_top")로 만든다.
-    import html as _html
-    _gurl = _html.escape(_google_login_url(remember), quote=True)
-    st.markdown(
-        "<style>a.ssa-google-btn,a.ssa-google-btn:visited{display:block;text-align:center;"
-        "background:#FF4B4B;color:#FFFFFF !important;text-decoration:none !important;"
-        "border-radius:0.5rem;padding:0.5rem 0.75rem;font-size:1rem;line-height:1.6;}"
-        "a.ssa-google-btn:hover{background:#E03E3E;color:#FFFFFF !important;}</style>"
-        f'<a class="ssa-google-btn" href="{_gurl}" target="_top">Google로 로그인</a>',
-        unsafe_allow_html=True)
-    st.caption("Google 계정을 고르면 이 창에서 바로 들어갑니다. 인증 메일이 필요 없어요.")
+    # 같은 창에서 가려면 링크를 직접 그려야 하는데, st.markdown으로 그린 링크는 스트림릿이 링크를
+    # 자기 방식으로 다시 그리면서 클릭이 먹지 않는 경우가 있다(주소 복사는 되는데 눌러도 반응 없음).
+    # 마크다운을 거치지 않는 st.html로 그려 그 문제를 피하고, 쓸 수 없으면 기본 버튼으로 내려간다.
+    _same_window = False
+    if _GOOGLE_BTN_SAME_WINDOW and hasattr(st, "html"):
+        import html as _html
+        _gurl = _html.escape(_url, quote=True)
+        try:
+            st.html(
+                "<style>a.ssa-google-btn,a.ssa-google-btn:visited{display:block;text-align:center;"
+                "background:#FF4B4B;color:#FFFFFF !important;text-decoration:none !important;"
+                "border-radius:0.5rem;padding:0.5rem 0.75rem;font-size:1rem;line-height:1.6;"
+                "font-weight:600;cursor:pointer;border:1px solid #FF4B4B;}"
+                "a.ssa-google-btn:hover{background:#E03E3E;border-color:#E03E3E;"
+                "color:#FFFFFF !important;}"
+                "a.ssa-google-btn:active{transform:translateY(1px);}</style>"
+                f'<a class="ssa-google-btn" href="{_gurl}" target="_self" '
+                'rel="noopener">Google로 로그인</a>')
+            _same_window = True
+        except Exception:
+            _same_window = False
+    if not _same_window:              # 스트림릿 기본 버튼 — 새 탭으로 열리지만 어디서나 눌린다
+        st.link_button("Google로 로그인", _url, type="primary", width="stretch")
+    st.caption("Google 계정을 고르면 이 창에서 바로 들어갑니다. 인증 메일이 필요 없어요."
+               if _same_window else
+               "새 창에서 Google 계정을 고르면 바로 들어갑니다. 인증 메일이 필요 없어요.")
     st.markdown("<div style='text-align:center;color:#888;font-size:0.85rem;margin:6px 0 2px'>"
                 "또는 이메일로</div>", unsafe_allow_html=True)
 
@@ -7974,9 +7995,96 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="v1_tpl_main", width="stretch")
 
+# ---------------------------------------------------------------- 샘플 데이터 (2026-10-12 추가)
+# 올릴 자료가 없는 첫 사용자도 전체 흐름(분석→그래프→보고서)을 바로 볼 수 있게 가상의 예시 자료를 둔다.
+# 저장소에 sample_data.xlsx 를 app.py 와 같은 자리에 함께 올려 두어야 한다.
+# 파일이 없으면 버튼 자체가 나타나지 않으므로, 안 올려도 지금까지와 똑같이 동작한다.
+_SAMPLE_FILE = "sample_data.xlsx"
+_SAMPLE_PREFIX = "샘플(가상자료)"      # 실제 시험 결과로 오해하지 않도록 데이터 이름에 붙인다
+
+
+def _sample_path():
+    """저장소에 넣어 둔 샘플 엑셀의 경로. 없으면 None."""
+    import os
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        _here = "."
+    for _p in (os.path.join(_here, _SAMPLE_FILE), _SAMPLE_FILE):
+        try:
+            if os.path.exists(_p):
+                return _p
+        except Exception:
+            continue
+    return None
+
+
+def _load_sample_data():
+    """샘플 엑셀을 시트별로 불러와 분석 데이터로 넣는다(버튼 on_click 전용)."""
+    st.session_state.setdefault("files", {})
+    _p = _sample_path()
+    if not _p:
+        st.session_state["_sample_msg"] = ("샘플 데이터 파일을 찾지 못했습니다. "
+                                           f"저장소에 {_SAMPLE_FILE} 을 올려 주세요.")
+        return
+    try:
+        _sheets = pd.read_excel(_p, sheet_name=None)
+    except Exception as _e:
+        st.session_state["_sample_msg"] = f"샘플 데이터를 읽지 못했습니다: {_e}"
+        return
+    _first = None
+    for _sh, _d in _sheets.items():
+        _name = str(_sh).strip()
+        if _name in _V1_GUIDE_SHEETS:          # 양식 파일의 안내 시트는 데이터가 아니다
+            continue
+        _key = f"{_SAMPLE_PREFIX}_{_name}"
+        try:
+            st.session_state.files[_key] = clean_columns(_d.dropna(axis=1, how="all"))
+        except Exception:
+            continue
+        if _first is None:
+            _first = _key
+    if _first is None:
+        st.session_state["_sample_msg"] = "샘플 데이터에서 읽을 수 있는 시트가 없습니다."
+        return
+    st.session_state.cur_key = _first
+    st.session_state.df = st.session_state.files[_first].copy()
+    st.session_state["_sample_msg"] = None
+    # 홈 화면에서 눌렀으면 바로 분석 화면으로 보낸다(다른 화면을 보고 있었다면 그 화면을 그대로 둔다).
+    # on_click 이라 위젯이 만들어지기 전에 실행되므로 메뉴 값을 바꿔도 안전하다.
+    if st.session_state.get("menu_choice") in (None, _HOME_MENU):
+        st.session_state["menu_choice"] = "⚡ 원클릭 분석"
+        st.session_state["menu_main"] = "⚡ 원클릭 분석"
+        st.session_state["menu_support"] = None
+
+
+def _render_sample_msg():
+    """샘플 불러오기가 실패했을 때만 사유를 보여 준다."""
+    _m = st.session_state.pop("_sample_msg", None)
+    if _m:
+        st.warning(_m)
+
+
 st.sidebar.button("🎤 말로 데이터 입력", width="stretch", key="voice_open_side", on_click=_voice_open,
                   help="음성 입력 화면으로 이동합니다. 말하는 동안 표가 바로 채워져요.")
 with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
+    # 올릴 자료가 없어도 먼저 둘러볼 수 있도록, 맨 위에 샘플 데이터를 둔다.
+    if _sample_path():
+        st.button("📋 샘플 데이터 불러오기", width="stretch", key="ssa_sample_load_side",
+                  on_click=_load_sample_data,
+                  help="고추 포장시험·현장설문 가상자료입니다. 올릴 자료가 없어도 바로 둘러볼 수 있어요.")
+        try:
+            with open(_sample_path(), "rb") as _sf:
+                st.download_button(
+                    "⬇️ 샘플 엑셀 받기", _sf.read(), file_name="스마트통계_샘플데이터.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="ssa_sample_dl", width="stretch",
+                    help="열 이름을 어떻게 쓰는지 볼 수 있는 예시 파일입니다.")
+        except Exception:
+            pass
+        _render_sample_msg()
+        st.caption("샘플은 **가상자료**입니다. 시험 결과로 쓰지 마세요.")
+        st.divider()
     # 휴대폰 음성 입력 화면에서 쌓아 둔 행이 있으면 바로 불러올 수 있게 한다.
     _vd = _voice_draft_peek() if (_voice_uid() and _fs_session() is not None) else None
     if _vd:
@@ -10542,6 +10650,11 @@ def render_v1_home():
     # 휴대폰에서는 사이드바가 접혀 있으므로 첫 화면에 바로 보이게 둔다.
     st.button("🎤 현장에서 음성으로 데이터 입력하기", type="primary", width="stretch", key="voice_open_home",
               on_click=_voice_open, help="말하는 동안 표가 바로 채워집니다. 다 입력하면 '이 표로 바로 분석하기'를 누르세요.")
+    # 올릴 자료가 아직 없는 사람이 흐름을 먼저 볼 수 있게 샘플 데이터를 바로 불러온다.
+    if _sample_path():
+        st.button("📋 샘플 데이터로 둘러보기 (가상자료)", width="stretch", key="ssa_sample_load_home",
+                  on_click=_load_sample_data,
+                  help="고추 포장시험·현장설문 예시 자료를 불러와 ⚡ 원클릭 분석을 바로 보여 줍니다.")
     st.markdown(_V1_HOME_CSS + """
 <div class="h-wrap">
 <div class="h-lead">처음 오셨나요? 4단계면 끝나요 🌱</div>
