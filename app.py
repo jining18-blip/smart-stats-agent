@@ -3517,8 +3517,9 @@ def _render_google_first_visit():
 
 
 # Google 버튼을 같은 창에서 열지(True) 새 탭에서 열지(False) 정하는 스위치.
-# True인데도 버튼이 안 눌리는 환경이면 False로 바꾸면 스트림릿 기본 버튼(새 탭)으로 돌아간다.
-_GOOGLE_BTN_SAME_WINDOW = True
+# 2026-10-12: 같은 창 방식(직접 그린 링크)에서 Google이 403을 돌려주는 문제가 있어 False로 둔다.
+# False면 V2와 똑같이 스트림릿 기본 버튼(st.link_button, 새 탭)을 쓴다 — V2에서 정상 동작 중인 방식.
+_GOOGLE_BTN_SAME_WINDOW = False
 
 
 def _render_google_button():
