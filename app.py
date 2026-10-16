@@ -7940,7 +7940,7 @@ st.sidebar.markdown("""
 }
 /* 접혀 있어도 안에 무엇이 있는지 보이게, 같은 노란 상자 아래쪽에 붙여서 한 줄 둔다. */
 [data-testid="stSidebar"] .v1-guide-hint {
-    margin:-.95rem 0 .1rem 0; border:2px solid #F2C94C; border-top:none;
+    margin:-1.12rem 0 .1rem 0; border:2px solid #F2C94C; border-top:none;
     border-radius:0 0 12px 12px; background:#FFFBEA; padding:.38rem .95rem .46rem .95rem;
     color:#8A6A14; font-size:.80rem; line-height:1.4;
 }
@@ -8486,6 +8486,10 @@ _V1_REFERENCE_THEME_CSS = """
 [data-testid="stSidebar"] .v1-user {line-height:1.38; padding-top:.15rem;}
 [data-testid="stSidebar"] .v1-user b {color:#17344B; font-size:.95rem;}
 [data-testid="stSidebar"] .v1-user span {color:#5F6F66; font-size:.82rem;}
+/* 로그아웃 버튼을 아래 상자들과 오른쪽 끝을 맞춘다. */
+[data-testid="stSidebar"] .st-key-v1_user_box [data-testid="stColumn"]:last-child {
+    display:flex !important; justify-content:flex-end !important; align-items:center !important;
+}
 [data-testid="stSidebar"] .st-key-auth_logout_sidebar button {
     padding:.42rem .80rem !important; border-radius:9px !important;
     color:#3F5247 !important; border-color:#C8E8D2 !important; background:#FFFFFF !important;
