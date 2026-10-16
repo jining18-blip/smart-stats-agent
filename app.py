@@ -7924,9 +7924,13 @@ if _auth_u:
     _meta = _auth_u.get("user_metadata") or {}
     _who = _meta.get("name") or str(_auth_u.get("email", "")).split("@")[0]
     _org = _meta.get("organization") or "소속 미입력"
-    st.sidebar.markdown(f"**👤 {_who}**  \n🏢 {_org}")
-    if st.sidebar.button("로그아웃", width="stretch", key="auth_logout_sidebar"):
-        _auth_logout()
+    # 로그아웃은 한 줄을 통째로 쓰지 않고 소속 옆에 작게 둔다(사이드바 세로 공간 절약).
+    with st.sidebar.container(key="v1_user_box"):
+        _uc1, _uc2 = st.columns([2.6, 1])
+        _uc1.markdown(f"<div class='v1-user'><b>👤 {_who}</b><br><span>🏢 {_org}</span></div>",
+                      unsafe_allow_html=True)
+        if _uc2.button("로그아웃", key="auth_logout_sidebar"):
+            _auth_logout()
 
 st.sidebar.markdown("""
 <style>
@@ -7944,7 +7948,7 @@ st.sidebar.markdown("""
 }
 </style>""", unsafe_allow_html=True)
 with st.sidebar.container(key="v1_guide_block"), st.expander(
-        "📘 데이터 작성 가이드 — 처음이면 꼭 보세요!", expanded=not bool(st.session_state.get("files"))):
+        "📘 데이터 작성 가이드 — 처음이면 꼭 보세요!", expanded=False):
     st.markdown("""
 **기본 원칙**
 - 첫 행에는 변수명만 입력
@@ -7997,6 +8001,8 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         file_name="스마트통계_데이터_양식.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="v1_tpl_main", width="stretch")
+# 가이드를 접어 두면 안에 무엇이 있는지 보이지 않으므로, 접힌 상태에서도 보이게 한 줄 남긴다.
+st.sidebar.caption("엑셀 양식·작성 예시·자주 틀리는 사례가 들어 있어요")
 
 # ---------------------------------------------------------------- 샘플 데이터 (2026-10-12 추가)
 # 올릴 자료가 없는 첫 사용자도 전체 흐름(분석→그래프→보고서)을 바로 볼 수 있게 가상의 예시 자료를 둔다.
@@ -8068,9 +8074,8 @@ def _render_sample_msg():
         st.warning(_m)
 
 
-st.sidebar.button("🎤 말로 데이터 입력", width="stretch", key="voice_open_side", on_click=_voice_open,
-                  help="음성 입력 화면으로 이동합니다. 말하는 동안 표가 바로 채워져요.")
-with st.sidebar.expander("📂 데이터 불러오기", expanded=True):
+# 🎤 말로 데이터 입력 버튼은 홈 화면과 '📂 데이터 불러오기 → 🎤 음성'에 있으므로 여기서는 두지 않는다.
+with st.sidebar.expander("📂 데이터 불러오기", expanded=False):
     # 올릴 자료가 없어도 먼저 둘러볼 수 있도록, 맨 위에 샘플 데이터를 둔다.
     if _sample_path():
         st.button("📋 샘플 데이터 불러오기", width="stretch", key="ssa_sample_load_side",
@@ -8361,17 +8366,8 @@ if _KOREAN_FONT is None:
                        "서버라면 `packages.txt`에 `fonts-nanum`을 넣고 다시 배포하세요.")
 
 # 메뉴를 옮겨 다니거나 시트를 바꿔도 화면 선택·분석 결과가 그대로 남게 한다.
+# (🔄 화면 선택 초기화 버튼은 가끔 쓰는 기능이라 메뉴 아래 '⚙️ 출력 및 그래프 설정' 옆으로 옮겼다)
 _pin_sync()
-if st.session_state.files and st.sidebar.button(
-        "🔄 이 데이터의 화면 선택 초기화", width="stretch",
-        help="열 선택이 꼬였을 때, 지금 선택한 데이터의 화면 선택만 처음 상태로 되돌립니다."):
-    for _k in _pin_scoped_keys():
-        try:
-            del st.session_state[_k]
-        except Exception:
-            pass
-    st.session_state.get("_pin_store", {}).pop(st.session_state.get("cur_key"), None)
-    st.rerun()
 
 # 메뉴 — V1은 분석 시작 3개만 강조, 보고서·AI·설명서는 보조 기능으로 작게 표시
 _MAIN_MENU_OPTIONS = ["⚡ 원클릭 분석", "📊 통계분석", "📋 설문조사 분석"]
@@ -8468,6 +8464,28 @@ _V1_REFERENCE_THEME_CSS = """
     border-right:1px solid #DCECDF !important;
 }
 
+/* 사이드바 최소 폭. 지정하지 않으면 브라우저에 저장된 값과 화면 배율(125·150%)에 따라
+   컴퓨터마다 폭이 달라 보인다. 최소값만 잡아 두고 더 넓히는 것은 그대로 허용한다. */
+[data-testid="stSidebar"] {min-width:340px !important;}
+[data-testid="stSidebar"] > div:first-child {min-width:340px !important;}
+@media (max-width: 900px) {
+    [data-testid="stSidebar"] {min-width:300px !important;}
+    [data-testid="stSidebar"] > div:first-child {min-width:300px !important;}
+}
+
+/* 사용자 정보 + 로그아웃(소속 옆 작은 버튼) */
+[data-testid="stSidebar"] .st-key-v1_user_box {margin:.1rem 0 .45rem 0;}
+[data-testid="stSidebar"] .v1-user {line-height:1.38; padding-top:.15rem;}
+[data-testid="stSidebar"] .v1-user b {color:#17344B; font-size:.95rem;}
+[data-testid="stSidebar"] .v1-user span {color:#5F6F66; font-size:.82rem;}
+[data-testid="stSidebar"] .st-key-auth_logout_sidebar button {
+    padding:.18rem .45rem !important; min-height:0 !important; border-radius:7px !important;
+    color:#6B7A72 !important; border-color:#DCE7DF !important; background:#FFFFFF !important;
+}
+[data-testid="stSidebar"] .st-key-auth_logout_sidebar button p {
+    font-size:.74rem !important; font-weight:600 !important; margin:0 !important;
+}
+
 /* 좌측 상단: 시안의 캐릭터 + 한 줄 브랜드명 */
 [data-testid="stSidebar"] .v1-sidebar-brand {
     position:relative; min-height:82px; padding:.42rem .10rem .30rem 4.35rem;
@@ -8527,14 +8545,37 @@ button[data-baseweb="tab"][aria-selected="true"] {color:#219B4B !important;}
 }
 
 /* 기존 사이드바 메뉴 구조는 유지하고 선택 색만 시안처럼 */
-[data-testid="stSidebar"] .v1-section-label {color:#6B7E72 !important;}
+/* '분석 시작'·'보조 기능' 묶음 제목을 한눈에 알아보게 키우고 왼쪽에 색 막대를 둔다. */
+[data-testid="stSidebar"] .v1-section-label {
+    display:flex !important; align-items:center !important; gap:.42rem !important;
+    color:#1F7C3F !important; font-size:.90rem !important; font-weight:900 !important;
+    letter-spacing:-.01em !important; margin:.70rem 0 .28rem .12rem !important;
+}
+[data-testid="stSidebar"] .v1-section-label::before {
+    content:""; width:4px; height:15px; border-radius:2px; background:#2FBE62; flex:none;
+}
+[data-testid="stSidebar"] .v1-section-label.sub {color:#3F7A55 !important;}
+[data-testid="stSidebar"] .v1-section-label.sub::before {background:#A8D7B8;}
+/* 메뉴 글씨도 함께 키운다(분석 메뉴는 주, 보조 기능은 부라는 위계는 유지). */
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label {
+    font-size:1.04rem !important; font-weight:780 !important;
+}
+[data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label p {
+    font-size:1.04rem !important; font-weight:780 !important;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label {
+    font-size:.90rem !important; font-weight:620 !important; padding:.34rem .58rem !important;
+}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label p {
+    font-size:.90rem !important; font-weight:620 !important;
+}
 [data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:hover {background:#EDF9F1 !important;}
 [data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:has(input:checked) {
     background:linear-gradient(90deg,#35BE62 0%,#48C96F 100%) !important;
     box-shadow:0 5px 12px rgba(46,174,86,.16) !important; color:#FFFFFF !important;
 }
 [data-testid="stSidebar"] .st-key-main_menu_block [role="radiogroup"] label:has(input:checked) p {color:#FFFFFF !important;}
-[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label {color:#64766B !important;}
+[data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label {color:#52685C !important;}
 [data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:hover {background:#F1F9F3 !important;}
 [data-testid="stSidebar"] .st-key-support_menu_block [role="radiogroup"] label:has(input:checked) {
     background:#EAF7EE !important; color:#2A6540 !important;
@@ -8626,7 +8667,7 @@ with st.sidebar.container(key="main_menu_block"):
     st.radio("주요 기능", _MAIN_MENU_OPTIONS, index=_main_idx, key="menu_main",
              label_visibility="collapsed", on_change=_menu_from_main)
 
-st.sidebar.markdown('<div class="v1-section-label">보조 기능</div>', unsafe_allow_html=True)
+st.sidebar.markdown('<div class="v1-section-label sub">보조 기능</div>', unsafe_allow_html=True)
 _current_menu = st.session_state.get("menu_choice")
 with st.sidebar.container(key="support_menu_block"):
     _support_idx = (_SUPPORT_MENU_OPTIONS.index(_current_menu) if _current_menu in _SUPPORT_MENU_OPTIONS else None)
@@ -8693,6 +8734,18 @@ with st.sidebar.expander("⚙️ 출력 및 그래프 설정", expanded=False):
         st.checkbox("격자선 표시", value=False, key="fig_grid",
                     help="'깔끔한 스타일'을 켜면 가로 격자선은 자동으로 들어갑니다.")
         st.checkbox("그래프 제목 표시", value=True, key="fig_title")
+
+# 화면 선택이 꼬였을 때만 쓰는 기능이라 설정 바로 아래에 둔다(메뉴 앞을 막지 않게).
+if st.session_state.get("files") and st.sidebar.button(
+        "🔄 이 데이터의 화면 선택 초기화", width="stretch",
+        help="열 선택이 꼬였을 때, 지금 선택한 데이터의 화면 선택만 처음 상태로 되돌립니다."):
+    for _k in _pin_scoped_keys():
+        try:
+            del st.session_state[_k]
+        except Exception:
+            pass
+    st.session_state.get("_pin_store", {}).pop(st.session_state.get("cur_key"), None)
+    st.rerun()
 
 # V2 전문형 안내: 캡션(작은 회색 글씨) 대신 읽기 쉬운 안내 카드로 보여 준다.
 st.sidebar.divider()
@@ -10578,6 +10631,8 @@ _V1_HOME_CSS = """
 .h-step .d {color:#5F6F66; font-size:.88rem; margin-top:.35rem; line-height:1.45;}
 .h-arrow {display:flex; align-items:center; color:#9CCBAA; font-size:1.3rem; font-weight:700;}
 .h-sec {font-size:1.12rem; font-weight:800; color:#17344B; margin:.3rem 0 .7rem 0;}
+.h-hint {font-size:.85rem; font-weight:600; color:#7A8C81;}
+.h-hint b {color:#2A6540;}
 .h-tag {display:inline-block; font-size:.7rem; font-weight:700; color:#2B8A4B; background:#E6F6EC;
         border-radius:6px; padding:.05rem .4rem; margin-left:.3rem; vertical-align:middle;}
 .h-tag.gray {color:#6B7A72; background:#EEF2EF;}
@@ -10615,10 +10670,10 @@ _V1_HOME_STEPS = """
     <div class="d">형식이 헷갈리면 왼쪽 <b>📘 데이터 작성 가이드</b>의 예시와 양식을 참고하세요.</div></div>
   <div class="h-arrow">›</div>
   <div class="h-step"><span class="n">2</span><span class="t">파일 올리기</span>
-    <div class="d">왼쪽 <b>📂 데이터 불러오기</b>에 올리면 <b>자동으로 점검</b>해 드려요.</div></div>
+    <div class="d">왼쪽 <b>📂 데이터 불러오기를 눌러 열고</b> 파일을 올리면 <b>자동으로 점검</b>해 드려요.</div></div>
   <div class="h-arrow">›</div>
   <div class="h-step"><span class="n">3</span><span class="t">분석 고르기</span>
-    <div class="d">처음이라면 <b>⚡ 원클릭 분석</b> 한 번이면 충분해요.</div></div>
+    <div class="d">처음이라면 <b>⚡ 원클릭 분석</b> 한 번이면 충분해요.<br><b>왼쪽 메뉴에서 분석 방법을 골라 주세요.</b></div></div>
   <div class="h-arrow">›</div>
   <div class="h-step"><span class="n">4</span><span class="t">결과 저장</span>
     <div class="d">표·그래프·보고서 문장을 <b>한글·워드·엑셀</b>로 받아요.</div></div>
@@ -10663,7 +10718,7 @@ def render_v1_home():
 <div class="h-lead">처음 오셨나요? 4단계면 끝나요 🌱</div>
 <div class="h-sub">실험 데이터를 올리면 통계분석부터 그래프·보고서 문장까지 자동으로 만들어 드려요.</div>
 """ + _V1_HOME_STEPS + """
-<div class="h-sec">메뉴 한눈에 보기</div>
+<div class="h-sec">메뉴 한눈에 보기 <span class="h-hint">— 실행은 <b>왼쪽 메뉴 버튼</b>을 눌러 주세요</span></div>
 <table class="h-table">
   <tr><th style="width:190px">메뉴</th><th>이런 때 사용합니다</th><th style="width:330px">할 수 있는 것</th></tr>
   <tr class="grp"><td colspan="3">분석 시작</td></tr>
