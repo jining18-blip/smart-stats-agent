@@ -7935,7 +7935,14 @@ if _auth_u:
 st.sidebar.markdown("""
 <style>
 [data-testid="stSidebar"] .st-key-v1_guide_block [data-testid="stExpander"] details {
-    border:2px solid #F2C94C !important; background:#FFFBEA !important; border-radius:12px !important;
+    border:2px solid #F2C94C !important; background:#FFFBEA !important;
+    border-radius:12px 12px 0 0 !important; border-bottom:none !important;
+}
+/* 접혀 있어도 안에 무엇이 있는지 보이게, 같은 노란 상자 아래쪽에 붙여서 한 줄 둔다. */
+[data-testid="stSidebar"] .v1-guide-hint {
+    margin:-.95rem 0 .1rem 0; border:2px solid #F2C94C; border-top:none;
+    border-radius:0 0 12px 12px; background:#FFFBEA; padding:.38rem .95rem .46rem .95rem;
+    color:#8A6A14; font-size:.80rem; line-height:1.4;
 }
 [data-testid="stSidebar"] .st-key-v1_guide_block [data-testid="stExpander"] summary p {
     font-weight:800 !important; color:#7A5A00 !important; font-size:1rem !important;
@@ -8001,8 +8008,9 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         file_name="스마트통계_데이터_양식.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="v1_tpl_main", width="stretch")
-# 가이드를 접어 두면 안에 무엇이 있는지 보이지 않으므로, 접힌 상태에서도 보이게 한 줄 남긴다.
-st.sidebar.caption("엑셀 양식·작성 예시·자주 틀리는 사례가 들어 있어요")
+# 가이드를 접어 두면 안에 무엇이 있는지 보이지 않으므로, 노란 상자 아래쪽에 붙여 한 줄 남긴다.
+st.sidebar.markdown('<div class="v1-guide-hint">엑셀 양식 · 작성 예시 · 자주 틀리는 사례가 들어 있어요</div>',
+                    unsafe_allow_html=True)
 
 # ---------------------------------------------------------------- 샘플 데이터 (2026-10-12 추가)
 # 올릴 자료가 없는 첫 사용자도 전체 흐름(분석→그래프→보고서)을 바로 볼 수 있게 가상의 예시 자료를 둔다.
@@ -8479,16 +8487,19 @@ _V1_REFERENCE_THEME_CSS = """
 [data-testid="stSidebar"] .v1-user b {color:#17344B; font-size:.95rem;}
 [data-testid="stSidebar"] .v1-user span {color:#5F6F66; font-size:.82rem;}
 [data-testid="stSidebar"] .st-key-auth_logout_sidebar button {
-    padding:.18rem .45rem !important; min-height:0 !important; border-radius:7px !important;
-    color:#6B7A72 !important; border-color:#DCE7DF !important; background:#FFFFFF !important;
+    padding:.42rem .80rem !important; border-radius:9px !important;
+    color:#3F5247 !important; border-color:#C8E8D2 !important; background:#FFFFFF !important;
+}
+[data-testid="stSidebar"] .st-key-auth_logout_sidebar button:hover {
+    background:#F1FAF4 !important; border-color:#73CE8D !important; color:#1F7C3F !important;
 }
 [data-testid="stSidebar"] .st-key-auth_logout_sidebar button p {
-    font-size:.74rem !important; font-weight:600 !important; margin:0 !important;
+    font-size:.88rem !important; font-weight:600 !important; margin:0 !important;
 }
 
 /* 좌측 상단: 시안의 캐릭터 + 한 줄 브랜드명 */
 [data-testid="stSidebar"] .v1-sidebar-brand {
-    position:relative; min-height:82px; padding:.42rem .10rem .30rem 4.35rem;
+    position:relative; min-height:82px; padding:.42rem .10rem .30rem 5.35rem;
     margin:.02rem 0 .28rem 0; display:flex; flex-direction:column; justify-content:center;
 }
 [data-testid="stSidebar"] .v1-sidebar-brand::before {
