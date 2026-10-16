@@ -8486,8 +8486,13 @@ _V1_REFERENCE_THEME_CSS = """
 [data-testid="stSidebar"] .v1-user {line-height:1.38; padding-top:.15rem;}
 [data-testid="stSidebar"] .v1-user b {color:#17344B; font-size:.95rem;}
 [data-testid="stSidebar"] .v1-user span {color:#5F6F66; font-size:.82rem;}
-/* 로그아웃 버튼을 아래 상자들과 오른쪽 끝을 맞춘다. */
-[data-testid="stSidebar"] .st-key-v1_user_box [data-testid="stColumn"]:last-child {
+/* 로그아웃 버튼을 아래 상자들과 오른쪽 끝을 맞춘다.
+   (스트림릿 버전마다 열(column)의 표시 이름이 달라서, 버튼 자체를 기준으로도 함께 잡는다) */
+[data-testid="stSidebar"] .st-key-auth_logout_sidebar {
+    display:flex !important; justify-content:flex-end !important; width:100% !important;
+}
+[data-testid="stSidebar"] .st-key-v1_user_box [data-testid="stColumn"]:last-child,
+[data-testid="stSidebar"] .st-key-v1_user_box [data-testid="column"]:last-child {
     display:flex !important; justify-content:flex-end !important; align-items:center !important;
 }
 [data-testid="stSidebar"] .st-key-auth_logout_sidebar button {
