@@ -23,7 +23,8 @@ APP = Path(__file__).resolve().parents[1] / "app.py"
 def _load(start_marker, end_marker):
     src = APP.read_text(encoding="utf-8")
     seg = src[src.index(start_marker):src.index(end_marker)]
-    ns = {"np": np, "pd": pd, "stats": stats,
+    import streamlit as st
+    ns = {"np": np, "pd": pd, "stats": stats, "st": st,
           "studentized_range": studentized_range}
     exec(seg, ns)
     return ns

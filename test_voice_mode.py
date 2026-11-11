@@ -54,6 +54,7 @@ def _script():
         dataframe_to_styled_xlsx = lambda df, *a, **k: b"x"
         clean_columns = lambda df: df
 
+        _SITE_NOTICE, _SITE_NOTICE_UNTIL = "", ""   # 앱 맨 위에서 정의되는 공지(구간 밖)
         _src = open({str(APP)!r}, encoding="utf-8").read()
         exec(_src[_src.index({START!r}):_src.index({END!r})])
 

@@ -18,6 +18,12 @@ _SRC = APP.read_text(encoding="utf-8")
 class _FakeSt:
     session_state = {"hdr_rows": 1}
 
+    @staticmethod
+    def cache_data(func=None, **_kw):          # 화면 없이 실행하므로 캐시는 그대로 통과시킨다
+        return func if func is not None else (lambda f: f)
+
+    cache_resource = cache_data
+
 
 @pytest.fixture(scope="module")
 def ck():

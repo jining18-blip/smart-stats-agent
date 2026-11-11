@@ -37,8 +37,11 @@ def ns():
     import numpy as np, pandas as pd
     import streamlit as st
     import re
-    n = {"st": st, "np": np, "pd": pd, "re": re, "_requests": None,
-         "CONTACT_NAME": "문의처", "CONTACT_EMAIL": "help@example.kr"}
+    import io
+    from collections import Counter
+    n = {"st": st, "np": np, "pd": pd, "re": re, "io": io, "Counter": Counter, "_requests": None,
+         "CONTACT_NAME": "문의처", "CONTACT_EMAIL": "help@example.kr", "APP_VERSION": "V1",
+         "_SITE_NOTICE": "", "_SITE_NOTICE_UNTIL": ""}
     exec(SEG, n)
     return n
 
@@ -191,6 +194,10 @@ def _script():
         _requests = FakeRequests()
         _src = open({str(APP)!r}, encoding="utf-8").read()
         CONTACT_NAME, CONTACT_EMAIL = "문의처", "help@example.kr"   # 앱 맨 위에서 정의되는 문의처
+        _SITE_NOTICE, _SITE_NOTICE_UNTIL = "", ""                    # 앱 맨 위에서 정의되는 공지
+        APP_VERSION = "V1"                                           # 앱 맨 위에서 정의되는 버전
+        import io
+        from collections import Counter
         exec(_src[_src.index({START!r}):_src.index({END!r})])
         _fs_session = lambda: FakeFirestore()
         _fb_admin_session = lambda: FakeAuthAdmin() if S.get("_fake_admin") else None
@@ -205,6 +212,14 @@ def _script():
             m = re.search(r"getItem\('([^']+)'\)", expr)
             if m:
                 out = S["_ls"].get(m.group(1), "")
+            elif "setItem" in expr and "JSON.stringify({{rt:" in expr:
+                # 로그인 유지: 만료 시각은 브라우저(Date.now)에서 계산한다.
+                m = re.search(r"setItem\\('([^']+)', JSON\\.stringify\\(\\{{rt: (\\x22[^\\x22]*\\x22), "
+                              r"exp: Date\\.now\\(\\) / 1000 \\+ (\\d+)\\}}\\)\\)", expr)
+                import time as _t
+                S["_ls"][m.group(1)] = json.dumps({{"rt": json.loads(m.group(2)),
+                                                   "exp": _t.time() + int(m.group(3))}})
+                out = "ok"
             elif "setItem" in expr:
                 m = re.search(r"setItem\\('([^']+)', (\\x22.*\\x22)\\)", expr)
                 S["_ls"][m.group(1)] = json.loads(m.group(2))
@@ -381,7 +396,7 @@ def test_usage_logging_and_admin_dashboard():
     assert any("관리자" in t.value for t in at.title)
     labels = {m.label: m.value for m in at.metric}
     assert labels["가입 사용자"] == "2명"
-    assert labels["기능 이용 기록"] == "1회"
+    assert labels["기능 이용 (중복 제외)"] == "1회"
 
     # 예전 방식으로 직접 입력된 기관명이 하나 더 생긴 상황
     at.session_state["_docs"]["profiles/uid-old"] = {
