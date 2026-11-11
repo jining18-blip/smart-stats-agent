@@ -7953,6 +7953,23 @@ st.sidebar.markdown("""
 [data-testid="stSidebar"] .st-key-v1_guide_block [data-testid="stExpander"] [data-testid="stExpander"] summary p {
     font-weight:600 !important; color:#5B4A1A !important; font-size:.9rem !important;
 }
+/* '사례 고르기'가 눌러서 고르는 칸인 줄 모르고 지나치는 일이 많아, 테두리와 글씨를 또렷하게 한다. */
+[data-testid="stSidebar"] .st-key-sup_wrong_case label p {
+    font-weight:800 !important; color:#1F4E79 !important; font-size:.92rem !important;
+}
+[data-testid="stSidebar"] .st-key-sup_wrong_case [data-baseweb="select"] > div {
+    border:2px solid #3D6F9F !important; background:#FFFFFF !important;
+    border-radius:8px !important; box-shadow:0 1px 5px rgba(61,111,159,.20) !important;
+}
+[data-testid="stSidebar"] .st-key-sup_wrong_case [data-baseweb="select"] > div:hover {
+    border-color:#1F4E79 !important; background:#F5FAFF !important;
+}
+[data-testid="stSidebar"] .st-key-sup_wrong_case [data-baseweb="select"] svg {
+    color:#3D6F9F !important; fill:#3D6F9F !important;
+}
+[data-testid="stSidebar"] .v1-case-hint {
+    margin:.22rem 0 .5rem 0; color:#1F4E79; font-size:.78rem; font-weight:700; line-height:1.4;
+}
 </style>""", unsafe_allow_html=True)
 with st.sidebar.container(key="v1_guide_block"), st.expander(
         "📘 데이터 작성 가이드 — 처음이면 꼭 보세요!", expanded=False):
@@ -7975,6 +7992,9 @@ with st.sidebar.container(key="v1_guide_block"), st.expander(
         _cases = _v1_wrong_cases()
         _pick = st.selectbox("사례 고르기", [f"{i}. {c['name']}" for i, c in enumerate(_cases, 1)],
                              key="sup_wrong_case")
+        # 고를 수 있는 칸이라는 것을 눈에 띄게 알려 준다(위 CSS에서 테두리도 함께 강조).
+        st.markdown(f"<div class='v1-case-hint'>👆 눌러서 사례 {len(_cases)}가지를 모두 볼 수 있어요</div>",
+                    unsafe_allow_html=True)
         _c = _cases[int(_pick.split(".")[0]) - 1]
         st.markdown(_c["why"])
         st.markdown("**❌ 이렇게 쓰면**")
@@ -10642,6 +10662,18 @@ _V1_HOME_CSS = """
 .st-key-voice_open_home {max-width:100%; width:100%; margin-left:auto; margin-right:auto;}
 .h-lead {font-size:1.55rem; font-weight:800; color:#17344B; margin:.2rem 0 .25rem 0; letter-spacing:-.02em;}
 .h-sub {font-size:1rem; color:#5F6F66; margin-bottom:1.1rem;}
+/* 안내 문구(왼쪽)와 버튼 두 개(오른쪽)를 한 줄에 나란히 두는 머리 영역 */
+.st-key-v1_home_head {margin:.2rem 0 1.2rem 0;}
+.st-key-v1_home_head .h-lead {margin:0 0 .2rem 0;}
+.st-key-v1_home_head .h-sub {margin-bottom:0;}
+/* 버튼이 반 폭으로 좁아지므로 글씨를 두 줄로 접어 높이를 맞춘다 */
+.st-key-v1_home_head .stButton button {min-height:3.2rem; white-space:normal; line-height:1.32;}
+@media (max-width: 900px) {
+  /* 휴대폰에서는 위아래로 쌓이므로 문구와 버튼 사이에 간격을 준다 */
+  .st-key-v1_home_head {margin-bottom:.9rem;}
+  .st-key-v1_home_head .h-sub {margin-bottom:.75rem;}
+  .st-key-v1_home_head .stButton button {min-height:2.8rem;}
+}
 .h-steps {display:flex; gap:.6rem; align-items:stretch; margin-bottom:1.5rem; flex-wrap:wrap;}
 .h-step {flex:1 1 0; min-width:170px; background:#FFFFFF; border:1px solid #D7EBDD; border-radius:14px;
          padding:.85rem 1rem; box-shadow:0 2px 8px rgba(47,190,98,.06);}
@@ -10680,6 +10712,37 @@ _V1_HOME_CSS = """
 }
 @media (max-width: 640px) {
   .h-table th:nth-child(3), .h-table td:nth-child(3) {display:none;}
+}
+
+/* ---- 홈 화면 높이 줄이기 (2026-11-03) ----------------------------------
+   아래쪽 Version 2 안내와 팁까지 한 화면에 들어오도록 위아래 여백만 좁힌다.
+   글씨 크기·색·배치는 그대로이고, 이 묶음은 홈 화면에서만 적용된다.
+   되돌리려면 이 묶음(여기부터 스타일 끝 표시 앞까지)만 지우면 된다.
+   주의: 주석 안에도 스타일 끝 표시를 적으면 안 된다. 브라우저가 그 자리에서
+   스타일을 끝내 버려서, 뒤쪽 내용이 화면에 글자로 쏟아진다. */
+.h-wrap {padding-bottom:2.8rem;}
+/* 위쪽 배너를 조금 낮춰 본문을 끌어올린다(홈 화면에서만) */
+.v1-hero {min-height:126px; margin:1.0rem 0 .7rem 0;}
+.v1-hero-copy {padding-top:26px; padding-bottom:18px;}
+.st-key-v1_hero_box {margin:1.0rem 0 .7rem 0;}
+.st-key-v1_home_head {margin:.1rem 0 .85rem 0;}
+.h-lead {font-size:1.42rem;}
+.h-sub {font-size:.95rem;}
+.h-steps {margin-bottom:1.0rem;}
+.h-step {padding:.66rem .9rem;}
+.h-step .d {margin-top:.26rem; line-height:1.4;}
+.h-sec {margin:.1rem 0 .48rem 0;}
+.h-table {margin-bottom:.85rem;}
+.h-table th {padding:.44rem .85rem;}
+.h-table td {padding:.44rem .85rem;}
+.h-table tr.grp td {padding:.24rem .85rem;}
+.h-v2 {padding:.78rem 1.1rem; margin-bottom:.8rem;}
+.h-v2 .ds {margin-top:.2rem; line-height:1.4;}
+.h-tip {padding:.45rem .75rem;}
+@media (max-width: 900px) {
+  /* 휴대폰은 원래 세로로 길게 보므로 배너는 기존 높이를 쓴다 */
+  .v1-hero {min-height:132px;}
+  .v1-hero-copy {padding-top:26px; padding-bottom:18px;}
 }
 </style>
 """
@@ -10725,18 +10788,30 @@ def render_v1_home():
         st.info(f"**{_picked}**을(를) 쓰려면 먼저 왼쪽 **📂 데이터 불러오기**에서 데이터를 올려 주세요.")
     v2_btn = (f'<a class="bt" href="{_html.escape(V2_APP_URL, quote=True)}" target="_blank" rel="noopener">Version 2 열기 ↗</a>'
               if V2_APP_URL else "")
-    # 휴대폰에서는 사이드바가 접혀 있으므로 첫 화면에 바로 보이게 둔다.
-    st.button("🎤 현장에서 음성으로 데이터 입력하기", type="primary", width="stretch", key="voice_open_home",
-              on_click=_voice_open, help="말하는 동안 표가 바로 채워집니다. 다 입력하면 '이 표로 바로 분석하기'를 누르세요.")
-    # 올릴 자료가 아직 없는 사람이 흐름을 먼저 볼 수 있게 샘플 데이터를 바로 불러온다.
-    if _sample_path():
-        st.button("📋 샘플 데이터로 둘러보기 (가상자료)", width="stretch", key="ssa_sample_load_home",
-                  on_click=_load_sample_data,
-                  help="고추 포장시험·현장설문 예시 자료를 불러와 ⚡ 원클릭 분석을 바로 보여 줍니다.")
-    st.markdown(_V1_HOME_CSS + """
+    # 안내 문구(왼쪽)와 버튼 두 개(오른쪽)를 한 줄에 나란히 둔다. 버튼이 세로로 쌓이지 않아
+    # 아래 '메뉴 한눈에 보기'가 그만큼 위로 올라온다. 휴대폰에서는 자동으로 위아래로 쌓인다.
+    st.markdown(_V1_HOME_CSS, unsafe_allow_html=True)
+    _has_sample = bool(_sample_path())
+    with st.container(key="v1_home_head"):
+        _h_left, _h_right = st.columns([1.3, 1], vertical_alignment="center")
+        _h_left.markdown(
+            '<div class="h-lead">처음 오셨나요? 4단계면 끝나요 🌱</div>'
+            '<div class="h-sub">실험 데이터를 올리면 통계분석부터 그래프·보고서 문장까지'
+            ' 자동으로 만들어 드려요.</div>', unsafe_allow_html=True)
+        with _h_right:
+            # 샘플이 없으면 음성 버튼이 오른쪽을 혼자 쓴다(샘플 파일을 안 올린 경우).
+            _b_voice, _b_sample = st.columns(2) if _has_sample else (st.container(), None)
+            # 휴대폰에서는 사이드바가 접혀 있으므로 첫 화면에 바로 보이게 둔다.
+            _b_voice.button("🎤 현장에서 음성으로 데이터 입력하기", type="primary", width="stretch",
+                            key="voice_open_home", on_click=_voice_open,
+                            help="말하는 동안 표가 바로 채워집니다. 다 입력하면 '이 표로 바로 분석하기'를 누르세요.")
+            # 올릴 자료가 아직 없는 사람이 흐름을 먼저 볼 수 있게 샘플 데이터를 바로 불러온다.
+            if _b_sample is not None:
+                _b_sample.button("📋 샘플 데이터로 둘러보기 (가상자료)", width="stretch",
+                                 key="ssa_sample_load_home", on_click=_load_sample_data,
+                                 help="고추 포장시험·현장설문 예시 자료를 불러와 ⚡ 원클릭 분석을 바로 보여 줍니다.")
+    st.markdown("""
 <div class="h-wrap">
-<div class="h-lead">처음 오셨나요? 4단계면 끝나요 🌱</div>
-<div class="h-sub">실험 데이터를 올리면 통계분석부터 그래프·보고서 문장까지 자동으로 만들어 드려요.</div>
 """ + _V1_HOME_STEPS + """
 <div class="h-sec">메뉴 한눈에 보기 <span class="h-hint">— 실행은 <b>왼쪽 메뉴 버튼</b>을 눌러 주세요</span></div>
 <table class="h-table">
